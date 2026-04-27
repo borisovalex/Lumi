@@ -895,6 +895,7 @@ public partial class ChatViewModel : ObservableObject
 
                 // Restore unsent composer draft for this chat
                 PromptText = _chatDrafts.TryGetValue(chat.Id, out var draft) ? draft : "";
+                RestoreSuggestionsForChat(chat);
 
                 if (previousChat is not null)
                 {
@@ -1463,6 +1464,7 @@ public partial class ChatViewModel : ObservableObject
 
         // Capture before any async operations — CurrentChat may change if the user switches chats
         var targetChat = CurrentChat!;
+        ClearPersistedSuggestions(targetChat);
         targetChat.LastModelUsed = SelectedModel;
         targetChat.LastReasoningEffortUsed = selectedReasoningEffort;
 
@@ -2332,6 +2334,15 @@ public partial class ChatViewModel : ObservableObject
         _ = SaveChatAsync(chat, saveIndex, releaseIfInactive);
     }
 
+    private void QueueSaveChatIndex(Chat chat)
+    {
+        if (!_dataStore.Data.Settings.AutoSaveChats)
+            return;
+
+        _dataStore.MarkChatChanged(chat);
+        _ = SaveIndexAsync();
+    }
+
     private void QueueGeneratedChatTitle(Chat chat, string firstUserMessage)
     {
         if (!_dataStore.Data.Settings.AutoGenerateTitles || string.IsNullOrWhiteSpace(firstUserMessage))
@@ -2474,14 +2485,18 @@ public partial class ChatViewModel : ObservableObject
         if (_suggestionGenerationInFlightChats.Contains(chat.Id))
             return;
 
-        var lastAssistant = chat.Messages.LastOrDefault(m =>
-            m.Role == "assistant" && !string.IsNullOrWhiteSpace(m.Content));
+        var lastAssistant = GetLatestSuggestionEligibleAssistantMessage(chat);
         if (lastAssistant is null)
             return;
 
-        if (_lastSuggestedAssistantMessageByChat.TryGetValue(chat.Id, out var lastSuggestedId)
-            && lastSuggestedId == lastAssistant.Id)
+        var lastSuggestedId = chat.FollowUpSuggestionAssistantMessageId;
+        if ((!lastSuggestedId.HasValue
+                && _lastSuggestedAssistantMessageByChat.TryGetValue(chat.Id, out var trackedSuggestedId)
+                && trackedSuggestedId == lastAssistant.Id)
+            || lastSuggestedId == lastAssistant.Id)
+        {
             return;
+        }
 
         _suggestionGenerationInFlightChats.Add(chat.Id);
         _ = GenerateSuggestionsAsync(chat, lastAssistant.Id);
@@ -2514,17 +2529,16 @@ public partial class ChatViewModel : ObservableObject
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                if (CurrentChat?.Id != chat.Id) return;
-
                 // If another assistant message arrived, don't overwrite with stale suggestions.
-                var latestAssistantId = chat.Messages
-                    .LastOrDefault(m => m.Role == "assistant" && !string.IsNullOrWhiteSpace(m.Content))?.Id;
-                if (latestAssistantId != assistantMessageId)
+                var latestAssistantId = GetLatestSuggestionEligibleAssistantMessageId(chat);
+                if (chat.Messages.Count > 0 && latestAssistantId != assistantMessageId)
                     return;
 
-                SuggestionA = suggestions?.ElementAtOrDefault(0) ?? "";
-                SuggestionB = suggestions?.ElementAtOrDefault(1) ?? "";
-                SuggestionC = suggestions?.ElementAtOrDefault(2) ?? "";
+                var normalizedSuggestions = NormalizeFollowUpSuggestions(suggestions);
+                StoreGeneratedSuggestions(chat, assistantMessageId, normalizedSuggestions);
+                if (CurrentChat?.Id == chat.Id)
+                    ApplyDisplayedSuggestions(normalizedSuggestions);
+
                 suggestionsApplied = true;
             });
         }
@@ -2690,11 +2704,77 @@ public partial class ChatViewModel : ObservableObject
         Guid? LatestUserMessageId,
         IReadOnlyDictionary<Guid, IReadOnlyList<ChatMessage>> LoadedMessageSnapshots);
 
+    private static ChatMessage? GetLatestSuggestionEligibleAssistantMessage(Chat chat)
+    {
+        var assistantIndex = chat.Messages.FindLastIndex(static m =>
+            m.Role == "assistant" && !string.IsNullOrWhiteSpace(m.Content));
+        if (assistantIndex < 0)
+            return null;
+
+        var userIndex = chat.Messages.FindLastIndex(static m =>
+            m.Role == "user" && !string.IsNullOrWhiteSpace(m.Content));
+        return userIndex > assistantIndex ? null : chat.Messages[assistantIndex];
+    }
+
+    private static Guid? GetLatestSuggestionEligibleAssistantMessageId(Chat chat)
+        => GetLatestSuggestionEligibleAssistantMessage(chat)?.Id;
+
+    private static List<string> NormalizeFollowUpSuggestions(IEnumerable<string>? suggestions)
+        => suggestions?
+            .Where(static suggestion => !string.IsNullOrWhiteSpace(suggestion))
+            .Select(static suggestion => suggestion.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Take(3)
+            .ToList() ?? [];
+
+    private void ApplyDisplayedSuggestions(IReadOnlyList<string> suggestions)
+    {
+        SuggestionA = suggestions.ElementAtOrDefault(0) ?? "";
+        SuggestionB = suggestions.ElementAtOrDefault(1) ?? "";
+        SuggestionC = suggestions.ElementAtOrDefault(2) ?? "";
+    }
+
+    private void RestoreSuggestionsForChat(Chat chat)
+    {
+        ApplyDisplayedSuggestions([]);
+
+        if (_suggestionGenerationInFlightChats.Contains(chat.Id))
+        {
+            IsSuggestionsGenerating = true;
+            return;
+        }
+
+        IsSuggestionsGenerating = false;
+        if (chat.FollowUpSuggestionAssistantMessageId is null
+            || chat.FollowUpSuggestionAssistantMessageId != GetLatestSuggestionEligibleAssistantMessageId(chat))
+        {
+            return;
+        }
+
+        ApplyDisplayedSuggestions(chat.FollowUpSuggestions);
+    }
+
+    private void StoreGeneratedSuggestions(Chat chat, Guid assistantMessageId, IReadOnlyList<string> suggestions)
+    {
+        chat.FollowUpSuggestions = [..suggestions];
+        chat.FollowUpSuggestionAssistantMessageId = assistantMessageId;
+        _lastSuggestedAssistantMessageByChat[chat.Id] = assistantMessageId;
+        QueueSaveChatIndex(chat);
+    }
+
+    private void ClearPersistedSuggestions(Chat chat)
+    {
+        if (chat.FollowUpSuggestions.Count == 0 && chat.FollowUpSuggestionAssistantMessageId is null)
+            return;
+
+        chat.FollowUpSuggestions = [];
+        chat.FollowUpSuggestionAssistantMessageId = null;
+        _lastSuggestedAssistantMessageByChat.Remove(chat.Id);
+    }
+
     private void ClearSuggestions()
     {
-        SuggestionA = "";
-        SuggestionB = "";
-        SuggestionC = "";
+        ApplyDisplayedSuggestions([]);
         IsSuggestionsGenerating = false;
     }
 

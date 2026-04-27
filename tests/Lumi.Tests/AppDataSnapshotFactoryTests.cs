@@ -73,6 +73,33 @@ public class AppDataSnapshotFactoryTests
     }
 
     [Fact]
+    public void AppDataJsonContext_SerializesChatFollowUpSuggestions()
+    {
+        var assistantMessageId = Guid.NewGuid();
+        var data = new AppData
+        {
+            Chats =
+            [
+                CreateChat(
+                    Guid.NewGuid(),
+                    title: "Suggestion check",
+                    copilotSessionId: null,
+                    updatedAt: new DateTimeOffset(2026, 4, 27, 17, 0, 0, TimeSpan.Zero),
+                    followUpSuggestions: ["Run code review", "Push changes"],
+                    followUpSuggestionAssistantMessageId: assistantMessageId)
+            ]
+        };
+
+        var json = JsonSerializer.Serialize(data, AppDataJsonContext.Default.AppData);
+        using var document = JsonDocument.Parse(json);
+
+        var chat = document.RootElement.GetProperty("chats")[0];
+        Assert.Equal("Run code review", chat.GetProperty("followUpSuggestions")[0].GetString());
+        Assert.Equal("Push changes", chat.GetProperty("followUpSuggestions")[1].GetString());
+        Assert.Equal(assistantMessageId, chat.GetProperty("followUpSuggestionAssistantMessageId").GetGuid());
+    }
+
+    [Fact]
     public void AppDataJsonContext_DeserializesMissingExternalSkillNamesAsEmptyList()
     {
         var chatId = Guid.NewGuid();
@@ -100,6 +127,8 @@ public class AppDataSnapshotFactoryTests
         var chat = Assert.Single(data!.Chats);
         Assert.NotNull(chat.ActiveExternalSkillNames);
         Assert.Empty(chat.ActiveExternalSkillNames);
+        Assert.NotNull(chat.FollowUpSuggestions);
+        Assert.Empty(chat.FollowUpSuggestions);
     }
 
     [Fact]
@@ -226,7 +255,9 @@ public class AppDataSnapshotFactoryTests
                     lastReasoningEffortUsed: "high",
                     totalInputTokens: 100,
                     totalOutputTokens: 200,
-                    planContent: "updated plan")
+                    planContent: "updated plan",
+                    followUpSuggestions: ["Run code review", "Push changes"],
+                    followUpSuggestionAssistantMessageId: chatId)
             ]
         };
         var persistedSnapshot = new AppData
@@ -261,6 +292,8 @@ public class AppDataSnapshotFactoryTests
         Assert.Equal(100, chat.TotalInputTokens);
         Assert.Equal(200, chat.TotalOutputTokens);
         Assert.Equal("updated plan", chat.PlanContent);
+        Assert.Equal(["Run code review", "Push changes"], chat.FollowUpSuggestions);
+        Assert.Equal(chatId, chat.FollowUpSuggestionAssistantMessageId);
     }
 
     [Fact]
@@ -440,7 +473,9 @@ public class AppDataSnapshotFactoryTests
         string? lastReasoningEffortUsed = null,
         long totalInputTokens = 0,
         long totalOutputTokens = 0,
-        string? planContent = null)
+        string? planContent = null,
+        List<string>? followUpSuggestions = null,
+        Guid? followUpSuggestionAssistantMessageId = null)
     {
         return new Chat
         {
@@ -454,7 +489,9 @@ public class AppDataSnapshotFactoryTests
             LastReasoningEffortUsed = lastReasoningEffortUsed,
             TotalInputTokens = totalInputTokens,
             TotalOutputTokens = totalOutputTokens,
-            PlanContent = planContent
+            PlanContent = planContent,
+            FollowUpSuggestions = followUpSuggestions ?? [],
+            FollowUpSuggestionAssistantMessageId = followUpSuggestionAssistantMessageId
         };
     }
 

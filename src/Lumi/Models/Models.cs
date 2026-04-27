@@ -48,6 +48,7 @@ public class Chat : INotifyPropertyChanged
     private bool _isRunning;
     private bool _hasUnreadMessages;
     private List<string> _activeExternalSkillNames = [];
+    private List<string> _followUpSuggestions = [];
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Title { get; set; } = "New Chat";
@@ -89,6 +90,16 @@ public class Chat : INotifyPropertyChanged
 
     /// <summary>Persisted plan content (markdown) so it survives chat switches and app restarts.</summary>
     public string? PlanContent { get; set; }
+
+    /// <summary>Generated follow-up suggestions for the latest completed assistant turn.</summary>
+    public List<string> FollowUpSuggestions
+    {
+        get => _followUpSuggestions;
+        set => _followUpSuggestions = value ?? [];
+    }
+
+    /// <summary>Assistant message ID that produced <see cref="FollowUpSuggestions"/>.</summary>
+    public Guid? FollowUpSuggestionAssistantMessageId { get; set; }
 
     /// <summary>Runtime-only flag indicating this chat is actively generating a response.</summary>
     [JsonIgnore]

@@ -236,6 +236,8 @@ internal static class AppDataSnapshotFactory
             TotalInputTokens = source.TotalInputTokens,
             TotalOutputTokens = source.TotalOutputTokens,
             PlanContent = source.PlanContent,
+            FollowUpSuggestions = [..source.FollowUpSuggestions],
+            FollowUpSuggestionAssistantMessageId = source.FollowUpSuggestionAssistantMessageId,
         };
     }
 }
