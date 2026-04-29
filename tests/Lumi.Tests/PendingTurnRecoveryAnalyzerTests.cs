@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.IO;
 using GitHub.Copilot.SDK;
 using Lumi.ViewModels;
 using Xunit;
@@ -164,6 +166,44 @@ public sealed class PendingTurnRecoveryAnalyzerTests
         Assert.False(localChatCountAnalysis.UserMessageObserved);
     }
 
+    [Fact]
+    public void ResolveSessionLogPath_PrefersCurrentConfigDir()
+    {
+        using var temp = new TemporaryDirectory();
+        var currentConfigDir = Path.Combine(temp.Path, "current");
+        var legacyConfigDir = Path.Combine(temp.Path, "legacy");
+        var sessionId = Guid.NewGuid().ToString("N");
+        var currentLog = CreateSessionLog(currentConfigDir, sessionId);
+        CreateSessionLog(legacyConfigDir, sessionId);
+
+        var resolved = PendingTurnRecoveryAnalyzer.ResolveSessionLogPath(sessionId, currentConfigDir, legacyConfigDir);
+
+        Assert.Equal(currentLog, resolved);
+    }
+
+    [Fact]
+    public void ResolveSessionLogPath_FallsBackToLegacyConfigDir()
+    {
+        using var temp = new TemporaryDirectory();
+        var currentConfigDir = Path.Combine(temp.Path, "current");
+        var legacyConfigDir = Path.Combine(temp.Path, "legacy");
+        var sessionId = Guid.NewGuid().ToString("N");
+        var legacyLog = CreateSessionLog(legacyConfigDir, sessionId);
+
+        var resolved = PendingTurnRecoveryAnalyzer.ResolveSessionLogPath(sessionId, currentConfigDir, legacyConfigDir);
+
+        Assert.Equal(legacyLog, resolved);
+    }
+
+    private static string CreateSessionLog(string configDir, string sessionId)
+    {
+        var sessionDir = Path.Combine(configDir, "session-state", sessionId);
+        Directory.CreateDirectory(sessionDir);
+        var logPath = Path.Combine(sessionDir, "events.jsonl");
+        File.WriteAllText(logPath, "");
+        return logPath;
+    }
+
     private static UserMessageEvent UserMessage(string content)
         => new()
         {
@@ -233,4 +273,32 @@ public sealed class PendingTurnRecoveryAnalyzerTests
                 Message = message
             }
         };
+
+    private sealed class TemporaryDirectory : IDisposable
+    {
+        public TemporaryDirectory()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"Lumi.Tests-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path);
+        }
+
+        public string Path { get; }
+
+        public void Dispose()
+        {
+            try
+            {
+                if (Directory.Exists(Path))
+                    Directory.Delete(Path, recursive: true);
+            }
+            catch (IOException)
+            {
+                // Best-effort cleanup for temporary test files.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Best-effort cleanup for temporary test files.
+            }
+        }
+    }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using GitHub.Copilot.SDK;
 using Microsoft.Extensions.AI;
@@ -49,7 +50,7 @@ public static class SessionConfigBuilder
             Model = model,
             Streaming = true,
             WorkingDirectory = workingDirectory,
-            ConfigDir = workingDirectory,
+            ConfigDir = GetDefaultConfigDir(),
             ExcludedTools = ExcludedBuiltInTools,
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
@@ -84,7 +85,7 @@ public static class SessionConfigBuilder
             Model = model,
             Streaming = true,
             WorkingDirectory = workingDirectory,
-            ConfigDir = workingDirectory,
+            ConfigDir = GetDefaultConfigDir(),
             ExcludedTools = ExcludedBuiltInTools,
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
@@ -109,7 +110,7 @@ public static class SessionConfigBuilder
             Model = options.Model,
             Streaming = options.Streaming,
             WorkingDirectory = options.WorkingDirectory,
-            ConfigDir = options.ConfigDir,
+            ConfigDir = options.ConfigDir ?? GetDefaultConfigDir(),
             InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
             OnPermissionRequest = PermissionHandler.ApproveAll,
             SystemMessage = new SystemMessageConfig
@@ -131,6 +132,14 @@ public static class SessionConfigBuilder
         }
 
         return config;
+    }
+
+    private static string GetDefaultConfigDir()
+    {
+        var configDir = DataStore.CopilotConfigDir;
+        if (!Directory.Exists(configDir))
+            Directory.CreateDirectory(configDir);
+        return configDir;
     }
 
     /// <summary>Sets the shared optional properties on a <see cref="SessionConfig"/>.</summary>

@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using GitHub.Copilot.SDK;
+using Lumi.Services;
 
 namespace Lumi.ViewModels;
 
@@ -308,12 +309,26 @@ internal static class PendingTurnRecoveryAnalyzer
     }
 
     private static string GetSessionLogPath(string sessionId)
-        => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".copilot",
-            "session-state",
-            sessionId,
-            "events.jsonl");
+        => ResolveSessionLogPath(sessionId, DataStore.CopilotConfigDir, GetLegacyCopilotConfigDir());
+
+    internal static string ResolveSessionLogPath(string sessionId, string configDir, string legacyConfigDir)
+    {
+        var currentPath = BuildSessionLogPath(configDir, sessionId);
+        if (File.Exists(currentPath))
+            return currentPath;
+
+        var legacyPath = BuildSessionLogPath(legacyConfigDir, sessionId);
+        if (!string.Equals(currentPath, legacyPath, StringComparison.OrdinalIgnoreCase) && File.Exists(legacyPath))
+            return legacyPath;
+
+        return currentPath;
+    }
+
+    private static string BuildSessionLogPath(string configDir, string sessionId)
+        => Path.Combine(configDir, "session-state", sessionId, "events.jsonl");
+
+    private static string GetLegacyCopilotConfigDir()
+        => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".copilot");
 
     private static bool IsPersistedUserMessageLine(string line)
     {

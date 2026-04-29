@@ -7,7 +7,7 @@ namespace Lumi.Tests;
 public sealed class SessionConfigBuilderTests
 {
     [Fact]
-    public void Build_UsesWorkingDirectoryAsConfigDir()
+    public void Build_UsesLumiCopilotConfigDir()
     {
         const string workDir = @"C:\Repo";
 
@@ -25,11 +25,12 @@ public sealed class SessionConfigBuilderTests
             hooks: null);
 
         Assert.Equal(workDir, config.WorkingDirectory);
-        Assert.Equal(workDir, config.ConfigDir);
+        Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
+        Assert.NotEqual(workDir, config.ConfigDir);
     }
 
     [Fact]
-    public void BuildForResume_UsesWorkingDirectoryAsConfigDir()
+    public void BuildForResume_UsesLumiCopilotConfigDir()
     {
         const string workDir = @"C:\Repo";
 
@@ -47,6 +48,32 @@ public sealed class SessionConfigBuilderTests
             hooks: null);
 
         Assert.Equal(workDir, config.WorkingDirectory);
-        Assert.Equal(workDir, config.ConfigDir);
+        Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
+        Assert.NotEqual(workDir, config.ConfigDir);
+    }
+
+    [Fact]
+    public void BuildLightweight_UsesLumiCopilotConfigDirByDefault()
+    {
+        var config = SessionConfigBuilder.BuildLightweight(new LightweightSessionOptions
+        {
+            SystemPrompt = "prompt"
+        });
+
+        Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
+    }
+
+    [Fact]
+    public void BuildLightweight_HonorsExplicitConfigDir()
+    {
+        const string configDir = @"C:\CustomCopilotConfig";
+
+        var config = SessionConfigBuilder.BuildLightweight(new LightweightSessionOptions
+        {
+            SystemPrompt = "prompt",
+            ConfigDir = configDir
+        });
+
+        Assert.Equal(configDir, config.ConfigDir);
     }
 }

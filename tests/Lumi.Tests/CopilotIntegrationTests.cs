@@ -228,8 +228,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
 
     private static string GetSessionStateRoot()
         => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".copilot",
+            DataStore.CopilotConfigDir,
             "session-state");
 
     private static string BuildMemorySystemPrompt()
@@ -681,7 +680,8 @@ public class CopilotIntegrationTests : IAsyncLifetime
             onPermission: null, hooks: null);
 
         Assert.Equal(workDir, config.WorkingDirectory);
-        Assert.Equal(workDir, config.ConfigDir);
+        Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
+        Assert.NotEqual(workDir, config.ConfigDir);
 
         var session = await _service.CreateSessionAsync(config);
         Assert.NotEmpty(session.SessionId);
