@@ -519,7 +519,7 @@ public partial class ChatViewModel
                 if (token.IsCancellationRequested)
                     return;
 
-                var results = SearchFiles(query);
+                var results = SearchFiles(query, cancellationToken: token);
                 if (token.IsCancellationRequested)
                     return;
 

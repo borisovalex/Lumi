@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Lumi.Models;
+using StrataSearch;
 
 namespace Lumi.Services;
 
@@ -116,18 +117,18 @@ public sealed class GlobalSearchService
         if (string.IsNullOrEmpty(trimmedQuery))
             return Task.FromResult((IReadOnlyList<GlobalSearchMatch>)BuildDefaultResults(snapshot));
 
-        var compiledQuery = CompiledQuery.Create(trimmedQuery);
-        if (compiledQuery.Terms.Length == 0)
+        var searchQuery = SearchQuery.Create(trimmedQuery);
+        if (searchQuery.IsEmpty)
             return Task.FromResult((IReadOnlyList<GlobalSearchMatch>)BuildDefaultResults(snapshot));
 
         return Task.Run<IReadOnlyList<GlobalSearchMatch>>(
-            () => SearchCore(snapshot, compiledQuery, executionMode, cancellationToken),
+            () => SearchCore(snapshot, searchQuery, executionMode, cancellationToken),
             cancellationToken);
     }
 
     private IReadOnlyList<GlobalSearchMatch> SearchCore(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         GlobalSearchExecutionMode executionMode,
         CancellationToken cancellationToken)
     {
@@ -162,7 +163,7 @@ public sealed class GlobalSearchService
 
     private void SearchChats(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
@@ -171,23 +172,26 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(chat.Title, 3.8);
-            var evaluation = EvaluateFields([titleField], query);
+            var titleField = new PreparedSearchField(chat.Title, 3.8, SearchFieldKind.Primary);
+            var evaluation = SearchEngine.Evaluate(query, [titleField]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
             {
                 var contentFields = GetChatContentFields(chat, executionMode);
                 if (contentFields.Count > 0)
-                    evaluation = evaluation.Merge(EvaluateFields(contentFields, query));
+                {
+                    var fields = new List<PreparedSearchField>(contentFields.Count + 1) { titleField };
+                    fields.AddRange(contentFields);
+                    evaluation = SearchEngine.Evaluate(query, fields);
+                }
             }
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
 
             snapshot.ProjectNames.TryGetValue(chat.ProjectId ?? Guid.Empty, out var projectName);
-            var contentMatch = !string.IsNullOrWhiteSpace(evaluation.BestContentSnippet);
-            var score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+            var score = evaluation.Score
+                        + GetTitleBonus(chat.Title, query)
                         + GetRecencyBoost(chat.UpdatedAt, multiplier: 1.6);
 
             results.Add(new GlobalSearchMatch
@@ -198,7 +202,7 @@ public sealed class GlobalSearchService
                 NavIndex = 0,
                 Item = chat,
                 Score = score,
-                IsContentMatch = contentMatch,
+                IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = chat.UpdatedAt
             });
         }
@@ -206,7 +210,7 @@ public sealed class GlobalSearchService
 
     private void SearchProjects(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -214,17 +218,18 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(project.Name, 3.5);
-            var instructionsField = new PreparedSearchField(project.Instructions, 1.0, isContent: true);
-            var evaluation = EvaluateFields([titleField, instructionsField], query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(project.Name, 3.5),
+                SearchField.Content(project.Instructions, 1.0)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
 
             snapshot.ProjectChatCounts.TryGetValue(project.Id, out var chatCount);
             snapshot.ProjectLastActivity.TryGetValue(project.Id, out var latestActivity);
             var sortTimestamp = latestActivity == default ? project.CreatedAt : latestActivity;
-            var contentMatch = !string.IsNullOrWhiteSpace(evaluation.BestContentSnippet);
             var defaultSubtitle = chatCount == 0
                 ? "No chats"
                 : $"{chatCount} chat{(chatCount == 1 ? "" : "s")} · {FormatRelativeTime(sortTimestamp)}";
@@ -236,10 +241,10 @@ public sealed class GlobalSearchService
                 Subtitle = BuildSecondarySubtitle(defaultSubtitle, evaluation.BestContentSnippet),
                 NavIndex = 2,
                 Item = project,
-                Score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+                Score = evaluation.Score
+                        + GetTitleBonus(project.Name, query)
                         + GetRecencyBoost(sortTimestamp, multiplier: 0.8),
-                IsContentMatch = contentMatch,
+                IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = sortTimestamp
             });
         }
@@ -247,7 +252,7 @@ public sealed class GlobalSearchService
 
     private void SearchJobs(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -255,13 +260,15 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(job.Name, 3.5);
-            var descriptionField = new PreparedSearchField(job.Description, 1.8);
-            var promptField = new PreparedSearchField(job.Prompt, 1.1, isContent: true);
-            var statusField = new PreparedSearchField(job.LastRunSummary, 0.9);
-            var evaluation = EvaluateFields([titleField, descriptionField, promptField, statusField], query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(job.Name, 3.5),
+                new SearchField(job.Description, 1.8),
+                SearchField.Content(job.Prompt, 1.1),
+                new SearchField(job.LastRunSummary, 0.9)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
 
             var status = job.IsEnabled ? "Enabled" : "Paused";
@@ -275,10 +282,10 @@ public sealed class GlobalSearchService
                 Subtitle = BuildSecondarySubtitle(subtitle, evaluation.BestContentSnippet),
                 NavIndex = 1,
                 Item = job,
-                Score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+                Score = evaluation.Score
+                        + GetTitleBonus(job.Name, query)
                         + GetRecencyBoost(job.UpdatedAt, multiplier: 0.6),
-                IsContentMatch = !string.IsNullOrWhiteSpace(evaluation.BestContentSnippet),
+                IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = job.UpdatedAt
             });
         }
@@ -286,7 +293,7 @@ public sealed class GlobalSearchService
 
     private void SearchSkills(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -294,15 +301,15 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(skill.Name, 3.4);
-            var descriptionField = new PreparedSearchField(skill.Description, 1.8);
-            var contentField = new PreparedSearchField(skill.Content, 0.95, isContent: true);
-            var evaluation = EvaluateFields([titleField, descriptionField, contentField], query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(skill.Name, 3.4),
+                new SearchField(skill.Description, 1.8),
+                SearchField.Content(skill.Content, 0.95)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
-
-            var contentMatch = !string.IsNullOrWhiteSpace(evaluation.BestContentSnippet);
 
             results.Add(new GlobalSearchMatch
             {
@@ -311,10 +318,10 @@ public sealed class GlobalSearchService
                 Subtitle = BuildSecondarySubtitle(skill.Description, evaluation.BestContentSnippet),
                 NavIndex = 3,
                 Item = skill,
-                Score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+                Score = evaluation.Score
+                        + GetTitleBonus(skill.Name, query)
                         + GetRecencyBoost(skill.CreatedAt, multiplier: 0.45),
-                IsContentMatch = contentMatch,
+                IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = skill.CreatedAt
             });
         }
@@ -322,7 +329,7 @@ public sealed class GlobalSearchService
 
     private void SearchAgents(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -330,15 +337,15 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(agent.Name, 3.4);
-            var descriptionField = new PreparedSearchField(agent.Description, 1.8);
-            var systemPromptField = new PreparedSearchField(agent.SystemPrompt, 0.95, isContent: true);
-            var evaluation = EvaluateFields([titleField, descriptionField, systemPromptField], query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(agent.Name, 3.4),
+                new SearchField(agent.Description, 1.8),
+                SearchField.Content(agent.SystemPrompt, 0.95)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
-
-            var contentMatch = !string.IsNullOrWhiteSpace(evaluation.BestContentSnippet);
 
             results.Add(new GlobalSearchMatch
             {
@@ -347,10 +354,10 @@ public sealed class GlobalSearchService
                 Subtitle = BuildSecondarySubtitle(agent.Description, evaluation.BestContentSnippet),
                 NavIndex = 4,
                 Item = agent,
-                Score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+                Score = evaluation.Score
+                        + GetTitleBonus(agent.Name, query)
                         + GetRecencyBoost(agent.CreatedAt, multiplier: 0.45),
-                IsContentMatch = contentMatch,
+                IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = agent.CreatedAt
             });
         }
@@ -358,7 +365,7 @@ public sealed class GlobalSearchService
 
     private void SearchMemories(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -366,15 +373,16 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(memory.Key, 3.3);
-            var categoryField = new PreparedSearchField(memory.Category, 1.5);
-            var contentField = new PreparedSearchField(memory.Content, 1.1, isContent: true);
-            var evaluation = EvaluateFields([titleField, categoryField, contentField], query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(memory.Key, 3.3),
+                new SearchField(memory.Category, 1.5),
+                SearchField.Content(memory.Content, 1.1)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
 
-            var contentMatch = !string.IsNullOrWhiteSpace(evaluation.BestContentSnippet);
             var defaultSubtitle = string.IsNullOrWhiteSpace(memory.Category)
                 ? TrimForSubtitle(memory.Content)
                 : $"[{memory.Category}] {TrimForSubtitle(memory.Content)}";
@@ -386,10 +394,10 @@ public sealed class GlobalSearchService
                 Subtitle = BuildSecondarySubtitle(defaultSubtitle, evaluation.BestContentSnippet),
                 NavIndex = 5,
                 Item = memory,
-                Score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+                Score = evaluation.Score
+                        + GetTitleBonus(memory.Key, query)
                         + GetRecencyBoost(memory.UpdatedAt, multiplier: 0.7),
-                IsContentMatch = contentMatch,
+                IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = memory.UpdatedAt
             });
         }
@@ -397,7 +405,7 @@ public sealed class GlobalSearchService
 
     private void SearchMcpServers(
         SearchSnapshot snapshot,
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -405,17 +413,17 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(server.Name, 3.2);
-            var descriptionField = new PreparedSearchField(server.Description, 1.7);
-            var commandField = new PreparedSearchField(server.Command ?? "", 1.0);
-            var argsField = new PreparedSearchField(string.Join(' ', server.Args), 0.9);
-            var urlField = new PreparedSearchField(server.Url ?? "", 0.8);
-            var toolsField = new PreparedSearchField(string.Join(' ', server.Tools), 0.85);
-            var evaluation = EvaluateFields(
-                [titleField, descriptionField, commandField, argsField, urlField, toolsField],
-                query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(server.Name, 3.2),
+                new SearchField(server.Description, 1.7),
+                new SearchField(server.Command ?? "", 1.0),
+                new SearchField(string.Join(' ', server.Args), 0.9),
+                new SearchField(server.Url ?? "", 0.8),
+                new SearchField(string.Join(' ', server.Tools), 0.85)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
 
             results.Add(new GlobalSearchMatch
@@ -425,8 +433,8 @@ public sealed class GlobalSearchService
                 Subtitle = BuildSecondarySubtitle(server.Description, evaluation.BestContentSnippet),
                 NavIndex = 6,
                 Item = server,
-                Score = evaluation.BaseScore
-                        + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase)
+                Score = evaluation.Score
+                        + GetTitleBonus(server.Name, query)
                         + GetRecencyBoost(server.CreatedAt, multiplier: 0.4),
                 IsContentMatch = false,
                 SortTimestamp = server.CreatedAt
@@ -435,7 +443,7 @@ public sealed class GlobalSearchService
     }
 
     private static void SearchSettings(
-        CompiledQuery query,
+        SearchQuery query,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -443,11 +451,13 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(setting.Name, 3.2);
-            var pageField = new PreparedSearchField(setting.Page, 1.6);
-            var evaluation = EvaluateFields([titleField, pageField], query);
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(setting.Name, 3.2),
+                new SearchField(setting.Page, 1.6)
+            ]);
 
-            if (!evaluation.IsCompleteMatch)
+            if (!evaluation.IsMatch)
                 continue;
 
             results.Add(new GlobalSearchMatch
@@ -456,7 +466,7 @@ public sealed class GlobalSearchService
                 Title = setting.Name,
                 Subtitle = setting.Page,
                 NavIndex = 7,
-                Score = evaluation.BaseScore + GetTitleBonus(titleField.Prepared.Normalized, query.NormalizedPhrase),
+                Score = evaluation.Score + GetTitleBonus(setting.Name, query),
                 SettingsPageIndex = setting.PageIndex
             });
         }
@@ -618,7 +628,7 @@ public sealed class GlobalSearchService
 
         var fields = snapshot.Messages
             .Where(static message => !string.IsNullOrWhiteSpace(message.Text))
-            .Select(static message => new PreparedSearchField(message.Text, 1.0, isContent: true))
+            .Select(static message => new PreparedSearchField(message.Text, 1.0, SearchFieldKind.Content))
             .ToArray();
 
         lock (_chatFieldCacheSync)
@@ -644,214 +654,6 @@ public sealed class GlobalSearchService
         return false;
     }
 
-    private static SearchEvaluation EvaluateFields(
-        IReadOnlyList<PreparedSearchField> fields,
-        CompiledQuery query)
-    {
-        var termMatches = new SearchTermMatch[query.Terms.Length];
-
-        foreach (var field in fields)
-        {
-            if (field.Prepared.Normalized.Length == 0)
-                continue;
-
-            for (var termIndex = 0; termIndex < query.Terms.Length; termIndex++)
-            {
-                var fieldMatch = ScoreTerm(field, query.Terms[termIndex]);
-                if (fieldMatch.Score > termMatches[termIndex].Score)
-                    termMatches[termIndex] = fieldMatch;
-            }
-        }
-
-        return new SearchEvaluation(termMatches);
-    }
-
-    private static SearchTermMatch ScoreTerm(PreparedSearchField field, string term)
-    {
-        if (string.IsNullOrEmpty(term))
-            return default;
-
-        var bestScore = 0d;
-        var normalized = field.Prepared.Normalized;
-
-        if (string.Equals(normalized, term, StringComparison.Ordinal))
-        {
-            bestScore = 145;
-        }
-        else
-        {
-            bestScore = Math.Max(bestScore, ScoreTokens(field.Prepared.Tokens, term));
-            bestScore = Math.Max(bestScore, ScoreNormalizedText(normalized, term));
-
-            if (term.Length >= 3)
-            {
-                bestScore = Math.Max(bestScore, ScoreFuzzyTokens(field.Prepared.Tokens, term));
-                bestScore = Math.Max(bestScore, ScoreEditDistance(normalized, term));
-            }
-        }
-
-        if (bestScore <= 0)
-            return default;
-
-        return new SearchTermMatch(
-            bestScore * field.Weight,
-            field.IsContent,
-            field.IsContent ? BuildSnippet(field.Original, term) : null);
-    }
-
-    private static double ScoreTokens(IReadOnlyList<string> tokens, string term)
-    {
-        var bestScore = 0d;
-
-        foreach (var token in tokens)
-        {
-            if (string.Equals(token, term, StringComparison.Ordinal))
-                bestScore = Math.Max(bestScore, 132);
-            else if (token.StartsWith(term, StringComparison.Ordinal))
-                bestScore = Math.Max(bestScore, 118 - Math.Min(18, token.Length - term.Length));
-            else
-            {
-                var containsIndex = token.IndexOf(term, StringComparison.Ordinal);
-                if (containsIndex >= 0)
-                    bestScore = Math.Max(bestScore, 96 - Math.Min(24, containsIndex * 4));
-            }
-        }
-
-        return bestScore;
-    }
-
-    private static double ScoreNormalizedText(string normalizedText, string term)
-    {
-        if (normalizedText.StartsWith(term, StringComparison.Ordinal))
-            return 112 - Math.Min(16, normalizedText.Length - term.Length);
-
-        var containsIndex = normalizedText.IndexOf(term, StringComparison.Ordinal);
-        if (containsIndex >= 0)
-            return 84 - Math.Min(26, containsIndex * 2);
-
-        return 0;
-    }
-
-    private static double ScoreFuzzyTokens(IReadOnlyList<string> tokens, string term)
-    {
-        var bestScore = 0d;
-
-        foreach (var token in tokens)
-        {
-            bestScore = Math.Max(bestScore, ScoreSubsequence(term, token));
-            bestScore = Math.Max(bestScore, ScoreEditDistance(token, term));
-        }
-
-        return bestScore;
-    }
-
-    private static double ScoreSubsequence(string term, string token)
-    {
-        if (term.Length < 3 || token.Length < term.Length)
-            return 0;
-
-        var termIndex = 0;
-        var firstMatchIndex = -1;
-        var previousMatchIndex = -2;
-        var score = 0d;
-
-        for (var tokenIndex = 0; tokenIndex < token.Length && termIndex < term.Length; tokenIndex++)
-        {
-            if (token[tokenIndex] != term[termIndex])
-                continue;
-
-            if (firstMatchIndex < 0)
-                firstMatchIndex = tokenIndex;
-
-            score += 7;
-            if (tokenIndex == 0)
-                score += 10;
-            if (tokenIndex == previousMatchIndex + 1)
-                score += 11;
-
-            previousMatchIndex = tokenIndex;
-            termIndex++;
-        }
-
-        if (termIndex != term.Length)
-            return 0;
-
-        score += ((double)term.Length / token.Length) * 28;
-        score -= Math.Max(0, firstMatchIndex) * 1.5;
-        return Math.Clamp(score, 0, 88);
-    }
-
-    private static double ScoreEditDistance(string candidate, string term)
-    {
-        if (candidate.Length < 3
-            || term.Length < 3
-            || Math.Abs(candidate.Length - term.Length) > 2
-            || candidate.Length > term.Length + 2)
-        {
-            return 0;
-        }
-
-        var maxDistance = term.Length <= 4 ? 1 : 2;
-        var distance = DamerauLevenshteinDistance(candidate, term, maxDistance);
-        if (distance > maxDistance)
-            return 0;
-
-        return distance switch
-        {
-            0 => 0,
-            1 => 92,
-            2 => 76,
-            _ => 0
-        };
-    }
-
-    private static int DamerauLevenshteinDistance(string source, string target, int maxDistance)
-    {
-        if (Math.Abs(source.Length - target.Length) > maxDistance)
-            return maxDistance + 1;
-
-        var rows = source.Length + 1;
-        var columns = target.Length + 1;
-        var distances = new int[rows, columns];
-
-        for (var row = 0; row < rows; row++)
-            distances[row, 0] = row;
-
-        for (var column = 0; column < columns; column++)
-            distances[0, column] = column;
-
-        for (var row = 1; row < rows; row++)
-        {
-            var minInRow = int.MaxValue;
-
-            for (var column = 1; column < columns; column++)
-            {
-                var substitutionCost = source[row - 1] == target[column - 1] ? 0 : 1;
-                var deletion = distances[row - 1, column] + 1;
-                var insertion = distances[row, column - 1] + 1;
-                var substitution = distances[row - 1, column - 1] + substitutionCost;
-                var value = Math.Min(Math.Min(deletion, insertion), substitution);
-
-                if (row > 1
-                    && column > 1
-                    && source[row - 1] == target[column - 2]
-                    && source[row - 2] == target[column - 1])
-                {
-                    value = Math.Min(value, distances[row - 2, column - 2] + 1);
-                }
-
-                distances[row, column] = value;
-                if (value < minInRow)
-                    minInRow = value;
-            }
-
-            if (minInRow > maxDistance)
-                return maxDistance + 1;
-        }
-
-        return distances[source.Length, target.Length];
-    }
-
     private double GetRecencyBoost(DateTimeOffset timestamp, double multiplier)
     {
         var age = _nowProvider() - timestamp;
@@ -863,18 +665,31 @@ public sealed class GlobalSearchService
         return baseBoost * multiplier;
     }
 
-    private static double GetTitleBonus(string normalizedTitle, string normalizedQuery)
+    private static double GetTitleBonus(string title, SearchQuery query)
     {
-        if (string.IsNullOrEmpty(normalizedTitle) || string.IsNullOrEmpty(normalizedQuery))
+        var preparedTitle = SearchText.Create(title);
+        if (preparedTitle.IsEmpty || query.IsEmpty)
             return 0;
 
-        if (string.Equals(normalizedTitle, normalizedQuery, StringComparison.Ordinal))
+        if (string.Equals(preparedTitle.Normalized, query.Text.Normalized, StringComparison.Ordinal)
+            || string.Equals(preparedTitle.Compact, query.Text.Compact, StringComparison.Ordinal))
+        {
             return 260;
+        }
 
-        if (normalizedTitle.StartsWith(normalizedQuery, StringComparison.Ordinal))
+        if (preparedTitle.Normalized.StartsWith(query.Text.Normalized, StringComparison.Ordinal)
+            || preparedTitle.Compact.StartsWith(query.Text.Compact, StringComparison.Ordinal))
+        {
             return 185;
+        }
 
-        return normalizedTitle.Contains(normalizedQuery, StringComparison.Ordinal) ? 135 : 0;
+        if (preparedTitle.Normalized.Contains(query.Text.Normalized, StringComparison.Ordinal)
+            || preparedTitle.Compact.Contains(query.Text.Compact, StringComparison.Ordinal))
+        {
+            return 135;
+        }
+
+        return string.Equals(preparedTitle.Initials, query.Text.Compact, StringComparison.Ordinal) ? 120 : 0;
     }
 
     private string BuildChatSubtitle(string? projectName, DateTimeOffset updatedAt, string? snippet)
@@ -920,35 +735,6 @@ public sealed class GlobalSearchService
             return timestamp.ToString("MMM d", CultureInfo.CurrentCulture);
 
         return timestamp.ToString("MMM d, yyyy", CultureInfo.CurrentCulture);
-    }
-
-    private static string BuildSnippet(string text, string term)
-    {
-        var flattened = CollapseWhitespace(text);
-        if (flattened.Length == 0)
-            return "";
-
-        var snippetAnchor = flattened.IndexOf(term, StringComparison.OrdinalIgnoreCase);
-        if (snippetAnchor < 0 && term.Length > 3)
-            snippetAnchor = flattened.IndexOf(term[..Math.Min(term.Length, 4)], StringComparison.OrdinalIgnoreCase);
-
-        const int maxLength = 96;
-        if (flattened.Length <= maxLength)
-            return flattened;
-
-        if (snippetAnchor < 0)
-            return flattened[..maxLength] + "…";
-
-        var start = Math.Max(0, snippetAnchor - 30);
-        var length = Math.Min(maxLength, flattened.Length - start);
-        var snippet = flattened.Substring(start, length).Trim();
-
-        if (start > 0)
-            snippet = "…" + snippet;
-        if (start + length < flattened.Length)
-            snippet += "…";
-
-        return snippet;
     }
 
     private static string TrimForSubtitle(string? text)
@@ -1023,87 +809,6 @@ public sealed class GlobalSearchService
             projectLastActivity);
     }
 
-    private static string NormalizeText(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return "";
-
-        var normalized = text.Normalize(NormalizationForm.FormD);
-        var builder = new StringBuilder(normalized.Length);
-        var previousWasSpace = true;
-
-        foreach (var character in normalized)
-        {
-            var category = CharUnicodeInfo.GetUnicodeCategory(character);
-            if (category == UnicodeCategory.NonSpacingMark)
-                continue;
-
-            if (char.IsLetterOrDigit(character))
-            {
-                builder.Append(char.ToLowerInvariant(character));
-                previousWasSpace = false;
-                continue;
-            }
-
-            if (!previousWasSpace)
-            {
-                builder.Append(' ');
-                previousWasSpace = true;
-            }
-        }
-
-        return builder.ToString().Trim();
-    }
-
-    private static string[] ExtractTokens(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-            return [];
-
-        var tokens = new List<string>();
-        var builder = new StringBuilder();
-        var previousCharacter = '\0';
-
-        void Flush()
-        {
-            if (builder.Length == 0)
-                return;
-
-            tokens.Add(builder.ToString());
-            builder.Clear();
-        }
-
-        foreach (var character in text.Normalize(NormalizationForm.FormD))
-        {
-            var category = CharUnicodeInfo.GetUnicodeCategory(character);
-            if (category == UnicodeCategory.NonSpacingMark)
-                continue;
-
-            if (!char.IsLetterOrDigit(character))
-            {
-                Flush();
-                previousCharacter = '\0';
-                continue;
-            }
-
-            var startsNewToken = builder.Length > 0
-                                 && ((char.IsUpper(character) && char.IsLower(previousCharacter))
-                                     || (char.IsDigit(character) != char.IsDigit(previousCharacter)));
-
-            if (startsNewToken)
-                Flush();
-
-            builder.Append(char.ToLowerInvariant(character));
-            previousCharacter = character;
-        }
-
-        Flush();
-        return tokens
-            .Where(static token => token.Length > 0)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-    }
-
     private sealed class SearchSnapshot(
         Chat[] chats,
         Project[] projects,
@@ -1128,86 +833,6 @@ public sealed class GlobalSearchService
         public IReadOnlyDictionary<Guid, DateTimeOffset> ProjectLastActivity { get; } = projectLastActivity;
     }
 
-    private sealed class PreparedSearchField
-    {
-        public PreparedSearchField(string text, double weight, bool isContent = false)
-        {
-            Original = CollapseWhitespace(text);
-            Weight = weight;
-            IsContent = isContent;
-            Prepared = new PreparedSearchText(Original);
-        }
-
-        public string Original { get; }
-        public double Weight { get; }
-        public bool IsContent { get; }
-        public PreparedSearchText Prepared { get; }
-    }
-
-    private sealed class PreparedSearchText
-    {
-        public PreparedSearchText(string text)
-        {
-            Normalized = NormalizeText(text);
-            Tokens = ExtractTokens(text);
-        }
-
-        public string Normalized { get; }
-        public string[] Tokens { get; }
-    }
-
     private readonly record struct CachedChatFields(string Version, IReadOnlyList<PreparedSearchField> Fields);
-    private readonly record struct SearchTermMatch(double Score, bool IsContent, string? Snippet);
     private readonly record struct SearchSettingEntry(string Name, string Page, int PageIndex);
-
-    private sealed class SearchEvaluation(SearchTermMatch[] termMatches)
-    {
-        public SearchTermMatch[] TermMatches { get; } = termMatches;
-
-        public bool IsCompleteMatch => TermMatches.All(static match => match.Score > 0);
-
-        public double BaseScore => TermMatches.Sum(static match => match.Score);
-
-        public bool IsContentMatch => TermMatches.Any(static match => match.IsContent);
-
-        public string? BestContentSnippet => TermMatches
-            .Where(static match => match.IsContent && !string.IsNullOrWhiteSpace(match.Snippet))
-            .OrderByDescending(static match => match.Score)
-            .Select(static match => match.Snippet)
-            .FirstOrDefault();
-
-        public SearchEvaluation Merge(SearchEvaluation other)
-        {
-            if (TermMatches.Length != other.TermMatches.Length)
-                throw new InvalidOperationException("Cannot merge search evaluations with different term counts.");
-
-            var merged = new SearchTermMatch[TermMatches.Length];
-            for (var index = 0; index < merged.Length; index++)
-            {
-                merged[index] = other.TermMatches[index].Score > TermMatches[index].Score
-                    ? other.TermMatches[index]
-                    : TermMatches[index];
-            }
-
-            return new SearchEvaluation(merged);
-        }
-    }
-
-    private sealed class CompiledQuery(string raw, string normalizedPhrase, string[] terms)
-    {
-        public string Raw { get; } = raw;
-        public string NormalizedPhrase { get; } = normalizedPhrase;
-        public string[] Terms { get; } = terms;
-
-        public static CompiledQuery Create(string query)
-        {
-            var normalizedPhrase = NormalizeText(query);
-            var terms = normalizedPhrase
-                .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-
-            return new CompiledQuery(query, normalizedPhrase, terms);
-        }
-    }
 }

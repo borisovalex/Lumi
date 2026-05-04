@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
+using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -157,18 +158,26 @@ public partial class BackgroundJobsViewModel : ObservableObject
     {
         Jobs.Clear();
         var jobs = _dataStore.SnapshotBackgroundJobs();
-        var items = string.IsNullOrWhiteSpace(SearchQuery)
-            ? jobs
-            : jobs.Where(job =>
-                job.Name.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                job.Description.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                job.Prompt.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                job.LastRunSummary.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase));
+        var orderedJobs = jobs
+            .OrderByDescending(static job => job.IsEnabled)
+            .ThenBy(static job => job.NextRunAt ?? DateTimeOffset.MaxValue)
+            .ThenBy(static job => job.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
+        var items = hasQuery
+            ? SearchPipeline.Rank(
+                orderedJobs,
+                SearchQuery,
+                static job =>
+                [
+                    SearchField.Primary(job.Name, 3.5),
+                    new SearchField(job.Description, 1.8),
+                    SearchField.Content(job.Prompt, 1.1),
+                    new SearchField(job.LastRunSummary, 0.9)
+                ])
+            : orderedJobs;
 
-        foreach (var job in items
-                     .OrderByDescending(static job => job.IsEnabled)
-                     .ThenBy(static job => job.NextRunAt ?? DateTimeOffset.MaxValue)
-                     .ThenBy(static job => job.Name, StringComparer.OrdinalIgnoreCase))
+        foreach (var job in items)
         {
             Jobs.Add(job);
         }

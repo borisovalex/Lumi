@@ -348,7 +348,7 @@ public partial class SettingsView : UserControl
                 if (child is StrataSettingGroup group)
                 {
                     // If the group header itself matches, show all its settings
-                    bool groupHeaderMatches = (group.Header ?? "").Contains(terms, StringComparison.OrdinalIgnoreCase);
+                    bool groupHeaderMatches = FuzzySearch.IsMatch(terms, group.Header, group.Description);
                     bool groupHasResults = false;
 
                     foreach (var item in group.Items.OfType<StrataSetting>())
@@ -431,8 +431,7 @@ public partial class SettingsView : UserControl
     {
         var header = setting.Header ?? "";
         var desc = setting.Description ?? "";
-        return header.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-               desc.Contains(query, StringComparison.OrdinalIgnoreCase);
+        return FuzzySearch.IsMatch(query, header, desc);
     }
 
     private void OnHotkeyRecorderButtonClick(object? sender, RoutedEventArgs e)

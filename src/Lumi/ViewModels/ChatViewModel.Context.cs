@@ -417,7 +417,10 @@ public partial class ChatViewModel
     /// Returns StrataComposerChip items where Name is the display filename,
     /// SecondaryText shows path context, and Value stores the full absolute path.
     /// </summary>
-    public List<StrataTheme.Controls.StrataComposerChip> SearchFiles(string query, int maxResults = 20)
+    public List<StrataTheme.Controls.StrataComposerChip> SearchFiles(
+        string query,
+        int maxResults = 20,
+        CancellationToken cancellationToken = default)
     {
         var workDir = GetEffectiveWorkingDirectory();
         var isProjectDir = workDir != Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -427,7 +430,7 @@ public partial class ChatViewModel
             return [];
 
         var maxDepth = isProjectDir ? 10 : 4;
-        return _fileSearchService.Search(workDir, query, maxResults, maxDepth)
+        return _fileSearchService.Search(workDir, query, maxResults, maxDepth, cancellationToken)
             .ConvertAll(r =>
             {
                 var fileName = Path.GetFileName(r.RelativePath);

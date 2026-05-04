@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
+using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -79,13 +80,21 @@ public partial class AgentsViewModel : ObservableObject
     private void RefreshList()
     {
         Agents.Clear();
-        var items = string.IsNullOrWhiteSpace(SearchQuery)
-            ? _dataStore.Data.Agents
-            : _dataStore.Data.Agents.Where(a =>
-                a.Name.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                a.Description.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase));
+        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
+        var items = hasQuery
+            ? SearchPipeline.Rank(
+                _dataStore.Data.Agents,
+                SearchQuery,
+                static agent =>
+                [
+                    SearchField.Primary(agent.Name, 3.4),
+                    new SearchField(agent.Description, 1.8),
+                    SearchField.Content(agent.SystemPrompt, 0.95)
+                ],
+                static agent => new SearchSortMetadata(Text: agent.Name))
+            : _dataStore.Data.Agents.OrderBy(agent => agent.Name).ToArray();
 
-        foreach (var agent in items.OrderBy(a => a.Name))
+        foreach (var agent in items)
             Agents.Add(agent);
     }
 

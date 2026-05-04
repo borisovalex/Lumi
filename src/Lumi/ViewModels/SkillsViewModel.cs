@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
+using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -60,13 +61,21 @@ public partial class SkillsViewModel : ObservableObject
     private void RefreshList()
     {
         Skills.Clear();
-        var items = string.IsNullOrWhiteSpace(SearchQuery)
-            ? _dataStore.Data.Skills
-            : _dataStore.Data.Skills.Where(s =>
-                s.Name.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                s.Description.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase));
+        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
+        var items = hasQuery
+            ? SearchPipeline.Rank(
+                _dataStore.Data.Skills,
+                SearchQuery,
+                static skill =>
+                [
+                    SearchField.Primary(skill.Name, 3.4),
+                    new SearchField(skill.Description, 1.8),
+                    SearchField.Content(skill.Content, 0.95)
+                ],
+                static skill => new SearchSortMetadata(Text: skill.Name))
+            : _dataStore.Data.Skills.OrderBy(skill => skill.Name).ToArray();
 
-        foreach (var skill in items.OrderBy(s => s.Name))
+        foreach (var skill in items)
             Skills.Add(skill);
     }
 

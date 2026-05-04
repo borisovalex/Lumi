@@ -103,7 +103,7 @@ public partial class MainWindow : Window
     private int _pendingNavHoverIndex = -1;
     private bool _isNavPillWidthLocked;
     private double _expandedSidebarWidth = DefaultSidebarWidth;
-    private sealed record ProjectFilterCandidate(Project Project, int ChatCount, DateTimeOffset? LastActivity);
+    private sealed record ProjectFilterCandidate(Project Project, int ChatCount, DateTimeOffset? LastActivity, double SearchScore);
 
     private double[] _navBaseButtonWidths = [];
     private double[] _navMinButtonWidths = [];
@@ -2410,8 +2410,9 @@ public partial class MainWindow : Window
             .Select(project => new ProjectFilterCandidate(
                 project,
                 vm.GetProjectChatCount(project.Id),
-                vm.GetProjectLastActivity(project.Id)))
-            .Where(candidate => !hasQuery || ProjectMatchesQuery(candidate.Project, normalizedQuery!))
+                vm.GetProjectLastActivity(project.Id),
+                hasQuery ? ScoreProjectFilterCandidate(project, normalizedQuery!) : 0))
+            .Where(candidate => !hasQuery || candidate.SearchScore > 0)
             .ToList();
 
         totalMatches = candidates.Count;
@@ -2420,20 +2421,14 @@ public partial class MainWindow : Window
         return candidates
             .OrderByDescending(candidate => vm.SelectedProjectFilter == candidate.Project.Id)
             .ThenByDescending(candidate => candidate.Project.IsRunning)
-            .ThenByDescending(candidate => hasQuery && candidate.Project.Name.StartsWith(normalizedQuery!, StringComparison.CurrentCultureIgnoreCase))
+            .ThenByDescending(candidate => hasQuery ? candidate.SearchScore : 0)
             .ThenByDescending(candidate => candidate.LastActivity ?? candidate.Project.CreatedAt)
             .ThenBy(candidate => candidate.Project.Name, StringComparer.CurrentCultureIgnoreCase)
             .Take(take);
     }
 
-    private static bool ProjectMatchesQuery(Project project, string query)
-    {
-        return project.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase)
-            || (!string.IsNullOrWhiteSpace(project.WorkingDirectory)
-                && project.WorkingDirectory.Contains(query, StringComparison.CurrentCultureIgnoreCase))
-            || (!string.IsNullOrWhiteSpace(project.Instructions)
-                && project.Instructions.Contains(query, StringComparison.CurrentCultureIgnoreCase));
-    }
+    private static double ScoreProjectFilterCandidate(Project project, string query)
+        => FuzzySearch.Score(query, project.Name, project.WorkingDirectory, project.Instructions);
 
     private Button CreateProjectFilterRow(
         MainViewModel vm,

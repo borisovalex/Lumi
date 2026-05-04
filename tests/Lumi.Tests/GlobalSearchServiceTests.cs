@@ -195,6 +195,67 @@ public class GlobalSearchServiceTests
     }
 
     [Fact]
+    public async Task SearchAsync_CompactQueryMatchesAcrossSeparators()
+    {
+        var skill = new Skill
+        {
+            Name = "File Search Service",
+            Description = "Finds files from a workspace.",
+            CreatedAt = Now.AddDays(-3)
+        };
+
+        var service = CreateService(new AppData { Skills = [skill] });
+
+        var results = await service.SearchAsync("filesearch");
+
+        var match = Assert.Single(results);
+        Assert.Equal(skill.Name, match.Title);
+    }
+
+    [Fact]
+    public async Task SearchAsync_AcronymQueryMatchesBetweenSeparators()
+    {
+        var best = new Skill
+        {
+            Name = "Log Analytics Workspace",
+            Description = "Azure logs and metrics.",
+            CreatedAt = Now.AddDays(-3)
+        };
+
+        var loose = new Skill
+        {
+            Name = "Launch Window",
+            Description = "Release timing helper.",
+            CreatedAt = Now.AddDays(-1)
+        };
+
+        var service = CreateService(new AppData { Skills = [loose, best] });
+
+        var results = await service.SearchAsync("law");
+
+        Assert.NotEmpty(results);
+        Assert.Equal(best.Name, results[0].Title);
+    }
+
+    [Fact]
+    public async Task SearchAsync_MidTermTypoMatchesAcrossSeparators()
+    {
+        var skill = new Skill
+        {
+            Name = "Log Analytics Workspace",
+            Description = "Azure logs and metrics.",
+            CreatedAt = Now.AddDays(-3)
+        };
+
+        var service = CreateService(new AppData { Skills = [skill] });
+
+        var results = await service.SearchAsync("analyticworkspce");
+
+        var match = Assert.Single(results);
+        Assert.Equal(skill.Name, match.Title);
+    }
+
+    [Fact]
     public async Task SearchAsync_IncompleteWordMatchesLongerContentWord()
     {
         var skill = new Skill

@@ -340,6 +340,22 @@ public class FileSearchServiceTests
     }
 
     [Fact]
+    public void ScoreMatch_CompactQueryMatchesAcrossSeparators()
+    {
+        var score = FileSearchService.ScoreMatch("src/File-Search_Service.cs", new[] { "filesearch" });
+
+        Assert.True(score > 0, $"Compact query should match separator-delimited filename, got score {score}");
+    }
+
+    [Fact]
+    public void ScoreMatch_MidTermTypoMatchesAcrossSeparators()
+    {
+        var score = FileSearchService.ScoreMatch("src/Log/Analytics/Workspace.cs", new[] { "analyticworkspce" });
+
+        Assert.True(score > 0, $"Mid-term typo should match across path separators, got score {score}");
+    }
+
+    [Fact]
     public void Search_AcronymQuery_RanksCamelCaseFileFirst()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"lumi-test-{Guid.NewGuid():N}");
@@ -363,6 +379,29 @@ public class FileSearchServiceTests
     }
 
     [Fact]
+    public void Search_AcronymExactInitialsRankBeforeLongerInitialsPrefix()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"lumi-test-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tempDir, "src", "ViewModels"));
+            File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "ChatViewModel.Debug.cs"), "");
+            File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "ChatViewModel.Tools.cs"), "");
+            File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "ChatViewModel.cs"), "");
+
+            var service = new FileSearchService();
+            var results = service.Search(tempDir, "cvm");
+
+            Assert.NotEmpty(results);
+            Assert.Equal("ChatViewModel.cs", Path.GetFileName(results[0].RelativePath));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
     public void Search_TypoInsideLongFileNameRanksExpectedFirst()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"lumi-test-{Guid.NewGuid():N}");
@@ -375,6 +414,31 @@ public class FileSearchServiceTests
             File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "SearchSettingsView.axaml"), "");
 
             var service = new FileSearchService();
+            var results = service.Search(tempDir, "fileserach");
+
+            Assert.NotEmpty(results);
+            Assert.Equal("FileSearchService.cs", Path.GetFileName(results[0].RelativePath));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Search_TypoCompletionRescansInsteadOfHidingLaterFuzzyMatch()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"lumi-test-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tempDir, "src", "Services"));
+            File.WriteAllText(Path.Combine(tempDir, "src", "Services", "FileSearchService.cs"), "");
+            File.WriteAllText(Path.Combine(tempDir, "src", "Services", "FileStorageService.cs"), "");
+            File.WriteAllText(Path.Combine(tempDir, "src", "Services", "SearchSettingsService.cs"), "");
+
+            var service = new FileSearchService();
+            service.Search(tempDir, "fileserac");
+
             var results = service.Search(tempDir, "fileserach");
 
             Assert.NotEmpty(results);
@@ -520,6 +584,24 @@ public class FileSearchServiceTests
     public void IsHardcodedIgnoredPath_Works(string path, bool expected)
     {
         Assert.Equal(expected, FileSearchService.IsHardcodedIgnoredPath(path));
+    }
+
+    [Theory]
+    [InlineData(".copilot", true)]
+    [InlineData(".dotnet", true)]
+    [InlineData(".vscode", true)]
+    [InlineData(".vscode-insiders", true)]
+    [InlineData(".azure", true)]
+    [InlineData(".codex", true)]
+    [InlineData(".cache", true)]
+    [InlineData(".AzureToolsForIntelliJ", true)]
+    [InlineData("AppData", true)]
+    [InlineData("Downloads", false)]
+    [InlineData("Documents", false)]
+    [InlineData("source", false)]
+    public void IsUserProfileInfrastructureDirName_Works(string dirName, bool expected)
+    {
+        Assert.Equal(expected, FileSearchService.IsUserProfileInfrastructureDirName(dirName));
     }
 
     // ── ParseGitIgnoreLines ─────────────────────────────────────────
@@ -875,6 +957,60 @@ public class FileSearchServiceTests
         var service = new FileSearchService();
         var results = service.Search(@"C:\NonExistent\Path\12345", "test");
         Assert.Empty(results);
+    }
+
+    [Fact]
+    public void Search_AlreadyCancelledToken_Throws()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"lumi-test-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            File.WriteAllText(Path.Combine(tempDir, "app.cs"), "");
+
+            var service = new FileSearchService();
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            Assert.Throws<OperationCanceledException>(() =>
+                service.Search(tempDir, "app", cancellationToken: cts.Token));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Search_LargeIndexParallelScoring_KeepsDeterministicRanking()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"lumi-test-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tempDir, "src", "ViewModels"));
+            Directory.CreateDirectory(Path.Combine(tempDir, "noise"));
+
+            File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "ChatViewModel.cs"), "");
+            File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "ConversationViewModel.cs"), "");
+            File.WriteAllText(Path.Combine(tempDir, "src", "ViewModels", "ChatVirtualMachine.cs"), "");
+
+            for (var i = 0; i < 2_100; i++)
+                File.WriteAllText(Path.Combine(tempDir, "noise", $"unrelated-{i:D4}.txt"), "");
+
+            var service1 = new FileSearchService();
+            var service2 = new FileSearchService();
+
+            var results1 = service1.Search(tempDir, "cvm", maxResults: 10);
+            var results2 = service2.Search(tempDir, "cvm", maxResults: 10);
+
+            Assert.Equal(3, results1.Count);
+            Assert.Equal("ChatViewModel.cs", Path.GetFileName(results1[0].RelativePath));
+            Assert.Equal(results1.Select(r => r.RelativePath), results2.Select(r => r.RelativePath));
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
     }
 
     // ── Caching ─────────────────────────────────────────────────────

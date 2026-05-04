@@ -5,6 +5,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
+using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -60,14 +61,21 @@ public partial class MemoriesViewModel : ObservableObject
         Memories.Clear();
         var activeMemories = _dataStore.Data.Memories
             .Where(m => string.Equals(m.Status, MemoryStatuses.Active, StringComparison.OrdinalIgnoreCase));
-        var items = string.IsNullOrWhiteSpace(SearchQuery)
-            ? activeMemories
-            : activeMemories.Where(m =>
-                m.Key.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                m.Content.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                m.Category.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase));
+        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
+        var items = hasQuery
+            ? SearchPipeline.Rank(
+                activeMemories,
+                SearchQuery,
+                static memory =>
+                [
+                    SearchField.Primary(memory.Key, 3.3),
+                    new SearchField(memory.Category, 1.5),
+                    SearchField.Content(memory.Content, 1.1)
+                ],
+                static memory => new SearchSortMetadata(Text: $"{memory.Category} {memory.Key}"))
+            : activeMemories.OrderBy(memory => memory.Category).ThenBy(memory => memory.Key).ToArray();
 
-        foreach (var memory in items.OrderBy(m => m.Category).ThenBy(m => m.Key))
+        foreach (var memory in items)
             Memories.Add(memory);
     }
 

@@ -12,6 +12,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
+using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -90,13 +91,24 @@ public partial class McpServersViewModel : ObservableObject
     private void RefreshList()
     {
         Servers.Clear();
-        var items = string.IsNullOrWhiteSpace(SearchQuery)
-            ? _dataStore.Data.McpServers
-            : _dataStore.Data.McpServers.Where(s =>
-                s.Name.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase) ||
-                s.Description.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase));
+        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
+        var items = hasQuery
+            ? SearchPipeline.Rank(
+                _dataStore.Data.McpServers,
+                SearchQuery,
+                static server =>
+                [
+                    SearchField.Primary(server.Name, 3.2),
+                    new SearchField(server.Description, 1.7),
+                    new SearchField(server.Command, 1.0),
+                    new SearchField(server.Url, 0.8),
+                    new SearchField(string.Join(' ', server.Args), 0.9),
+                    new SearchField(string.Join(' ', server.Tools), 0.85)
+                ],
+                static server => new SearchSortMetadata(Text: server.Name))
+            : _dataStore.Data.McpServers.OrderBy(server => server.Name).ToArray();
 
-        foreach (var server in items.OrderBy(s => s.Name))
+        foreach (var server in items)
             Servers.Add(server);
     }
 
@@ -366,16 +378,19 @@ public partial class McpServersViewModel : ObservableObject
             .SelectMany(s => s.Args)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entry in FeaturedCatalog)
+        foreach (var entry in SearchPipeline.Rank(
+                     FeaturedCatalog.OrderByDescending(static entry => entry.MonthlyDownloads),
+                     query,
+                     static entry =>
+                     [
+                         SearchField.Primary(entry.Name, 3.2),
+                         new SearchField(entry.Description, 1.7),
+                         new SearchField(entry.NpmPackage, 1.2),
+                         new SearchField(entry.Category, 1.0)
+                     ]))
         {
-            if (entry.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                entry.Description.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                entry.NpmPackage.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                entry.Category.Contains(query, StringComparison.OrdinalIgnoreCase))
-            {
-                entry.IsInstalled = installedPackages.Contains(entry.NpmPackage);
-                CatalogEntries.Add(entry);
-            }
+            entry.IsInstalled = installedPackages.Contains(entry.NpmPackage);
+            CatalogEntries.Add(entry);
         }
     }
 
@@ -398,6 +413,7 @@ public partial class McpServersViewModel : ObservableObject
             // Keep track of packages already shown from featured catalog
             var existingPackages = CatalogEntries.Select(e => e.NpmPackage).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+            var candidates = new List<McpCatalogEntry>();
             foreach (var obj in objects.EnumerateArray())
             {
                 var pkg = obj.GetProperty("package");
@@ -413,16 +429,25 @@ public partial class McpServersViewModel : ObservableObject
                 if (existingPackages.Contains(name))
                     continue;
 
-                // Only show results that actually match the user's query
-                if (!name.Contains(query, StringComparison.OrdinalIgnoreCase) &&
-                    !desc.Contains(query, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
                 var icon = InferIcon(name, desc);
                 var category = InferCategory(name, desc);
                 var displayName = FormatPackageName(name);
                 var entry = new McpCatalogEntry(displayName, desc, name, icon, category, downloads);
                 entry.IsInstalled = installedPackages.Contains(name);
+                candidates.Add(entry);
+            }
+
+            foreach (var entry in SearchPipeline.Rank(
+                         candidates.OrderByDescending(static entry => entry.MonthlyDownloads),
+                         query,
+                         static entry =>
+                         [
+                             SearchField.Primary(entry.Name, 3.2),
+                             new SearchField(entry.Description, 1.7),
+                             new SearchField(entry.NpmPackage, 1.2),
+                             new SearchField(entry.Category, 1.0)
+                         ]))
+            {
                 CatalogEntries.Add(entry);
             }
         }

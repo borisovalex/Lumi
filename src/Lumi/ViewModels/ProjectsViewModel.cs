@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
+using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -65,12 +66,21 @@ public partial class ProjectsViewModel : ObservableObject
     private void RefreshList()
     {
         Projects.Clear();
-        var items = string.IsNullOrWhiteSpace(SearchQuery)
-            ? _dataStore.Data.Projects
-            : _dataStore.Data.Projects.Where(p =>
-                p.Name.Contains(SearchQuery, StringComparison.OrdinalIgnoreCase));
+        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
+        var items = hasQuery
+            ? SearchPipeline.Rank(
+                _dataStore.Data.Projects,
+                SearchQuery,
+                static project =>
+                [
+                    SearchField.Primary(project.Name, 3.5),
+                    new SearchField(project.WorkingDirectory, 1.3),
+                    SearchField.Content(project.Instructions, 1.0)
+                ],
+                static project => new SearchSortMetadata(Text: project.Name))
+            : _dataStore.Data.Projects.OrderBy(project => project.Name).ToArray();
 
-        foreach (var project in items.OrderBy(p => p.Name))
+        foreach (var project in items)
             Projects.Add(project);
     }
 
