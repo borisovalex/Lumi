@@ -34,6 +34,9 @@ public class TranscriptBuilder
     private readonly Dictionary<string, string?> _toolParentById = new(StringComparer.Ordinal);
     private readonly Dictionary<string, SubagentToolCallItem> _subagentsByToolCallId = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _toolStartTimes = [];
+    private readonly HashSet<string> _trackedFileEditToolCalls = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, List<string>> _trackedFileEditFilesByToolCall = new(StringComparer.Ordinal);
+    private readonly HashSet<string> _deferredFileEditSubscriptions = new(StringComparer.Ordinal);
     private readonly List<(ChatMessageViewModel Vm, PropertyChangedEventHandler Handler)> _pendingToolHandlers = [];
     public List<FileAttachmentItem> PendingToolFileChips { get; } = [];
     public List<(string FilePath, string ToolName, string? OldText, string? NewText)> PendingFileEdits { get; } = [];
@@ -121,6 +124,9 @@ public class TranscriptBuilder
         _toolParentById.Clear();
         _subagentsByToolCallId.Clear();
         _toolStartTimes.Clear();
+        _trackedFileEditToolCalls.Clear();
+        _trackedFileEditFilesByToolCall.Clear();
+        _deferredFileEditSubscriptions.Clear();
         PendingToolFileChips.Clear();
         PendingFileEdits.Clear();
         _pendingFileOriginalContents.Clear();
@@ -260,9 +266,12 @@ public class TranscriptBuilder
             var filePath = ToolDisplayHelper.ExtractJsonField(msgVm.Content, "filePath")
                 ?? ToolDisplayHelper.ExtractJsonField(msgVm.Content, "path");
             var operation = ToolDisplayHelper.ExtractJsonField(msgVm.Content, "operation");
+            var shouldFlushLateChange = IsCurrentTurnAlreadyEnded();
             TrackWorkspaceFileChange(
                 filePath,
                 string.Equals(operation, "Create", StringComparison.OrdinalIgnoreCase));
+            if (shouldFlushLateChange)
+                FlushPendingFileEdits();
             return;
         }
 
@@ -355,20 +364,18 @@ public class TranscriptBuilder
             return;
         }
 
-        var diffs = ToolDisplayHelper.IsFileEditTool(toolName) && initialStatus != StrataAiToolCallStatus.Failed
-            ? ToolDisplayHelper.ExtractAllDiffs(toolName, msgVm.Content)
-            : [];
+        var shouldFlushLateFileEdit = IsCurrentTurnAlreadyEnded();
         var captureLiveSnapshot = !IsRebuildingTranscript && initialStatus == StrataAiToolCallStatus.InProgress;
-        foreach (var diff in diffs)
-        {
-            RemovePendingWorkspaceFileChange(diff.FilePath);
-            PendingFileEdits.Add((diff.FilePath, toolName, diff.OldText, diff.NewText));
-            if (captureLiveSnapshot)
-                CapturePendingOriginalSnapshot(diff.FilePath, ToolDisplayHelper.IsFileCreateTool(toolName));
-        }
+        var diffs = TrackFileEditToolDiffs(msgVm, toolName, initialStatus);
+        if (diffs.Count == 0 || (!showToolCalls && initialStatus == StrataAiToolCallStatus.InProgress))
+            SubscribeToDeferredFileEditDiffs(msgVm, toolName);
 
         if (!showToolCalls)
+        {
+            if (shouldFlushLateFileEdit && diffs.Count > 0)
+                FlushPendingFileEdits();
             return;
+        }
 
         if (toolName == "task" || toolName.StartsWith("agent:", StringComparison.Ordinal))
         {
@@ -454,7 +461,7 @@ public class TranscriptBuilder
             toolCall.DiffEdits = diffs.Select(static diff => (diff.OldText, diff.NewText)).ToList();
             toolCall.ShowFileChangeAction = _showDiffAction;
             if (captureLiveSnapshot)
-                toolCall.DiffOriginalContent = CapturePendingOriginalSnapshot(diffs[0].FilePath, ToolDisplayHelper.IsFileCreateTool(toolName));
+                toolCall.DiffOriginalContent = CapturePendingOriginalSnapshot(diffs[0].FilePath, IsCreateDiff(toolName, diffs[0].OldText));
         }
 
         EnsureCurrentToolGroup(initialStatus, toolStableIdSeed, turnStableId);
@@ -480,8 +487,8 @@ public class TranscriptBuilder
                 if (toolCall.Status == StrataAiToolCallStatus.Completed && toolCall.HasDiff && toolCall.DiffFilePath is not null && !IsRebuildingTranscript)
                     toolCall.DiffCurrentContent = ReadFileContentOrEmpty(toolCall.DiffFilePath);
 
-                if (toolCall.Status == StrataAiToolCallStatus.Failed && toolCall.HasDiff && toolCall.DiffFilePath is not null)
-                    RemovePendingFileEdits(toolCall.DiffFilePath);
+                if (toolCall.Status == StrataAiToolCallStatus.Failed && ToolDisplayHelper.IsFileEditTool(toolName))
+                    RemoveTrackedFileEditDiffs(msgVm);
 
                 if (toolParentSubagent is not null)
                     UpdateSubagentState(toolParentSubagent);
@@ -502,6 +509,116 @@ public class TranscriptBuilder
         if (toolParentSubagent is not null && initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript)
             toolParentSubagent.IsExpanded = true;
         UpdateToolGroupLabel();
+        if (shouldFlushLateFileEdit && diffs.Count > 0)
+            FlushPendingFileEdits();
+    }
+
+    private List<(string FilePath, string? OldText, string? NewText)> TrackFileEditToolDiffs(
+        ChatMessageViewModel msgVm,
+        string toolName,
+        StrataAiToolCallStatus status)
+    {
+        if (!ToolDisplayHelper.IsFileEditTool(toolName) || status == StrataAiToolCallStatus.Failed)
+            return [];
+
+        var trackingKey = FileEditToolTrackingKey(msgVm);
+        if (!_trackedFileEditToolCalls.Add(trackingKey))
+            return [];
+
+        var diffs = ToolDisplayHelper.ExtractAllDiffs(toolName, msgVm.Content);
+        if (diffs.Count == 0)
+        {
+            _trackedFileEditToolCalls.Remove(trackingKey);
+            return diffs;
+        }
+
+        var captureLiveSnapshot = !IsRebuildingTranscript && status == StrataAiToolCallStatus.InProgress;
+        foreach (var diff in diffs)
+        {
+            RemovePendingWorkspaceFileChange(diff.FilePath);
+            PendingFileEdits.Add((diff.FilePath, toolName, diff.OldText, diff.NewText));
+            if (captureLiveSnapshot)
+                CapturePendingOriginalSnapshot(diff.FilePath, IsCreateDiff(toolName, diff.OldText));
+        }
+        _trackedFileEditFilesByToolCall[trackingKey] = diffs
+            .Select(static diff => diff.FilePath)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return diffs;
+    }
+
+    private void SubscribeToDeferredFileEditDiffs(ChatMessageViewModel msgVm, string toolName)
+    {
+        if (IsRebuildingTranscript || !ToolDisplayHelper.IsFileEditTool(toolName))
+            return;
+
+        var trackingKey = FileEditToolTrackingKey(msgVm);
+        if (!_deferredFileEditSubscriptions.Add(trackingKey))
+            return;
+
+        var hasTrackedDiffs = _trackedFileEditFilesByToolCall.ContainsKey(trackingKey);
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, args) =>
+        {
+            if (args.PropertyName is not (nameof(ChatMessageViewModel.Content) or nameof(ChatMessageViewModel.ToolStatus)))
+                return;
+
+            var status = MapToolStatus(msgVm.ToolStatus);
+            if (status == StrataAiToolCallStatus.Failed)
+            {
+                RemoveTrackedFileEditDiffs(msgVm);
+                msgVm.PropertyChanged -= handler;
+                RemovePendingHandler(msgVm, handler);
+                _deferredFileEditSubscriptions.Remove(trackingKey);
+                return;
+            }
+
+            if (!hasTrackedDiffs)
+            {
+                var trackedDiffs = TrackFileEditToolDiffs(msgVm, toolName, status);
+                hasTrackedDiffs = trackedDiffs.Count > 0;
+            }
+
+            if (!hasTrackedDiffs)
+            {
+                if (status == StrataAiToolCallStatus.Completed && !string.IsNullOrWhiteSpace(msgVm.Content))
+                {
+                    msgVm.PropertyChanged -= handler;
+                    RemovePendingHandler(msgVm, handler);
+                    _deferredFileEditSubscriptions.Remove(trackingKey);
+                }
+
+                return;
+            }
+
+            if (status != StrataAiToolCallStatus.Completed)
+                return;
+
+            if (IsCurrentTurnAlreadyEnded())
+                FlushPendingFileEdits();
+
+            msgVm.PropertyChanged -= handler;
+            RemovePendingHandler(msgVm, handler);
+            _deferredFileEditSubscriptions.Remove(trackingKey);
+        };
+        msgVm.PropertyChanged += handler;
+        _pendingToolHandlers.Add((msgVm, handler));
+    }
+
+    private static string FileEditToolTrackingKey(ChatMessageViewModel msgVm)
+        => msgVm.Message.ToolCallId ?? msgVm.Message.Id.ToString();
+
+    private void RemoveTrackedFileEditDiffs(ChatMessageViewModel msgVm)
+    {
+        var trackingKey = FileEditToolTrackingKey(msgVm);
+        if (_trackedFileEditFilesByToolCall.Remove(trackingKey, out var filePaths))
+        {
+            foreach (var filePath in filePaths)
+                RemovePendingFileEdits(filePath);
+        }
+
+        _trackedFileEditToolCalls.Remove(trackingKey);
     }
 
     private void ProcessSubagentToolMessage(ChatMessageViewModel msgVm, StrataAiToolCallStatus initialStatus, string toolStableIdSeed, string turnStableId)
@@ -790,14 +907,27 @@ public class TranscriptBuilder
             return;
 
         var fileChanges = GroupFileEdits();
-        var stableId = fileChanges.Count > 0
-            ? $"file-changes:{fileChanges[0].FilePath}:{fileChanges.Count}"
-            : null;
-        AppendToCurrentTurn(new FileChangesSummaryItem(fileChanges, stableId), TurnStableIdFor(stableId ?? "file-changes"));
+        if (fileChanges.Count > 0)
+        {
+            var existingSummary = _currentTurn?.Items.OfType<FileChangesSummaryItem>().LastOrDefault();
+            if (existingSummary is not null)
+            {
+                existingSummary.MergeChanges(fileChanges);
+            }
+            else
+            {
+                var stableId = $"file-changes:{fileChanges[0].FilePath}:{fileChanges.Count}";
+                AppendToCurrentTurn(new FileChangesSummaryItem(fileChanges, stableId), TurnStableIdFor(stableId));
+            }
+        }
+
         PendingFileEdits.Clear();
         _pendingFileOriginalContents.Clear();
         _pendingWorkspaceFileChanges.Clear();
     }
+
+    private bool IsCurrentTurnAlreadyEnded()
+        => _currentTurn?.Items.Any(static item => item is TurnModelItem) == true;
 
     public void TrackWorkspaceFileChange(string? filePath, bool isCreate)
     {
@@ -891,7 +1021,7 @@ public class TranscriptBuilder
         {
             if (!grouped.TryGetValue(filePath, out var item))
             {
-                var isCreate = ToolDisplayHelper.IsFileCreateTool(toolName);
+                var isCreate = IsCreateDiff(toolName, oldText);
                 item = new FileChangeItem(filePath, isCreate, _showDiffAction);
                 grouped[filePath] = item;
             }
@@ -960,6 +1090,10 @@ public class TranscriptBuilder
             return treatMissingAsEmpty ? string.Empty : null;
         }
     }
+
+    private static bool IsCreateDiff(string toolName, string? oldText)
+        => ToolDisplayHelper.IsFileCreateTool(toolName)
+           || (toolName == "apply_patch" && oldText is null);
 
     private void EnsureCurrentToolGroup(StrataAiToolCallStatus initialStatus, string? stableIdSeed = null, string? turnStableId = null)
     {

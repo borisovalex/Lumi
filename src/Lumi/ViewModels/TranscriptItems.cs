@@ -860,6 +860,11 @@ public partial class FileChangeItem : ObservableObject
         Edits.Add((oldText, newText));
         LinesAdded += CountLines(newText);
         LinesRemoved += CountLines(oldText);
+        OnPropertyChanged(nameof(LinesAdded));
+        OnPropertyChanged(nameof(LinesRemoved));
+        OnPropertyChanged(nameof(StatsAdded));
+        OnPropertyChanged(nameof(StatsRemoved));
+        OnPropertyChanged(nameof(HasRemovals));
     }
 
     public void SetSnapshots(string? originalContent, string? currentContent)
@@ -867,6 +872,15 @@ public partial class FileChangeItem : ObservableObject
         OriginalContent = originalContent;
         CurrentContent = currentContent;
         HasSnapshots = true;
+    }
+
+    public void MergeFrom(FileChangeItem other)
+    {
+        foreach (var (oldText, newText) in other.Edits)
+            AddEdit(oldText, newText);
+
+        if (other.HasSnapshots)
+            SetSnapshots(HasSnapshots ? OriginalContent : other.OriginalContent, other.CurrentContent);
     }
 
     /// <summary>
@@ -934,6 +948,27 @@ public partial class FileChangesSummaryItem : TranscriptItem
         foreach (var fc in fileChanges)
             FileChanges.Add(fc);
 
+        RefreshSummary();
+    }
+
+    public void MergeChanges(IEnumerable<FileChangeItem> fileChanges)
+    {
+        foreach (var fileChange in fileChanges)
+        {
+            var existing = FileChanges.FirstOrDefault(existing =>
+                string.Equals(existing.FilePath, fileChange.FilePath, StringComparison.OrdinalIgnoreCase));
+            if (existing is null)
+                FileChanges.Add(fileChange);
+            else
+                existing.MergeFrom(fileChange);
+        }
+
+        RefreshSummary();
+    }
+
+    private void RefreshSummary()
+    {
+        var fileChanges = FileChanges.ToList();
         var totalAdded = fileChanges.Sum(fc => fc.LinesAdded);
         var totalRemoved = fileChanges.Sum(fc => fc.LinesRemoved);
         TotalStatsAdded = $"+{totalAdded}";

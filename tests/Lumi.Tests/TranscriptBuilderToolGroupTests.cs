@@ -358,6 +358,256 @@ public sealed class TranscriptBuilderToolGroupTests
         }
     }
 
+    [Fact]
+    public void ProcessMessageToTranscript_LateWorkspaceFileChangedAfterIdleFlushesSummary()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"lumi-transcript-{Guid.NewGuid():N}.txt");
+        var secondFilePath = Path.Combine(Path.GetTempPath(), $"lumi-transcript-{Guid.NewGuid():N}.txt");
+        File.WriteAllText(filePath, "after idle");
+        File.WriteAllText(secondFilePath, "also after idle");
+
+        try
+        {
+            var builder = CreateBuilder();
+            var liveTurns = new ObservableCollection<TranscriptTurn>();
+            builder.SetLiveTarget(liveTurns);
+
+            builder.ProcessMessageToTranscript(CreateAssistantVm("Done."));
+            builder.AppendModelLabel("gpt-5.5");
+            builder.FlushPendingFileEdits();
+
+            builder.ProcessMessageToTranscript(CreateToolVm(
+                "workspace-file-1",
+                ToolDisplayHelper.WorkspaceFileChangedToolName,
+                "Completed",
+                CreateWorkspaceFileChangedJson(filePath, "Modify")));
+            builder.ProcessMessageToTranscript(CreateToolVm(
+                "workspace-file-2",
+                ToolDisplayHelper.WorkspaceFileChangedToolName,
+                "Completed",
+                CreateWorkspaceFileChangedJson(secondFilePath, "Modify")));
+
+            var turn = Assert.Single(liveTurns);
+            var summary = Assert.IsType<FileChangesSummaryItem>(Assert.Single(turn.Items.OfType<FileChangesSummaryItem>()));
+            Assert.Equal(2, summary.FileChanges.Count);
+            Assert.Contains(summary.FileChanges,
+                change => string.Equals(change.FilePath, filePath, StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(summary.FileChanges,
+                change => string.Equals(change.FilePath, secondFilePath, StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            File.Delete(filePath);
+            File.Delete(secondFilePath);
+        }
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_ApplyPatchToolTracksChangedFiles()
+    {
+        var builder = CreateBuilder(showToolCalls: false);
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        builder.ProcessMessageToTranscript(CreateToolVm(
+            "apply-patch-1",
+            "apply_patch",
+            "Completed",
+            """
+            *** Begin Patch
+            *** Update File: src\Lumi\ViewModels\Widget.cs
+            @@
+            -old
+            +new
+            *** Add File: src\Lumi\NewFile.cs
+            +line one
+            +line two
+            *** End Patch
+            """));
+        builder.FlushPendingFileEdits();
+
+        var turn = Assert.Single(liveTurns);
+        var summary = Assert.IsType<FileChangesSummaryItem>(Assert.Single(turn.Items));
+        Assert.Equal(2, summary.FileChanges.Count);
+        Assert.Contains(summary.FileChanges,
+            change => change.FilePath.EndsWith(@"Widget.cs", StringComparison.Ordinal) && !change.IsCreate);
+        Assert.Contains(summary.FileChanges,
+            change => change.FilePath.EndsWith(@"NewFile.cs", StringComparison.Ordinal) && change.IsCreate);
+        Assert.Equal("+3", summary.TotalStatsAdded);
+        Assert.Equal("−1", summary.TotalStatsRemoved);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_LateApplyPatchToolFlushesSummaryAfterIdle()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        builder.ProcessMessageToTranscript(CreateAssistantVm("Done."));
+        builder.AppendModelLabel("gpt-5.5");
+        builder.FlushPendingFileEdits();
+
+        builder.ProcessMessageToTranscript(CreateToolVm(
+            "apply-patch-late",
+            "apply_patch",
+            "Completed",
+            """
+            *** Begin Patch
+            *** Add File: file-change-proof.txt
+            +proof
+            *** End Patch
+            """));
+
+        var turn = Assert.Single(liveTurns);
+        var summary = Assert.IsType<FileChangesSummaryItem>(Assert.Single(turn.Items.OfType<FileChangesSummaryItem>()));
+        var change = Assert.Single(summary.FileChanges);
+        Assert.Equal("file-change-proof.txt", change.FilePath);
+        Assert.True(change.IsCreate);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_FileEditToolTracksDiffWhenArgsArriveAfterToolStart()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var toolVm = CreateToolVm("apply-patch-deferred", "apply_patch", "InProgress", "");
+        builder.ProcessMessageToTranscript(toolVm);
+        builder.ProcessMessageToTranscript(CreateAssistantVm("Done."));
+        builder.AppendModelLabel("gpt-5.5");
+        builder.FlushPendingFileEdits();
+
+        toolVm.Message.Content = """
+            *** Begin Patch
+            *** Add File: deferred-file-change.txt
+            +proof
+            *** End Patch
+            """;
+        toolVm.NotifyContentChanged();
+        toolVm.Message.ToolStatus = "Completed";
+        toolVm.NotifyToolStatusChanged();
+
+        var turn = Assert.Single(liveTurns);
+        var summary = Assert.IsType<FileChangesSummaryItem>(Assert.Single(turn.Items.OfType<FileChangesSummaryItem>()));
+        var change = Assert.Single(summary.FileChanges);
+        Assert.Equal("deferred-file-change.txt", change.FilePath);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_FailedFileEditToolRemovesPendingDiffs()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var toolVm = CreateToolVm(
+            "apply-patch-failed",
+            "apply_patch",
+            "InProgress",
+            """
+            *** Begin Patch
+            *** Add File: failed-file-change.txt
+            +proof
+            *** End Patch
+            """);
+
+        builder.ProcessMessageToTranscript(toolVm);
+        toolVm.Message.ToolStatus = "Failed";
+        toolVm.NotifyToolStatusChanged();
+        builder.FlushPendingFileEdits();
+
+        Assert.Empty(builder.PendingFileEdits);
+        Assert.DoesNotContain(
+            Assert.Single(liveTurns).Items,
+            item => item is FileChangesSummaryItem);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_FailedDeferredFileEditToolRemovesPendingDiffs()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var toolVm = CreateToolVm("apply-patch-deferred-failed", "apply_patch", "InProgress", "");
+        builder.ProcessMessageToTranscript(toolVm);
+
+        toolVm.Message.Content = """
+            *** Begin Patch
+            *** Add File: failed-deferred-file-change.txt
+            +proof
+            *** End Patch
+            """;
+        toolVm.NotifyContentChanged();
+        toolVm.Message.ToolStatus = "Failed";
+        toolVm.NotifyToolStatusChanged();
+        builder.FlushPendingFileEdits();
+
+        Assert.Empty(builder.PendingFileEdits);
+        Assert.DoesNotContain(
+            Assert.Single(liveTurns).Items,
+            item => item is FileChangesSummaryItem);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_HiddenFailedFileEditToolRemovesPendingDiffs()
+    {
+        var builder = CreateBuilder(showToolCalls: false);
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var toolVm = CreateToolVm(
+            "apply-patch-hidden-failed",
+            "apply_patch",
+            "InProgress",
+            """
+            *** Begin Patch
+            *** Add File: hidden-failed-file-change.txt
+            +proof
+            *** End Patch
+            """);
+
+        builder.ProcessMessageToTranscript(toolVm);
+        toolVm.Message.ToolStatus = "Failed";
+        toolVm.NotifyToolStatusChanged();
+        builder.FlushPendingFileEdits();
+
+        Assert.Empty(builder.PendingFileEdits);
+        Assert.Empty(liveTurns);
+    }
+
+    [Fact]
+    public void FlushPendingFileEdits_MergesLaterChangesForSameFile()
+    {
+        var builder = CreateBuilder(showToolCalls: false);
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        builder.ProcessMessageToTranscript(CreateToolVm(
+            "edit-1",
+            "edit",
+            "Completed",
+            "{\"filePath\":\"E:\\\\repo\\\\Widget.cs\",\"oldString\":\"old\",\"newString\":\"new\"}"));
+        builder.FlushPendingFileEdits();
+
+        builder.ProcessMessageToTranscript(CreateToolVm(
+            "edit-2",
+            "edit",
+            "Completed",
+            "{\"filePath\":\"E:\\\\repo\\\\Widget.cs\",\"oldString\":\"new\",\"newString\":\"newer\"}"));
+        builder.FlushPendingFileEdits();
+
+        var turn = Assert.Single(liveTurns);
+        var summary = Assert.IsType<FileChangesSummaryItem>(Assert.Single(turn.Items));
+        var change = Assert.Single(summary.FileChanges);
+        Assert.Equal("Widget.cs", change.FileName);
+        Assert.Equal(2, change.Edits.Count);
+        Assert.Equal("+2", summary.TotalStatsAdded);
+        Assert.Equal("−2", summary.TotalStatsRemoved);
+    }
+
     private static TranscriptBuilder CreateBuilder(bool showToolCalls = true)
         => new(CreateDataStore(showToolCalls), _ => { }, (_, _) => { }, (_, _) => Task.CompletedTask, () => null);
 

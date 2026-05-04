@@ -21,7 +21,7 @@ public static partial class ToolDisplayHelper
     {
         "powershell" or "run_in_terminal" or "bash" or "shell" => "⌨",
         "create" or "write_file" or "create_file" or "edit" or "edit_file" or "str_replace" or "insert"
-            or "replace_string_in_file" or "multi_replace_string_in_file" or "str_replace_editor" => "📝",
+            or "replace_string_in_file" or "multi_replace_string_in_file" or "str_replace_editor" or "apply_patch" => "📝",
         "view" or "read_file" or "read" => "📄",
         "browser" or "browser_navigate" or "browser_do" or "browser_look" or "browser_js" => "🌐",
         "web_search" or "search" => "🔎",
@@ -49,7 +49,7 @@ public static partial class ToolDisplayHelper
         => toolName is "edit" or "edit_file" or "str_replace" or "str_replace_editor"
             or "replace_string_in_file" or "insert" or "create" or "write_file"
             or "create_file" or "create_and_write_file" or "write" or "save_file"
-            or "multi_replace_string_in_file";
+            or "multi_replace_string_in_file" or "apply_patch";
 
     public static bool IsFileCreateTool(string toolName)
         => toolName is "create" or "write_file" or "create_file" or "write"
@@ -103,6 +103,8 @@ public static partial class ToolDisplayHelper
             case "edit" or "edit_file" or "str_replace" or "str_replace_editor"
                 or "replace_string_in_file" or "insert":
                 return (Loc.Tool_EditingFile, ExtractShortFileName(argsJson));
+            case "apply_patch":
+                return (Loc.Tool_EditingFiles, null);
             case "multi_replace_string_in_file":
                 return (Loc.Tool_EditingFiles, ExtractShortFileName(argsJson));
             case "powershell" or "run_in_terminal" or "bash" or "shell":
@@ -226,6 +228,9 @@ public static partial class ToolDisplayHelper
                 sb.AppendLine($"**Mode:** {mode}");
             return sb.Length > 0 ? sb.ToString().TrimEnd() : null;
         }
+
+        if (toolName == "apply_patch")
+            return null;
 
         try
         {
@@ -418,6 +423,10 @@ public static partial class ToolDisplayHelper
     {
         var results = new List<(string FilePath, string? OldText, string? NewText)>();
         if (string.IsNullOrWhiteSpace(argsJson)) return results;
+
+        if (toolName == "apply_patch")
+            return ExtractApplyPatchDiffs(argsJson);
+
         try
         {
             using var doc = JsonDocument.Parse(argsJson);
@@ -455,8 +464,103 @@ public static partial class ToolDisplayHelper
 
             results.Add((filePath, oldText, newText));
         }
-        catch { }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+        }
         return results;
+    }
+
+    private static List<(string FilePath, string? OldText, string? NewText)> ExtractApplyPatchDiffs(string? args)
+    {
+        var results = new List<(string FilePath, string? OldText, string? NewText)>();
+        var patch = ExtractPatchText(args);
+        if (string.IsNullOrWhiteSpace(patch))
+            return results;
+
+        var lines = patch.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (line.StartsWith("*** Add File: ", StringComparison.Ordinal))
+            {
+                var filePath = line["*** Add File: ".Length..].Trim();
+                var added = new List<string>();
+                while (++i < lines.Length && !IsPatchBoundary(lines[i]))
+                {
+                    if (lines[i].StartsWith('+') && !lines[i].StartsWith("+++", StringComparison.Ordinal))
+                        added.Add(lines[i][1..]);
+                }
+                i--;
+                if (!string.IsNullOrWhiteSpace(filePath))
+                    results.Add((filePath, null, string.Join('\n', added)));
+                continue;
+            }
+
+            if (line.StartsWith("*** Update File: ", StringComparison.Ordinal))
+            {
+                var filePath = line["*** Update File: ".Length..].Trim();
+                var oldLines = new List<string>();
+                var newLines = new List<string>();
+                while (++i < lines.Length && !IsPatchBoundary(lines[i]))
+                {
+                    if (lines[i].StartsWith('+') && !lines[i].StartsWith("+++", StringComparison.Ordinal))
+                        newLines.Add(lines[i][1..]);
+                    else if (lines[i].StartsWith('-') && !lines[i].StartsWith("---", StringComparison.Ordinal))
+                        oldLines.Add(lines[i][1..]);
+                }
+                i--;
+                if (!string.IsNullOrWhiteSpace(filePath))
+                    results.Add((filePath, string.Join('\n', oldLines), string.Join('\n', newLines)));
+                continue;
+            }
+
+            if (line.StartsWith("*** Delete File: ", StringComparison.Ordinal))
+            {
+                var filePath = line["*** Delete File: ".Length..].Trim();
+                if (!string.IsNullOrWhiteSpace(filePath))
+                    results.Add((filePath, string.Empty, null));
+            }
+        }
+
+        return results;
+    }
+
+    private static bool IsPatchBoundary(string line)
+        => line.StartsWith("*** Add File: ", StringComparison.Ordinal)
+           || line.StartsWith("*** Update File: ", StringComparison.Ordinal)
+           || line.StartsWith("*** Delete File: ", StringComparison.Ordinal)
+           || line.StartsWith("*** End Patch", StringComparison.Ordinal);
+
+    private static string? ExtractPatchText(string? args)
+    {
+        if (string.IsNullOrWhiteSpace(args))
+            return null;
+
+        var trimmed = args.Trim();
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('"'))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                if (doc.RootElement.ValueKind == JsonValueKind.String)
+                    return doc.RootElement.GetString();
+
+                foreach (var fieldName in new[] { "patch", "input", "text", "content" })
+                {
+                    if (doc.RootElement.TryGetProperty(fieldName, out var value)
+                        && value.ValueKind == JsonValueKind.String)
+                    {
+                        return value.GetString();
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+            {
+                // Fall through and treat the tool input as the raw patch text.
+            }
+        }
+
+        return args;
     }
 
     public sealed class TodoStepSnapshot
