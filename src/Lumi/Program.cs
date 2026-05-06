@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Threading;
 using System;
 using System.IO;
 using System.Linq;
@@ -46,8 +47,36 @@ class Program
         }
 #endif
 
+        Dispatcher.UIThread.UnhandledException += OnDispatcherUnhandledException;
+
         BuildAvaloniaApp()
             .StartWithClassicDesktopLifetime(args);
+    }
+
+    private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        if (!IsAvaloniaTextSelectionHandleBoundsFailure(e.Exception))
+            return;
+
+        System.Diagnostics.Trace.TraceWarning(
+            "Suppressed known Avalonia text-selection exception: {0}", e.Exception);
+        e.Handled = true;
+    }
+
+    private static bool IsAvaloniaTextSelectionHandleBoundsFailure(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is InvalidOperationException
+                && string.Equals(current.Message, "Covered length must be greater than zero.", StringComparison.Ordinal)
+                && current.StackTrace?.Contains("TextSelectionHandleCanvas", StringComparison.Ordinal) == true
+                && current.StackTrace?.Contains("HitTestTextRange", StringComparison.Ordinal) == true)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
 #if DEBUG
