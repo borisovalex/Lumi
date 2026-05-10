@@ -43,6 +43,43 @@ public partial class ChatViewModel
     private static string? NormalizeAssistantContent(string? content)
         => content?.TrimStart('\n', '\r');
 
+    private static ChatMessage? AttachSourcesToFinalAssistantMessage(
+        Chat chat,
+        IReadOnlyList<SearchSource> fetchedSources)
+    {
+        if (fetchedSources.Count == 0)
+            return null;
+
+        ChatMessage? target = null;
+        for (var i = chat.Messages.Count - 1; i >= 0; i--)
+        {
+            var message = chat.Messages[i];
+            if (message.Role == "assistant")
+            {
+                target = message;
+                break;
+            }
+
+            if (message.Role == "user")
+                break;
+        }
+
+        if (target is null)
+            return null;
+
+        var added = false;
+        foreach (var source in fetchedSources)
+        {
+            if (target.Sources.Any(existing => string.Equals(existing.Url, source.Url, StringComparison.OrdinalIgnoreCase)))
+                continue;
+
+            target.Sources.Add(source);
+            added = true;
+        }
+
+        return added ? target : null;
+    }
+
     /// <summary>Subscribes to events on a CopilotSession. Each subscription captures its own
     /// streaming state via closures and always updates the Chat model. UI updates are gated
     /// on _activeSession so only the displayed chat's events touch the UI.</summary>
@@ -76,8 +113,28 @@ public partial class ChatViewModel
         var subagentAssistantStreams = new Dictionary<string, StreamingTextAccumulator>(StringComparer.Ordinal);
         var subagentReasoningStreams = new Dictionary<string, StreamingTextAccumulator>(StringComparer.Ordinal);
         string? mostRecentSubagentToolCallId = null;
-        var pendingSearchSources = new List<SearchSource>();
+        var pendingFetchedSources = new List<SearchSource>();
         var pendingFetchedSkillRefs = new List<SkillReference>();
+
+        static void AddPendingSource(List<SearchSource> sources, SearchSource source)
+        {
+            if (sources.Any(existing => string.Equals(existing.Url, source.Url, StringComparison.OrdinalIgnoreCase)))
+                return;
+
+            sources.Add(source);
+        }
+
+        void AttachPendingSourcesToFinalAssistantMessage()
+        {
+            if (pendingFetchedSources.Count == 0)
+                return;
+
+            var updatedMessage = AttachSourcesToFinalAssistantMessage(chat, pendingFetchedSources);
+            pendingFetchedSources.Clear();
+
+            if (updatedMessage is not null && IsDisplayedSession())
+                RebuildTranscript();
+        }
 
         bool IsDisplayedSession() => CurrentChat?.Id == chat.Id && _activeSession == session;
 
@@ -580,11 +637,6 @@ public partial class ChatViewModel
                                 IsStreaming = false,
                                 Model = turnModelId
                             };
-                            if (pendingSearchSources.Count > 0)
-                            {
-                                completedMessage.Sources.AddRange(pendingSearchSources);
-                                pendingSearchSources.Clear();
-                            }
                             if (pendingFetchedSkillRefs.Count > 0)
                             {
                                 completedMessage.ActiveSkills.AddRange(pendingFetchedSkillRefs);
@@ -602,11 +654,6 @@ public partial class ChatViewModel
                         {
                             streamingMsg.Content = finalContent;
                             streamingMsg.IsStreaming = false;
-                            if (pendingSearchSources.Count > 0)
-                            {
-                                streamingMsg.Sources.AddRange(pendingSearchSources);
-                                pendingSearchSources.Clear();
-                            }
                             if (pendingFetchedSkillRefs.Count > 0)
                             {
                                 streamingMsg.ActiveSkills.AddRange(pendingFetchedSkillRefs);
@@ -841,15 +888,10 @@ public partial class ChatViewModel
                         {
                             // fetch_skill tracking is handled by TranscriptBuilder.ProcessToolMessage()
 
-                            if (ToolDisplayHelper.IsSearchTool(toolName))
+                            if (ToolDisplayHelper.IsWebFetchTool(toolName)
+                                && ToolDisplayHelper.ExtractFetchSource(toolMsg.Content) is { } fetchedSource)
                             {
-                                foreach (var source in ToolDisplayHelper.ExtractSearchSources(toolEnd.Data.Result))
-                                {
-                                    if (pendingSearchSources.Any(existing => string.Equals(existing.Url, source.Url, StringComparison.OrdinalIgnoreCase)))
-                                        continue;
-
-                                    pendingSearchSources.Add(source);
-                                }
+                                AddPendingSource(pendingFetchedSources, fetchedSource);
                             }
 
                             if (IsDisplayedSession()
@@ -1013,11 +1055,13 @@ public partial class ChatViewModel
                     // (not per-message during agentic loops).
                     Dispatcher.UIThread.Post(() =>
                     {
-                    if (IsDisplayedSession())
-                    {
-                        _transcriptBuilder.AppendModelLabel(turnModelId);
-                        ScrollToEndRequested?.Invoke();
-                    }
+                        AttachPendingSourcesToFinalAssistantMessage();
+
+                        if (IsDisplayedSession())
+                        {
+                            _transcriptBuilder.AppendModelLabel(turnModelId);
+                            ScrollToEndRequested?.Invoke();
+                        }
                     });
 
                     // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
@@ -1463,8 +1507,12 @@ public partial class ChatViewModel
                         runtime.TotalOutputTokens += (long)(d.OutputTokens ?? 0);
                         // Each API call sends the full conversation context, so the latest
                         // InputTokens is the best proxy for current context window usage.
-                        if (turnInput > 0)
-                            runtime.ContextCurrentTokens = turnInput;
+                        ApplyContextUsage(
+                            chat,
+                            runtime,
+                            turnInput > 0 ? turnInput : null,
+                            ResolveKnownContextTokenLimit(d.Model) is > 0 and var modelTokenLimit ? modelTokenLimit : null,
+                            IsDisplayedSession());
                         // Persist token counts to the Chat model so they survive restarts.
                         chat.TotalInputTokens = runtime.TotalInputTokens;
                         chat.TotalOutputTokens = runtime.TotalOutputTokens;
@@ -1472,7 +1520,6 @@ public partial class ChatViewModel
                         {
                             TotalInputTokens = runtime.TotalInputTokens;
                             TotalOutputTokens = runtime.TotalOutputTokens;
-                            ContextCurrentTokens = runtime.ContextCurrentTokens;
                             OnPropertyChanged(nameof(CurrentChat));
                         }
                     });
@@ -1481,9 +1528,14 @@ public partial class ChatViewModel
                 case SessionUsageInfoEvent sessionUsage:
                     Dispatcher.UIThread.Post(() =>
                     {
-                        runtime.ContextTokenLimit = (long)sessionUsage.Data.TokenLimit;
-                        if (IsDisplayedSession())
-                            ContextTokenLimit = runtime.ContextTokenLimit;
+                        var currentTokens = NormalizeTokenCount(sessionUsage.Data.CurrentTokens);
+                        var tokenLimit = NormalizeTokenCount(sessionUsage.Data.TokenLimit);
+                        ApplyContextUsage(
+                            chat,
+                            runtime,
+                            currentTokens > 0 ? currentTokens : null,
+                            tokenLimit > 0 ? tokenLimit : null,
+                            IsDisplayedSession());
                     });
                     break;
 
@@ -1514,6 +1566,7 @@ public partial class ChatViewModel
                         if (IsDisplayedSession() && !AvailableModels.Contains(effectiveModel))
                             AvailableModels.Add(effectiveModel);
                         chat.LastModelUsed = effectiveModel;
+                        ApplyKnownContextTokenLimit(chat, runtime, effectiveModel, IsDisplayedSession());
                     }
 
                     chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
@@ -1551,6 +1604,7 @@ public partial class ChatViewModel
                         if (IsDisplayedSession() && !AvailableModels.Contains(effectiveModel))
                             AvailableModels.Add(effectiveModel);
                         chat.LastModelUsed = effectiveModel;
+                        ApplyKnownContextTokenLimit(chat, runtime, effectiveModel, IsDisplayedSession());
                     }
 
                     chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
@@ -1578,6 +1632,7 @@ public partial class ChatViewModel
                         if (IsDisplayedSession() && !AvailableModels.Contains(modelChange.Data.NewModel))
                             AvailableModels.Add(modelChange.Data.NewModel);
                         chat.LastModelUsed = modelChange.Data.NewModel;
+                        ApplyKnownContextTokenLimit(chat, runtime, modelChange.Data.NewModel, IsDisplayedSession());
                         chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
                             chat.LastReasoningEffortUsed ?? ResolvePersistedReasoningEffortForChat(chat, modelChange.Data.NewModel),
                             modelChange.Data.NewModel,
@@ -1881,7 +1936,11 @@ public partial class ChatViewModel
                 Chat = chat,
                 TotalInputTokens = chat?.TotalInputTokens ?? 0,
                 TotalOutputTokens = chat?.TotalOutputTokens ?? 0,
+                ContextCurrentTokens = chat?.ContextCurrentTokens ?? 0,
+                ContextTokenLimit = chat?.ContextTokenLimit ?? 0,
             };
+            if (chat is not null)
+                ApplyKnownContextTokenLimit(chat, runtime, ResolveSelectedModelForChat(chat), updateDisplayed: false);
             _runtimeStates[chatId] = runtime;
         }
         return runtime;

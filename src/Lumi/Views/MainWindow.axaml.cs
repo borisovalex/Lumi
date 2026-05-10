@@ -19,6 +19,7 @@ using Avalonia.Layout;
 using Avalonia.Markup.Xaml;
 using Avalonia.Media;
 using Avalonia.Rendering.Composition;
+using Avalonia.Rendering.Composition.Animations;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
@@ -80,6 +81,7 @@ public partial class MainWindow : Window
     private Border? _navPill;
     private TextBlock?[] _navLabels = [];
     private Rect[] _navHitRegions = [];
+    private ImplicitAnimationCollection?[] _navButtonOffsetAnimations = [];
     private CancellationTokenSource? _sidebarAnimCts;
     private CancellationTokenSource? _navHoverIntentCts;
     private Border? _diffIsland;
@@ -101,6 +103,7 @@ public partial class MainWindow : Window
     private int _activeNavIndex = -1;
     private int _hoveredNavIndex = -1;
     private int _pendingNavHoverIndex = -1;
+    private int _navPillScaleAnimationVersion;
     private bool _isNavPillWidthLocked;
     private double _expandedSidebarWidth = DefaultSidebarWidth;
     private sealed record ProjectFilterCandidate(Project Project, int ChatCount, DateTimeOffset? LastActivity, double SearchScore);
@@ -1213,14 +1216,16 @@ public partial class MainWindow : Window
 
     private void InitNavLabelVisuals()
     {
-        // Implicit Offset animation on each nav button — when the label expands
-        // and layout repositions siblings, the change animates smoothly on the
-        // render thread instead of snapping.
-        foreach (var btn in _navButtons)
-        {
-            if (btn is null) continue;
-            SetNavButtonOffsetAnimation(btn, enabled: true);
-        }
+        EnsureNavButtonOffsetAnimationCacheSize();
+
+        for (var i = 0; i < _navButtons.Length; i++)
+            SetNavButtonOffsetAnimation(i, enabled: true);
+    }
+
+    private void EnsureNavButtonOffsetAnimationCacheSize()
+    {
+        if (_navButtonOffsetAnimations.Length != _navButtons.Length)
+            Array.Resize(ref _navButtonOffsetAnimations, _navButtons.Length);
     }
 
     private void CaptureNavLayoutMetrics()
@@ -1238,6 +1243,7 @@ public partial class MainWindow : Window
         _navHitRegions = new Rect[_navButtons.Length];
         _navBaseButtonWidths = new double[_navButtons.Length];
         _navMinButtonWidths = new double[_navButtons.Length];
+        EnsureNavButtonOffsetAnimationCacheSize();
         var centers = new double[_navButtons.Length];
 
         for (var i = 0; i < _navButtons.Length; i++)
@@ -1439,7 +1445,7 @@ public partial class MainWindow : Window
                 continue;
 
             var isHovered = i == hoveredIndex;
-            SetNavButtonOffsetAnimation(button, enabled: !isHovered);
+            SetNavButtonOffsetAnimation(i, enabled: !isHovered);
             SetClass(button, "hovered", isHovered);
             button.Padding = GetNavButtonPadding(reductions[i]);
 
@@ -1448,18 +1454,37 @@ public partial class MainWindow : Window
         }
     }
 
-    private static void SetNavButtonOffsetAnimation(Button button, bool enabled)
+    private void SetNavButtonOffsetAnimation(int index, bool enabled)
     {
+        if (index < 0 || index >= _navButtons.Length || _navButtons[index] is not Button button)
+            return;
+
         var visual = ElementComposition.GetElementVisual(button);
         if (visual is null)
             return;
 
         if (!enabled)
         {
-            visual.ImplicitAnimations = null;
+            if (visual.ImplicitAnimations is not null)
+                visual.ImplicitAnimations = null;
             return;
         }
 
+        EnsureNavButtonOffsetAnimationCacheSize();
+
+        var implicitAnims = _navButtonOffsetAnimations[index];
+        if (implicitAnims is null)
+        {
+            implicitAnims = CreateNavButtonOffsetAnimation(visual);
+            _navButtonOffsetAnimations[index] = implicitAnims;
+        }
+
+        if (!ReferenceEquals(visual.ImplicitAnimations, implicitAnims))
+            visual.ImplicitAnimations = implicitAnims;
+    }
+
+    private static ImplicitAnimationCollection CreateNavButtonOffsetAnimation(CompositionVisual visual)
+    {
         var compositor = visual.Compositor;
         var offsetAnim = compositor.CreateVector3DKeyFrameAnimation();
         offsetAnim.Target = "Offset";
@@ -1468,7 +1493,7 @@ public partial class MainWindow : Window
 
         var implicitAnims = compositor.CreateImplicitAnimationCollection();
         implicitAnims["Offset"] = offsetAnim;
-        visual.ImplicitAnimations = implicitAnims;
+        return implicitAnims;
     }
 
     private double[] DistributeNavReduction(int hoveredIndex, double requiredReduction)
@@ -1583,40 +1608,54 @@ public partial class MainWindow : Window
     {
         if (sender is not Border pill) return;
 
-        var visual = ElementComposition.GetElementVisual(pill);
-        if (visual is null) return;
-
-        var w = pill.Bounds.Width;
-        var h = pill.Bounds.Height;
-        visual.CenterPoint = new Avalonia.Vector3D(w / 2, h / 2, 0);
         UpdateHoveredNavButton(pill, e);
-
-        var compositor = visual.Compositor;
-        var scaleAnim = compositor.CreateVector3DKeyFrameAnimation();
-        scaleAnim.Target = "Scale";
-        scaleAnim.InsertKeyFrame(1f, new Avalonia.Vector3D(1.12, 1.12, 1));
-        scaleAnim.Duration = TimeSpan.FromMilliseconds(250);
-        visual.StartAnimation("Scale", scaleAnim);
+        AnimateNavPillScale(pill, new Avalonia.Vector3D(1.12, 1.12, 1), TimeSpan.FromMilliseconds(250));
     }
 
     private void OnNavPillPointerExited(object? sender, PointerEventArgs e)
     {
-        if (sender is not Border pill) return;
+        RequestHoveredNavButton(-1);
 
+        if (sender is Border pill)
+            AnimateNavPillScale(pill, new Avalonia.Vector3D(1, 1, 1), TimeSpan.FromMilliseconds(250));
+    }
+
+    private async void AnimateNavPillScale(Border pill, Avalonia.Vector3D targetScale, TimeSpan duration)
+    {
         var visual = ElementComposition.GetElementVisual(pill);
         if (visual is null) return;
 
+        var version = ++_navPillScaleAnimationVersion;
         var w = pill.Bounds.Width;
         var h = pill.Bounds.Height;
         visual.CenterPoint = new Avalonia.Vector3D(w / 2, h / 2, 0);
-        RequestHoveredNavButton(-1);
+        visual.StopAnimation("Scale");
 
         var compositor = visual.Compositor;
         var scaleAnim = compositor.CreateVector3DKeyFrameAnimation();
         scaleAnim.Target = "Scale";
-        scaleAnim.InsertKeyFrame(1f, new Avalonia.Vector3D(1, 1, 1));
-        scaleAnim.Duration = TimeSpan.FromMilliseconds(250);
+        scaleAnim.InsertKeyFrame(1f, targetScale);
+        scaleAnim.Duration = duration;
         visual.StartAnimation("Scale", scaleAnim);
+
+        try
+        {
+            await Task.Delay(duration + TimeSpan.FromMilliseconds(20));
+        }
+        catch (ObjectDisposedException)
+        {
+            return;
+        }
+
+        if (version != _navPillScaleAnimationVersion || !pill.IsAttachedToVisualTree())
+            return;
+
+        var currentVisual = ElementComposition.GetElementVisual(pill);
+        if (currentVisual is null)
+            return;
+
+        currentVisual.StopAnimation("Scale");
+        currentVisual.Scale = targetScale;
     }
 
     private void NewChatButton_Click(object? sender, RoutedEventArgs e)
