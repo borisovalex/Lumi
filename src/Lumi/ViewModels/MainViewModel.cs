@@ -100,6 +100,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     // Sub-ViewModels
     public ChatViewModel ChatVM { get; }
+    public SplitChatWorkspaceViewModel SplitWorkspace { get; }
     public BackgroundJobsViewModel JobsVM { get; }
     public SkillsViewModel SkillsVM { get; }
     public AgentsViewModel AgentsVM { get; }
@@ -167,6 +168,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         OnboardingVM.ThemeChanged += isDark => IsDarkTheme = isDark;
 
         ChatVM = new ChatViewModel(dataStore, copilotService);
+        SplitWorkspace = new SplitChatWorkspaceViewModel(dataStore, copilotService, ChatVM);
         _backgroundJobService = new BackgroundJobService(dataStore, ChatVM);
         JobsVM = new BackgroundJobsViewModel(dataStore, _backgroundJobService);
         SkillsVM = new SkillsViewModel(dataStore);
@@ -269,10 +271,25 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         ChatVM.ChatUpdated += () => { SubscribeChatRunningState(); RefreshChatList(); };
         ChatVM.ChatTitleChanged += OnChatTitleChanged;
+        SplitWorkspace.ChatUpdated += () => { SubscribeChatRunningState(); RefreshChatList(); };
+        SplitWorkspace.ChatTitleChanged += OnChatTitleChanged;
+        SplitWorkspace.FocusedChatChanged += chatId =>
+        {
+            if (SplitWorkspace.IsActive)
+                ActiveChatId = chatId;
+        };
+        SplitWorkspace.FeatureManagementStateChanged += () =>
+        {
+            _backgroundJobService.Reschedule();
+            RefreshFeatureManagementUi();
+        };
         ChatVM.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(ChatViewModel.CurrentChat))
-                ActiveChatId = ChatVM.CurrentChat?.Id;
+            {
+                if (!SplitWorkspace.IsActive)
+                    ActiveChatId = ChatVM.CurrentChat?.Id;
+            }
             else if (args.PropertyName == nameof(ChatViewModel.IsBusy))
                 RefreshProjectRunningState();
         };
@@ -371,6 +388,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             foreach (var id in modelIds)
                 ChatVM.AvailableModels.Add(id);
             ChatVM.UpdateModelCapabilities(models);
+            SplitWorkspace.SyncAvailableModelsFromPrimary();
             SettingsVM.UpdateModelCapabilities(models);
             ChatVM.SelectedModel = selected;
 
@@ -579,6 +597,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void NewChat()
     {
+        if (SplitWorkspace.IsActive)
+        {
+            SplitWorkspace.StartNewChatInFocusedPane(SelectedProjectFilter);
+            ActiveChatId = null;
+            SelectedNavIndex = 0;
+            return;
+        }
+
         // If the current chat is empty (no messages), just reuse it
         if (ChatVM.CurrentChat is not null && ChatVM.CurrentChat.Messages.Count == 0)
         {
@@ -605,10 +631,34 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand(AllowConcurrentExecutions = true)]
+    private async Task OpenSplitDebugHarness()
+    {
+#if DEBUG
+        var chat = _dataStore.Data.Chats.FirstOrDefault();
+        if (chat is null)
+            return;
+
+        await SplitWorkspace.OpenChatInSplitViewAsync(chat);
+        SelectedNavIndex = 0;
+        ActiveChatId = SplitWorkspace.FocusedChatId;
+#else
+        await Task.CompletedTask;
+#endif
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task OpenChat(Chat chat)
     {
         try
         {
+            if (SplitWorkspace.IsActive)
+            {
+                await SplitWorkspace.ReplaceFocusedChatAsync(chat);
+                SelectedNavIndex = 0;
+                ActiveChatId = SplitWorkspace.FocusedChatId;
+                return;
+            }
+
             await LoadChatAndShowAsync(chat);
         }
         catch (OperationCanceledException)
@@ -617,8 +667,40 @@ public partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    [RelayCommand(AllowConcurrentExecutions = true)]
+    private async Task OpenChatInSplitView(Chat chat)
+    {
+        try
+        {
+            await SplitWorkspace.OpenChatInSplitViewAsync(chat);
+            SelectedNavIndex = 0;
+            ActiveChatId = SplitWorkspace.FocusedChatId;
+        }
+        catch (OperationCanceledException)
+        {
+            // A newer chat selection superseded this split-open request.
+        }
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = true)]
+    private async Task ExitSplitView()
+    {
+        await SplitWorkspace.ExitSplitViewAsync();
+        ActiveChatId = ChatVM.CurrentChat?.Id;
+        SelectedNavIndex = 0;
+    }
+
+    [RelayCommand(AllowConcurrentExecutions = true)]
+    private async Task CloseSplitPane(SplitChatPaneViewModel pane)
+    {
+        await SplitWorkspace.ClosePaneAsync(pane);
+        ActiveChatId = SplitWorkspace.IsActive
+            ? SplitWorkspace.FocusedChatId
+            : ChatVM.CurrentChat?.Id;
+    }
+
     [RelayCommand]
-    private void DeleteChat(Chat chat)
+    private async Task DeleteChat(Chat chat)
     {
         // If the chat has a worktree, ask the user whether to clean it up
         if (chat.WorktreePath is { Length: > 0 } wt && Directory.Exists(wt))
@@ -628,7 +710,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        PerformDeleteChat(chat, removeWorktree: false);
+        await PerformDeleteChatAsync(chat);
     }
 
     // ── Worktree cleanup dialog ──
@@ -644,7 +726,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             var chat = _pendingDeleteChat;
             _pendingDeleteChat = null;
             IsWorktreeDeleteDialogOpen = false;
-            PerformDeleteChat(chat, removeWorktree: true);
+            await PerformDeleteChatAsync(chat);
 
             // Clean up worktree + branch in background
             if (chat.WorktreePath is { Length: > 0 } wt)
@@ -657,14 +739,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
-    private void ConfirmDeleteWithoutWorktree()
+    private async Task ConfirmDeleteWithoutWorktree()
     {
         if (_pendingDeleteChat is not null)
         {
             var chat = _pendingDeleteChat;
             _pendingDeleteChat = null;
             IsWorktreeDeleteDialogOpen = false;
-            PerformDeleteChat(chat, removeWorktree: false);
+            await PerformDeleteChatAsync(chat);
         }
     }
 
@@ -675,10 +757,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         IsWorktreeDeleteDialogOpen = false;
     }
 
-    private void PerformDeleteChat(Chat chat, bool removeWorktree)
+    private async Task PerformDeleteChatAsync(Chat chat)
     {
-        var deletedActiveChat = ChatVM.CurrentChat?.Id == chat.Id;
-
+        await SplitWorkspace.RemoveChatAsync(chat.Id);
         ChatVM.CleanupSession(chat.Id);
         _dataStore.Data.Chats.Remove(chat);
         _dataStore.RemoveBackgroundJobsForChat(chat.Id);
@@ -689,7 +770,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _ = _dataStore.SaveAsync();
         RefreshChatList();
 
-        if (deletedActiveChat)
+        if (!SplitWorkspace.IsActive && ChatVM.CurrentChat?.Id == chat.Id)
             ChatVM.ClearChat();
     }
 

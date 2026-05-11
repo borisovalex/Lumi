@@ -37,6 +37,8 @@
     <StreamGeometry x:Key="Icon.Check">M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z</StreamGeometry>
     <StreamGeometry x:Key="Icon.Clock">M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 5h-2v6l5 3 .9-1.6-3.9-2.3V7z</StreamGeometry>
     <StreamGeometry x:Key="Icon.Play">M8 5v14l11-7L8 5z</StreamGeometry>
+    <StreamGeometry x:Key="Icon.Split">M4 4h7v16H4V4zm9 0h7v7h-7V4zm0 9h7v7h-7v-7z</StreamGeometry>
+    <StreamGeometry x:Key="Icon.ReplacePane">M4 5a2 2 0 0 1 2-2h6v2H6v14h6v2H6a2 2 0 0 1-2-2V5zm10 1h4a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-4v-2h4V8h-4V6zm-2.7 3.3 1.4-1.4L16.8 12l-4.1 4.1-1.4-1.4L13 13H8v-2h5l-1.7-1.7z</StreamGeometry>
   </Window.Resources>
 
   <Window.Styles>
@@ -103,6 +105,74 @@
     </Style>
     <Style Selector="Button.nav-icon.active.hovered /template/ Border#PART_Surface">
       <Setter Property="Background" Value="#24FFFFFF" />
+    </Style>
+    <Style Selector="Border.split-chat-island">
+      <Setter Property="MinWidth" Value="{StaticResource MainLayout.SplitIslandMinWidth}" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Overlay}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface1Translucent}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderSubtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BoxShadow" Value="0 18 44 0 #14000000, 0 3 12 0 #0A000000" />
+      <Setter Property="ClipToBounds" Value="True" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.16" />
+          <ThicknessTransition Property="BorderThickness" Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.split-chat-island.focused">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.AccentDefault}" />
+      <Setter Property="BorderThickness" Value="2" />
+    </Style>
+    <Style Selector="Control.split-drag-source">
+      <Setter Property="Opacity" Value="0.62" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.12" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.split-drop-zone">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <ThicknessTransition Property="BorderThickness" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <BoxShadowsTransition Property="BoxShadow" Duration="0:0:0.12" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.split-drop-zone.active">
+      <Setter Property="BoxShadow" Value="0 18 48 0 #300078D4, 0 0 0 1 #440078D4" />
+    </Style>
+    <Style Selector="Border.split-drop-cancel-zone">
+      <Setter Property="Background" Value="{DynamicResource Brush.SurfaceCard}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderSubtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BoxShadow" Value="0 10 28 0 #22000000" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <ThicknessTransition Property="BorderThickness" Duration="0:0:0.12" Easing="CubicEaseOut" />
+          <BoxShadowsTransition Property="BoxShadow" Duration="0:0:0.12" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Border.split-drop-cancel-zone.active">
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.AccentDefault}" />
+      <Setter Property="BorderThickness" Value="2" />
+      <Setter Property="BoxShadow" Value="0 14 36 0 #280078D4, 0 0 0 1 #440078D4" />
+    </Style>
+    <Style Selector="Button.split-pane-close">
+      <Setter Property="Opacity" Value="0.74" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface2}" />
+    </Style>
+    <Style Selector="Button.split-pane-close:pointerover">
+      <Setter Property="Opacity" Value="1" />
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
     </Style>
     <Style Selector="Button.nav-icon PathIcon">
       <Setter Property="Opacity" Value="0.4" />
@@ -568,14 +638,20 @@
                               <Panel Background="Transparent">
                                 <Panel.ContextMenu>
                                   <ContextMenu x:CompileBindings="False">
-                                    <MenuItem Header="{loc:Str Menu_Rename}"
-                                              Command="{Binding $parent[Window].DataContext.StartRenameChatCommand}"
-                                              CommandParameter="{Binding}">
-                                      <MenuItem.Icon>
-                                        <PathIcon Data="{StaticResource Icon.Rename}" Width="14" Height="14" />
-                                      </MenuItem.Icon>
-                                    </MenuItem>
-                                    <MenuItem x:Name="MoveToProjectMenu" Header="{loc:Str Menu_MoveToProject}">
+                                     <MenuItem Header="{loc:Str Menu_Rename}"
+                                               Command="{Binding $parent[Window].DataContext.StartRenameChatCommand}"
+                                               CommandParameter="{Binding}">
+                                       <MenuItem.Icon>
+                                         <PathIcon Data="{StaticResource Icon.Rename}" Width="14" Height="14" />
+                                       </MenuItem.Icon>
+                                      </MenuItem>
+                                      <MenuItem Header="{loc:Str Menu_OpenInSplitView}"
+                                                Click="OpenChatInSplitViewMenuItem_Click">
+                                        <MenuItem.Icon>
+                                          <PathIcon Data="{StaticResource Icon.Split}" Width="14" Height="14" />
+                                        </MenuItem.Icon>
+                                     </MenuItem>
+                                     <MenuItem x:Name="MoveToProjectMenu" Header="{loc:Str Menu_MoveToProject}">
                                       <MenuItem.Icon>
                                         <PathIcon Data="{StaticResource Icon.Folder}" Width="14" Height="14" />
                                       </MenuItem.Icon>
@@ -1208,8 +1284,9 @@
         <!-- Chat view (visible on Chat tab) — wrapped in Grid for browser split -->
         <Grid x:Name="ChatContentGrid" ColumnDefinitions="1*,Auto,0">
             <Border x:Name="ChatIsland" Grid.Column="0"
-              MinWidth="{StaticResource MainLayout.SplitIslandMinWidth}"
-              MaxWidth="{Binding Bounds.Width, RelativeSource={RelativeSource AncestorType=Grid}}"
+               IsVisible="{Binding !SplitWorkspace.IsActive}"
+               MinWidth="{StaticResource MainLayout.SplitIslandMinWidth}"
+               MaxWidth="{Binding Bounds.Width, RelativeSource={RelativeSource AncestorType=Grid}}"
                   FlowDirection="{Binding FlowDirection, RelativeSource={RelativeSource AncestorType=Window}}"
                   CornerRadius="{DynamicResource Radius.Overlay}"
                   Background="{DynamicResource Brush.Surface1Translucent}"
@@ -1228,11 +1305,133 @@
                     <SolidColorBrush Color="White" Opacity="0.12" />
                   </Border.BorderBrush>
                 </Border>
-                <views:ChatView x:Name="PageChat" DataContext="{Binding ChatVM}" />
-              </Grid>
-          </Border>
+                 <views:ChatView x:Name="PageChat" DataContext="{Binding ChatVM}" />
+               </Grid>
+           </Border>
 
-          <!-- Drag splitter between chat and browser (hidden by default) -->
+           <Grid x:Name="SplitWorkspaceHost"
+                 Grid.Column="0"
+                 IsVisible="{Binding SplitWorkspace.IsActive}"
+                 DragDrop.AllowDrop="True"
+                 ClipToBounds="True">
+             <ItemsControl x:Name="SplitPaneItems"
+                           DataContext="{Binding SplitWorkspace}"
+                           ItemsSource="{Binding Panes}">
+               <ItemsControl.ItemsPanel>
+                 <ItemsPanelTemplate>
+                   <primitives:UniformGrid Rows="{Binding Rows}" Columns="{Binding Columns}" />
+                 </ItemsPanelTemplate>
+               </ItemsControl.ItemsPanel>
+               <ItemsControl.ItemTemplate>
+                 <DataTemplate x:DataType="vm:SplitChatPaneViewModel">
+                     <Border Classes="split-chat-island"
+                             Classes.focused="{Binding IsFocused}"
+                             Margin="4"
+                             PointerPressed="OnSplitPanePointerPressed">
+                     <Grid>
+                       <Border IsHitTestVisible="False"
+                               CornerRadius="{DynamicResource Radius.Overlay}"
+                               BorderThickness="0,1,0,0"
+                               Opacity="0.75">
+                         <Border.BorderBrush>
+                           <SolidColorBrush Color="White" Opacity="0.12" />
+                         </Border.BorderBrush>
+                       </Border>
+                        <views:ChatView DataContext="{Binding ChatViewModel}" />
+                         <Grid Height="76"
+                               VerticalAlignment="Top"
+                               ColumnDefinitions="*,Auto"
+                                Background="Transparent"
+                                Cursor="SizeAll"
+                                PointerPressed="OnSplitPaneHeaderPointerPressed"
+                                PointerMoved="OnSplitPaneHeaderPointerMoved"
+                                PointerReleased="OnSplitPaneHeaderPointerReleased"
+                                PointerCaptureLost="OnSplitDragPointerCaptureLost"
+                                ZIndex="10">
+                           <Border Grid.Column="0"
+                                   Background="#01000000"
+                                   ToolTip.Tip="{loc:Str Split_DragHeaderTooltip}" />
+                          <Button Grid.Column="1"
+                                  Classes="subtle split-pane-close"
+                                  Width="28"
+                                  Height="28"
+                                  MinWidth="0"
+                                  MinHeight="0"
+                                   Padding="0"
+                                   VerticalAlignment="Top"
+                                   Margin="0,10,8,0"
+                                   CornerRadius="9"
+                                 Command="{Binding $parent[Window].DataContext.CloseSplitPaneCommand}"
+                                 CommandParameter="{Binding}"
+                                 ToolTip.Tip="{loc:Str Split_ClosePane}">
+                           <PathIcon Width="10" Height="10"
+                                     Foreground="{DynamicResource Brush.TextSecondary}"
+                                     Data="{StaticResource Icon.Dismiss}" />
+                         </Button>
+                       </Grid>
+                     </Grid>
+                   </Border>
+                 </DataTemplate>
+               </ItemsControl.ItemTemplate>
+             </ItemsControl>
+
+              <Button x:Name="ExitSplitViewButton"
+                      HorizontalAlignment="Right"
+                      VerticalAlignment="Top"
+                      Classes="subtle"
+                      Margin="0,12,56,0"
+                      Padding="10,5"
+                     MinHeight="0"
+                     CornerRadius="999"
+                     Command="{Binding ExitSplitViewCommand}"
+                     ZIndex="40"
+                     ToolTip.Tip="{loc:Str Split_ExitTooltip}">
+               <StackPanel Orientation="Horizontal" Spacing="6">
+                 <PathIcon Width="12" Height="12"
+                           Foreground="{DynamicResource Brush.AccentDefault}"
+                           Data="{StaticResource Icon.Split}" />
+                 <TextBlock Text="{loc:Str Split_Exit}" FontSize="11" />
+               </StackPanel>
+             </Button>
+
+           </Grid>
+
+           <Grid x:Name="SplitDropOverlay"
+                 Grid.Column="0"
+                 IsVisible="False"
+                 IsHitTestVisible="False"
+                 Opacity="0"
+                 ZIndex="200">
+              <Grid.Transitions>
+                <Transitions>
+                  <DoubleTransition Property="Opacity" Duration="0:0:0.14" Easing="CubicEaseOut" />
+                </Transitions>
+              </Grid.Transitions>
+              <Border Background="{DynamicResource Brush.Surface0}" Opacity="0.78" />
+              <Grid x:Name="SplitDropZoneHost" Margin="16" ZIndex="1" />
+              <Border x:Name="SplitDropCancelTarget"
+                      Classes="split-drop-cancel-zone"
+                      HorizontalAlignment="Center"
+                      VerticalAlignment="Top"
+                      Margin="0,18,0,0"
+                      Padding="16,8"
+                      CornerRadius="999"
+                      ZIndex="2">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <PathIcon Width="12"
+                            Height="12"
+                            VerticalAlignment="Center"
+                            Foreground="{DynamicResource Brush.AccentDefault}"
+                            Data="{StaticResource Icon.Dismiss}" />
+                  <TextBlock Text="{loc:Str Common_Cancel}"
+                             FontSize="12"
+                             FontWeight="SemiBold"
+                             Foreground="{DynamicResource Brush.TextPrimary}" />
+                </StackPanel>
+              </Border>
+            </Grid>
+
+           <!-- Drag splitter between chat and browser (hidden by default) -->
           <GridSplitter x:Name="BrowserSplitter" Grid.Column="1" IsVisible="False"
                         Width="6" Background="Transparent"
                         ResizeDirection="Columns" />
@@ -1339,8 +1538,7 @@
                             HorizontalScrollBarVisibility="Disabled"
                             VerticalScrollBarVisibility="Auto">
                 <sc:StrataMarkdown x:Name="PlanMarkdown"
-                                   IsInline="True"
-                                   Markdown="{Binding ChatVM.PlanContent}" />
+                                   IsInline="True" />
               </ScrollViewer>
             </DockPanel>
           </Border>
@@ -1416,13 +1614,20 @@
             ZIndex="20">
       <StackPanel Spacing="6">
         <DockPanel LastChildFill="True">
-          <Button DockPanel.Dock="Right"
-                  Classes="accent"
-                  Content="Open fixture"
-                  Command="{Binding OpenAgentDebugHarnessCommand}"
-                  Padding="8,4"
-                  MinHeight="0"
-                  FontSize="11" />
+          <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="4">
+            <Button Classes="accent"
+                    Content="Open split"
+                    Command="{Binding OpenSplitDebugHarnessCommand}"
+                    Padding="8,4"
+                    MinHeight="0"
+                    FontSize="11" />
+            <Button Classes="accent"
+                    Content="Open fixture"
+                    Command="{Binding OpenAgentDebugHarnessCommand}"
+                    Padding="8,4"
+                    MinHeight="0"
+                    FontSize="11" />
+          </StackPanel>
           <StackPanel>
             <TextBlock Text="Agent debug map"
                        FontSize="12"

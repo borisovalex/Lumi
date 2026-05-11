@@ -155,6 +155,62 @@ public sealed class ChatViewScrollBehaviorTests
         }, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task PreloadedChatView_AttachesAtLatestWindow()
+    {
+        using var session = HeadlessTestSession.Start();
+
+        await session.Dispatch(async () =>
+        {
+            var chat = CreateLongChat(pairCount: 36);
+            var data = new AppData
+            {
+                Settings = new UserSettings
+                {
+                    AutoSaveChats = false,
+                    EnableMemoryAutoSave = false
+                }
+            };
+            data.Chats.Add(chat);
+
+            var viewModel = new ChatViewModel(new DataStore(data), new CopilotService());
+            await viewModel.LoadChatAsync(chat);
+
+            Assert.NotEmpty(viewModel.TranscriptTurns);
+            Assert.True(viewModel.MountedTranscriptTurns.Count < viewModel.TranscriptTurns.Count);
+            var firstTranscriptTurnId = viewModel.TranscriptTurns[0].StableId;
+
+            var view = new ChatView { DataContext = viewModel };
+            var window = new Window
+            {
+                Width = 1100,
+                Height = 820,
+                Content = view,
+            };
+
+            window.Show();
+            try
+            {
+                await WaitUntilAsync(() => view.FindControl<StrataChatShell>("ChatShell")?.TranscriptScrollViewer is not null);
+
+                var shell = Assert.IsType<StrataChatShell>(view.FindControl<StrataChatShell>("ChatShell"));
+                var scrollViewer = Assert.IsType<ScrollViewer>(shell.TranscriptScrollViewer);
+
+                await WaitUntilAsync(() => shell.IsPinnedToBottom && scrollViewer.Offset.Y > 0, timeoutMs: 4000);
+                await PumpAsync();
+
+                Assert.True(shell.IsPinnedToBottom);
+                Assert.InRange(shell.CurrentDistanceFromBottom, 0, 2);
+                Assert.True(viewModel.MountedTranscriptTurns.Count < viewModel.TranscriptTurns.Count);
+                Assert.NotEqual(firstTranscriptTurnId, viewModel.MountedTranscriptTurns[0].StableId);
+            }
+            finally
+            {
+                window.Close();
+            }
+        }, CancellationToken.None);
+    }
+
     private static Chat CreateLongChat(int pairCount = 18)
     {
         var chat = new Chat { Title = "Scroll regression" };

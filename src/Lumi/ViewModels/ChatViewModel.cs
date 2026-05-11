@@ -341,11 +341,13 @@ public partial class ChatViewModel : ObservableObject
      public event Action? ChatUpdated;
     public event Action? FeatureManagementStateChanged;
 
-     /// <summary>Test-only helper to raise ChatUpdated without sending a real message.</summary>
-     internal void RaiseChatUpdatedForTest() => ChatUpdated?.Invoke();
-     /// <summary>Test-only helper to raise feature-management UI refresh notifications.</summary>
-     internal void RaiseFeatureManagementStateChangedForTest() => FeatureManagementStateChanged?.Invoke();
-     public event Action<Guid, string>? ChatTitleChanged;
+      /// <summary>Test-only helper to raise ChatUpdated without sending a real message.</summary>
+      internal void RaiseChatUpdatedForTest() => ChatUpdated?.Invoke();
+      /// <summary>Test-only helper to raise feature-management UI refresh notifications.</summary>
+      internal void RaiseFeatureManagementStateChangedForTest() => FeatureManagementStateChanged?.Invoke();
+      /// <summary>Test-only helper to raise the plan panel request without running a real agent session.</summary>
+      internal void RaisePlanShowRequestedForTest() => PlanShowRequested?.Invoke();
+      public event Action<Guid, string>? ChatTitleChanged;
      public event Action? BrowserHideRequested;
     /// <summary>Raised when a file-edit tool wants to show a diff in the preview island.</summary>
     public event Action<FileChangeItem>? DiffShowRequested;
@@ -916,6 +918,7 @@ public partial class ChatViewModel : ObservableObject
 
             BrowserHideRequested?.Invoke();
             DiffHideRequested?.Invoke();
+            PlanHideRequested?.Invoke();
             ClearSuggestions();
         }
 

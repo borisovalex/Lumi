@@ -47,6 +47,8 @@ public partial class ChatView : UserControl
     private bool _viewportEvaluationQueued;
     private bool _viewportEvaluationRequested;
     private bool _heightCompensationQueued;
+    private bool _isOpeningTranscriptAtTail;
+    private int _transcriptTailOpenVersion;
     private double _pendingHeightCompensationDelta;
     private ScrollAnchorState? _pendingResizeAnchor;
     private readonly Dictionary<string, double> _observedTurnHeights = new(StringComparer.Ordinal);
@@ -185,6 +187,8 @@ public partial class ChatView : UserControl
         _pendingHeightCompensationDelta = 0;
         _heightCompensationQueued = false;
         _viewportEvaluationRequested = false;
+        _isOpeningTranscriptAtTail = false;
+        _transcriptTailOpenVersion++;
         _lastObservedCurrentChat = null;
 
         if (DataContext is ChatViewModel vm)
@@ -201,6 +205,8 @@ public partial class ChatView : UserControl
             vm.FocusComposerRequested += FocusComposer;
             SubscribeToMountedTurns(vm.MountedTranscriptTurns);
             Dispatcher.UIThread.Post(EnsureTranscriptScrollViewer, DispatcherPriority.Loaded);
+            if (vm.CurrentChat is not null && vm.MountedTranscriptTurns.Count > 0)
+                QueueTranscriptTailOpen(focusComposer: false);
         }
     }
 
@@ -468,32 +474,80 @@ public partial class ChatView : UserControl
         JumpToLatest(focusComposer: true);
     }
 
-    private async void OnTranscriptRebuilt()
+    private void OnTranscriptRebuilt()
+        => QueueTranscriptTailOpen(focusComposer: true);
+
+    private void QueueTranscriptTailOpen(bool focusComposer)
     {
-        if (_subscribedVm is null || _chatShell is null)
-            return;
-
-        var ready = await EnsureTranscriptScrollViewerReadyAsync();
-        if (!ready || _subscribedVm is null || _chatShell is null)
-            return;
-
-        var chatShell = _chatShell;
         var viewModel = _subscribedVm;
+        var chatId = viewModel?.CurrentChat?.Id;
+        if (viewModel is null || chatId is not { } currentChatId)
+            return;
 
-        chatShell.EnterFollowTailMode();
-        viewModel.InitializeMountedTranscript(chatShell.ViewportHeight);
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
-        viewModel.EnsureMountedTranscriptCoverage(chatShell.ViewportHeight, chatShell.ExtentHeight);
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
-        chatShell.JumpToLatest();
-        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
-        SyncTranscriptPinnedState();
-        FocusComposer();
-        QueueTranscriptViewportEvaluation();
+        var version = ++_transcriptTailOpenVersion;
+        _isOpeningTranscriptAtTail = true;
+        Dispatcher.UIThread.Post(() => _ = OpenTranscriptAtTailAsync(version, currentChatId, focusComposer), DispatcherPriority.Loaded);
+    }
 
-        // Re-execute search if active (mounted turns changed)
-        if (!string.IsNullOrWhiteSpace(_searchInput?.Text))
-            ExecuteSearch();
+    private async Task OpenTranscriptAtTailAsync(int version, Guid chatId, bool focusComposer)
+    {
+        try
+        {
+            if (!IsTranscriptTailOpenCurrent(version, chatId))
+                return;
+
+            var ready = await EnsureTranscriptScrollViewerReadyAsync();
+            if (!ready || !IsTranscriptTailOpenCurrent(version, chatId) || _subscribedVm is null || _chatShell is null)
+                return;
+
+            var chatShell = _chatShell;
+            var viewModel = _subscribedVm;
+
+            chatShell.EnterFollowTailMode();
+            viewModel.InitializeMountedTranscript(GetEffectiveTranscriptViewportHeight(chatShell));
+            await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+            if (!IsTranscriptTailOpenCurrent(version, chatId))
+                return;
+
+            viewModel.EnsureMountedTranscriptCoverage(GetEffectiveTranscriptViewportHeight(chatShell), chatShell.ExtentHeight);
+            await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+            if (!IsTranscriptTailOpenCurrent(version, chatId))
+                return;
+
+            chatShell.JumpToLatest();
+            await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+            if (!IsTranscriptTailOpenCurrent(version, chatId))
+                return;
+
+            SyncTranscriptPinnedState();
+            if (focusComposer)
+                FocusComposer();
+            QueueTranscriptViewportEvaluation();
+
+            // Re-execute search if active (mounted turns changed)
+            if (!string.IsNullOrWhiteSpace(_searchInput?.Text))
+                ExecuteSearch();
+        }
+        finally
+        {
+            if (version == _transcriptTailOpenVersion)
+                _isOpeningTranscriptAtTail = false;
+        }
+    }
+
+    private bool IsTranscriptTailOpenCurrent(int version, Guid chatId)
+        => version == _transcriptTailOpenVersion
+           && _subscribedVm?.CurrentChat?.Id == chatId
+           && _chatShell is not null;
+
+    private static double GetEffectiveTranscriptViewportHeight(StrataChatShell chatShell)
+    {
+        if (chatShell.ViewportHeight > 0)
+            return chatShell.ViewportHeight;
+
+        return chatShell.Bounds.Height > 0
+            ? chatShell.Bounds.Height
+            : TranscriptWindowController.DefaultInitialViewportHeight;
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -515,6 +569,9 @@ public partial class ChatView : UserControl
     private void OnTranscriptViewportChanged(object? sender, StrataTranscriptViewportChangedEventArgs e)
     {
         if (_subscribedVm is null)
+            return;
+
+        if (_isOpeningTranscriptAtTail)
             return;
 
         _subscribedVm.UpdateTranscriptPinnedState(e.IsPinnedToBottom, e.DistanceFromBottom);
