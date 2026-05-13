@@ -110,6 +110,9 @@ public partial class SearchOverlay : UserControl
             UpdateSelectionVisuals();
         else if (args.PropertyName == nameof(SearchOverlayViewModel.IsOpen) && sender is SearchOverlayViewModel vm && !vm.IsOpen)
             _lastRenderedSelection = -1;
+        else if (args.PropertyName == nameof(SearchOverlayViewModel.IsSearching)
+                 || args.PropertyName == nameof(SearchOverlayViewModel.SearchQuery))
+            UpdateEmptyState();
     }
 
     private void OnResultGroupsChanged(object? sender, System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
@@ -124,7 +127,9 @@ public partial class SearchOverlay : UserControl
     private void UpdateEmptyState()
     {
         if (_emptyState is null || DataContext is not SearchOverlayViewModel vm) return;
-        _emptyState.IsVisible = !string.IsNullOrEmpty(vm.SearchQuery) && vm.FlatResults.Count == 0;
+        _emptyState.IsVisible = !vm.IsSearching
+                                && !string.IsNullOrEmpty(vm.SearchQuery)
+                                && vm.FlatResults.Count == 0;
     }
 
     private void UpdateSelectionVisuals()

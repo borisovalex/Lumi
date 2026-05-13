@@ -24,7 +24,9 @@ public enum GlobalSearchCategory
 
 public enum GlobalSearchExecutionMode
 {
+    Preview,
     Fast,
+    Interactive,
     Full
 }
 
@@ -60,6 +62,7 @@ public sealed class GlobalSearchService
     private readonly Func<DateTimeOffset> _nowProvider;
     private readonly object _chatFieldCacheSync = new();
     private readonly Dictionary<Guid, CachedChatFields> _chatFieldCache = [];
+    private const int InteractiveColdChatContentLimit = 16;
 
     private static readonly SearchSettingEntry[] SettingsIndex =
     [
@@ -115,11 +118,19 @@ public sealed class GlobalSearchService
         var trimmedQuery = query?.Trim() ?? "";
 
         if (string.IsNullOrEmpty(trimmedQuery))
-            return Task.FromResult((IReadOnlyList<GlobalSearchMatch>)BuildDefaultResults(snapshot));
+        {
+            return Task.Run<IReadOnlyList<GlobalSearchMatch>>(
+                () => BuildDefaultResults(snapshot),
+                cancellationToken);
+        }
 
         var searchQuery = SearchQuery.Create(trimmedQuery);
         if (searchQuery.IsEmpty)
-            return Task.FromResult((IReadOnlyList<GlobalSearchMatch>)BuildDefaultResults(snapshot));
+        {
+            return Task.Run<IReadOnlyList<GlobalSearchMatch>>(
+                () => BuildDefaultResults(snapshot),
+                cancellationToken);
+        }
 
         return Task.Run<IReadOnlyList<GlobalSearchMatch>>(
             () => SearchCore(snapshot, searchQuery, executionMode, cancellationToken),
@@ -135,12 +146,12 @@ public sealed class GlobalSearchService
         var results = new List<GlobalSearchMatch>();
 
         SearchChats(snapshot, query, executionMode, results, cancellationToken);
-        SearchJobs(snapshot, query, results, cancellationToken);
-        SearchProjects(snapshot, query, results, cancellationToken);
-        SearchSkills(snapshot, query, results, cancellationToken);
-        SearchAgents(snapshot, query, results, cancellationToken);
-        SearchMemories(snapshot, query, results, cancellationToken);
-        SearchMcpServers(snapshot, query, results, cancellationToken);
+        SearchJobs(snapshot, query, executionMode, results, cancellationToken);
+        SearchProjects(snapshot, query, executionMode, results, cancellationToken);
+        SearchSkills(snapshot, query, executionMode, results, cancellationToken);
+        SearchAgents(snapshot, query, executionMode, results, cancellationToken);
+        SearchMemories(snapshot, query, executionMode, results, cancellationToken);
+        SearchMcpServers(snapshot, query, executionMode, results, cancellationToken);
         SearchSettings(query, results, cancellationToken);
 
         results.Sort(static (left, right) =>
@@ -158,7 +169,7 @@ public sealed class GlobalSearchService
             return StringComparer.CurrentCultureIgnoreCase.Compare(left.Title, right.Title);
         });
 
-        return results;
+        return LimitResultsPerCategory(results, executionMode == GlobalSearchExecutionMode.Preview ? 12 : 32);
     }
 
     private void SearchChats(
@@ -168,6 +179,10 @@ public sealed class GlobalSearchService
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
+        var interactiveColdChatIds = executionMode == GlobalSearchExecutionMode.Interactive
+            ? GetInteractiveColdChatIds(snapshot.Chats, cancellationToken)
+            : null;
+
         foreach (var chat in snapshot.Chats)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -175,9 +190,13 @@ public sealed class GlobalSearchService
             var titleField = new PreparedSearchField(chat.Title, 3.8, SearchFieldKind.Primary);
             var evaluation = SearchEngine.Evaluate(query, [titleField]);
 
-            if (!evaluation.IsMatch)
+            if (!evaluation.IsMatch && executionMode != GlobalSearchExecutionMode.Preview)
             {
-                var contentFields = GetChatContentFields(chat, executionMode);
+                var contentFields = GetChatContentFields(
+                    chat,
+                    executionMode,
+                    interactiveColdChatIds,
+                    cancellationToken);
                 if (contentFields.Count > 0)
                 {
                     var fields = new List<PreparedSearchField>(contentFields.Count + 1) { titleField };
@@ -211,6 +230,7 @@ public sealed class GlobalSearchService
     private void SearchProjects(
         SearchSnapshot snapshot,
         SearchQuery query,
+        GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -218,11 +238,18 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var evaluation = SearchEngine.Evaluate(query,
-            [
-                SearchField.Primary(project.Name, 3.5),
-                SearchField.Content(project.Instructions, 1.0)
-            ]);
+            var evaluation = SearchEngine.Evaluate(
+                query,
+                IncludeContentFields(executionMode)
+                    ?
+                    [
+                        SearchField.Primary(project.Name, 3.5),
+                        SearchField.Content(project.Instructions, 1.0)
+                    ]
+                    :
+                    [
+                        SearchField.Primary(project.Name, 3.5)
+                    ]);
 
             if (!evaluation.IsMatch)
                 continue;
@@ -253,6 +280,7 @@ public sealed class GlobalSearchService
     private void SearchJobs(
         SearchSnapshot snapshot,
         SearchQuery query,
+        GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -260,13 +288,21 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var evaluation = SearchEngine.Evaluate(query,
-            [
-                SearchField.Primary(job.Name, 3.5),
-                new SearchField(job.Description, 1.8),
-                SearchField.Content(job.Prompt, 1.1),
-                new SearchField(job.LastRunSummary, 0.9)
-            ]);
+            var evaluation = SearchEngine.Evaluate(
+                query,
+                IncludeContentFields(executionMode)
+                    ?
+                    [
+                        SearchField.Primary(job.Name, 3.5),
+                        new SearchField(job.Description, 1.8),
+                        SearchField.Content(job.Prompt, 1.1),
+                        new SearchField(job.LastRunSummary, 0.9)
+                    ]
+                    :
+                    [
+                        SearchField.Primary(job.Name, 3.5),
+                        new SearchField(job.Description, 1.8)
+                    ]);
 
             if (!evaluation.IsMatch)
                 continue;
@@ -294,6 +330,7 @@ public sealed class GlobalSearchService
     private void SearchSkills(
         SearchSnapshot snapshot,
         SearchQuery query,
+        GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -301,12 +338,20 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var evaluation = SearchEngine.Evaluate(query,
-            [
-                SearchField.Primary(skill.Name, 3.4),
-                new SearchField(skill.Description, 1.8),
-                SearchField.Content(skill.Content, 0.95)
-            ]);
+            var evaluation = SearchEngine.Evaluate(
+                query,
+                IncludeContentFields(executionMode)
+                    ?
+                    [
+                        SearchField.Primary(skill.Name, 3.4),
+                        new SearchField(skill.Description, 1.8),
+                        SearchField.Content(skill.Content, 0.95)
+                    ]
+                    :
+                    [
+                        SearchField.Primary(skill.Name, 3.4),
+                        new SearchField(skill.Description, 1.8)
+                    ]);
 
             if (!evaluation.IsMatch)
                 continue;
@@ -330,6 +375,7 @@ public sealed class GlobalSearchService
     private void SearchAgents(
         SearchSnapshot snapshot,
         SearchQuery query,
+        GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -337,12 +383,20 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var evaluation = SearchEngine.Evaluate(query,
-            [
-                SearchField.Primary(agent.Name, 3.4),
-                new SearchField(agent.Description, 1.8),
-                SearchField.Content(agent.SystemPrompt, 0.95)
-            ]);
+            var evaluation = SearchEngine.Evaluate(
+                query,
+                IncludeContentFields(executionMode)
+                    ?
+                    [
+                        SearchField.Primary(agent.Name, 3.4),
+                        new SearchField(agent.Description, 1.8),
+                        SearchField.Content(agent.SystemPrompt, 0.95)
+                    ]
+                    :
+                    [
+                        SearchField.Primary(agent.Name, 3.4),
+                        new SearchField(agent.Description, 1.8)
+                    ]);
 
             if (!evaluation.IsMatch)
                 continue;
@@ -366,6 +420,7 @@ public sealed class GlobalSearchService
     private void SearchMemories(
         SearchSnapshot snapshot,
         SearchQuery query,
+        GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -373,12 +428,20 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var evaluation = SearchEngine.Evaluate(query,
-            [
-                SearchField.Primary(memory.Key, 3.3),
-                new SearchField(memory.Category, 1.5),
-                SearchField.Content(memory.Content, 1.1)
-            ]);
+            var evaluation = SearchEngine.Evaluate(
+                query,
+                IncludeContentFields(executionMode)
+                    ?
+                    [
+                        SearchField.Primary(memory.Key, 3.3),
+                        new SearchField(memory.Category, 1.5),
+                        SearchField.Content(memory.Content, 1.1)
+                    ]
+                    :
+                    [
+                        SearchField.Primary(memory.Key, 3.3),
+                        new SearchField(memory.Category, 1.5)
+                    ]);
 
             if (!evaluation.IsMatch)
                 continue;
@@ -406,6 +469,7 @@ public sealed class GlobalSearchService
     private void SearchMcpServers(
         SearchSnapshot snapshot,
         SearchQuery query,
+        GlobalSearchExecutionMode executionMode,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -413,15 +477,23 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var evaluation = SearchEngine.Evaluate(query,
-            [
-                SearchField.Primary(server.Name, 3.2),
-                new SearchField(server.Description, 1.7),
-                new SearchField(server.Command ?? "", 1.0),
-                new SearchField(string.Join(' ', server.Args), 0.9),
-                new SearchField(server.Url ?? "", 0.8),
-                new SearchField(string.Join(' ', server.Tools), 0.85)
-            ]);
+            var evaluation = SearchEngine.Evaluate(
+                query,
+                executionMode == GlobalSearchExecutionMode.Preview
+                    ?
+                    [
+                        SearchField.Primary(server.Name, 3.2),
+                        new SearchField(server.Description, 1.7)
+                    ]
+                    :
+                    [
+                        SearchField.Primary(server.Name, 3.2),
+                        new SearchField(server.Description, 1.7),
+                        new SearchField(server.Command ?? "", 1.0),
+                        new SearchField(string.Join(' ', server.Args), 0.9),
+                        new SearchField(server.Url ?? "", 0.8),
+                        new SearchField(string.Join(' ', server.Tools), 0.85)
+                    ]);
 
             if (!evaluation.IsMatch)
                 continue;
@@ -604,15 +676,99 @@ public sealed class GlobalSearchService
 
     private IReadOnlyList<PreparedSearchField> GetChatContentFields(
         Chat chat,
-        GlobalSearchExecutionMode executionMode)
+        GlobalSearchExecutionMode executionMode,
+        IReadOnlySet<Guid>? interactiveColdChatIds,
+        CancellationToken cancellationToken)
     {
-        if (chat.Messages.Count > 0)
-            return GetChatContentFields(chat, _chatSnapshotProvider(chat));
+        if (executionMode == GlobalSearchExecutionMode.Preview)
+            return [];
 
+        IReadOnlyList<PreparedSearchField> cachedFields;
         if (executionMode == GlobalSearchExecutionMode.Fast)
-            return TryGetCachedChatContentFields(chat.Id, out var cachedFields) ? cachedFields : [];
+            return TryGetCachedChatContentFields(chat.Id, out cachedFields) ? cachedFields : [];
 
-        return GetChatContentFields(chat, _chatSnapshotProvider(chat));
+        if (executionMode == GlobalSearchExecutionMode.Interactive)
+        {
+            if (chat.Messages.Count > 0)
+                return GetChatContentFields(chat, cancellationToken);
+
+            if (TryGetCachedChatContentFields(chat.Id, out cachedFields))
+                return cachedFields;
+
+            if (interactiveColdChatIds is null || !interactiveColdChatIds.Contains(chat.Id))
+                return [];
+
+            return GetChatContentFields(chat, cancellationToken);
+        }
+
+        return GetChatContentFields(chat, cancellationToken);
+    }
+
+    private static IReadOnlyList<GlobalSearchMatch> LimitResultsPerCategory(
+        IEnumerable<GlobalSearchMatch> sortedResults,
+        int perCategoryLimit)
+    {
+        var counts = new Dictionary<GlobalSearchCategory, int>();
+        var limited = new List<GlobalSearchMatch>();
+
+        foreach (var result in sortedResults)
+        {
+            counts.TryGetValue(result.Category, out var count);
+            if (count >= perCategoryLimit)
+                continue;
+
+            counts[result.Category] = count + 1;
+            limited.Add(result);
+        }
+
+        return limited;
+    }
+
+    private static bool IncludeContentFields(GlobalSearchExecutionMode executionMode)
+        => executionMode is GlobalSearchExecutionMode.Interactive or GlobalSearchExecutionMode.Full;
+
+    private HashSet<Guid>? GetInteractiveColdChatIds(
+        IReadOnlyList<Chat> chats,
+        CancellationToken cancellationToken)
+    {
+        var recentColdChats = new List<Chat>(InteractiveColdChatContentLimit);
+        foreach (var chat in chats)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (chat.Messages.Count > 0 || TryGetCachedChatContentFields(chat.Id, out _))
+                continue;
+
+            if (recentColdChats.Count < InteractiveColdChatContentLimit)
+            {
+                recentColdChats.Add(chat);
+                continue;
+            }
+
+            var oldestIndex = 0;
+            for (var index = 1; index < recentColdChats.Count; index++)
+            {
+                if (recentColdChats[index].UpdatedAt < recentColdChats[oldestIndex].UpdatedAt)
+                    oldestIndex = index;
+            }
+
+            if (chat.UpdatedAt > recentColdChats[oldestIndex].UpdatedAt)
+                recentColdChats[oldestIndex] = chat;
+        }
+
+        return recentColdChats.Count == 0
+            ? null
+            : recentColdChats.Select(static chat => chat.Id).ToHashSet();
+    }
+
+    private IReadOnlyList<PreparedSearchField> GetChatContentFields(
+        Chat chat,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var snapshot = _chatSnapshotProvider(chat);
+        cancellationToken.ThrowIfCancellationRequested();
+        return GetChatContentFields(chat, snapshot);
     }
 
     private IReadOnlyList<PreparedSearchField> GetChatContentFields(Chat chat, ChatSearchSnapshot snapshot)
