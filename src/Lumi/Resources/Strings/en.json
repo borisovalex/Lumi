@@ -81,7 +81,7 @@
 
   "Sidebar_NewChat": "New Chat",
   "Sidebar_NewChatTooltip": "New chat (Ctrl+N)",
-  "Sidebar_NewWindowTooltip": "Open a new Lumi window",
+  "Sidebar_NewWindowTooltip": "New chat in new window",
   "Sidebar_NewChatInNewWindow": "New Chat in New Window",
   "Sidebar_Search": "Search (Ctrl+K)",
   "Sidebar_Search_Short": "Search…",

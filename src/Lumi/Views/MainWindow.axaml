@@ -462,7 +462,7 @@
                         MinWidth="0"
                         CornerRadius="{DynamicResource Radius.Base}"
                         ToolTip.Tip="{loc:Str Sidebar_NewWindowTooltip}"
-                        Command="{Binding OpenNewWindowCommand}">
+                        Command="{Binding OpenNewChatInNewWindowCommand}">
                   <PathIcon Data="{StaticResource Icon.Window}" Width="14" Height="14"
                             Foreground="{DynamicResource Brush.TextSecondary}" />
                 </Button>
