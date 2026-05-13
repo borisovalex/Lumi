@@ -41,7 +41,10 @@ public partial class ChatViewModel
         }
 
         _runtimeStates.Clear();
+        _pendingQuestions.Clear();
+        _queuedBusySendPrompts.Clear();
         _inProgressMessages.Clear();
+        _voiceService.Dispose();
         _modelSelectionSaveCts?.Cancel();
         _modelSelectionSaveCts?.Dispose();
         _modelSelectionSaveCts = null;
@@ -290,4 +293,5 @@ public partial class ChatViewModel
             }
         }
     }
+
 }

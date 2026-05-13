@@ -141,6 +141,27 @@ public partial class ChatViewModel
         }
     }
 
+    public void CopyModelCatalogFrom(ChatViewModel source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        AvailableModels.Clear();
+        foreach (var model in source.AvailableModels)
+            AvailableModels.Add(model);
+
+        _modelReasoningEfforts = source._modelReasoningEfforts.ToDictionary(
+            static kvp => kvp.Key,
+            static kvp => kvp.Value.ToList(),
+            StringComparer.OrdinalIgnoreCase);
+        _modelDefaultEfforts = new Dictionary<string, string>(
+            source._modelDefaultEfforts,
+            StringComparer.OrdinalIgnoreCase);
+        _modelContextTokenLimits = new Dictionary<string, long>(
+            source._modelContextTokenLimits,
+            StringComparer.OrdinalIgnoreCase);
+        UpdateQualityLevels(SelectedModel);
+    }
+
     private void UpdateQualityLevels(string? modelId)
     {
         QualityLevels = ModelSelectionHelper.GetQualityLevels(modelId, _modelReasoningEfforts);

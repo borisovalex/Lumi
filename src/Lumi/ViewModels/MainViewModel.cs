@@ -499,6 +499,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public event Action? ProjectRunningStateChanged;
 
     public event Action<Guid, string>? ChatTitleChanged;
+    public event Action<Chat?>? OpenChatWindowRequested;
+    public event Func<Chat, bool>? DetachedChatFocusRequested;
+    public event Action<Guid?>? ChatSelectionSyncRequested;
+    public event Action<Guid>? ChatDeleted;
 
     public void RefreshChatList()
     {
@@ -564,12 +568,34 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     private async Task<bool> LoadChatAndShowAsync(Chat chat)
     {
+        if (TryFocusDetachedChat(chat))
+            return true;
+
         await ChatVM.LoadChatAsync(chat);
         if (ChatVM.CurrentChat?.Id != chat.Id)
             return false;
 
         SelectedNavIndex = 0;
         return true;
+    }
+
+    private bool TryFocusDetachedChat(Chat chat)
+    {
+        var handlers = DetachedChatFocusRequested;
+        if (handlers is null)
+            return false;
+
+        foreach (Func<Chat, bool> handler in handlers.GetInvocationList())
+        {
+            if (handler(chat))
+            {
+                SelectedNavIndex = 0;
+                ChatSelectionSyncRequested?.Invoke(ActiveChatId);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public async Task<bool> OpenChatByIdAsync(Guid chatId)
@@ -649,16 +675,6 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (Avalonia.Application.Current is App app)
             app.OpenNewWindow();
-    }
-
-    [RelayCommand]
-    private void OpenChatInNewWindow(Chat? chat)
-    {
-        if (chat is null)
-            return;
-
-        if (Avalonia.Application.Current is App app)
-            app.OpenNewWindow(chat.Id);
     }
 
     [RelayCommand]
@@ -760,6 +776,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _dataStore.DeleteChatFile(chat.Id);
         _ = _dataStore.SaveAsync();
         RefreshChatList();
+        ChatDeleted?.Invoke(chat.Id);
 
         if (deletedActiveChat)
             ChatVM.ClearChat();
@@ -882,6 +899,38 @@ public partial class MainViewModel : ObservableObject, IDisposable
         {
             // A newer chat selection superseded this open request.
         }
+    }
+
+    [RelayCommand]
+    private void OpenChatInNewWindow(Chat? chat)
+    {
+        var targetChat = chat ?? ChatVM.CurrentChat;
+        if (targetChat is null)
+        {
+            OpenChatWindowRequested?.Invoke(null);
+            SelectedNavIndex = 0;
+            return;
+        }
+
+        OpenChatWindowRequested?.Invoke(targetChat);
+        MoveMainSurfaceAwayFromChat(targetChat.Id);
+    }
+
+    [RelayCommand]
+    private void OpenNewChatInNewWindow()
+    {
+        OpenChatWindowRequested?.Invoke(null);
+        SelectedNavIndex = 0;
+    }
+
+    private void MoveMainSurfaceAwayFromChat(Guid chatId)
+    {
+        if (ChatVM.CurrentChat?.Id != chatId)
+            return;
+
+        ChatVM.ClearChat();
+        SetDraftChatProjectContext(SelectedProjectFilter);
+        SelectedNavIndex = 0;
     }
 
     /// <summary>Returns the project name for a given project ID, or null.</summary>

@@ -9,6 +9,7 @@ using Avalonia.Markup.Xaml;
 using Avalonia.Styling;
 using Avalonia.Threading;
 using Lumi.Localization;
+using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
 using Lumi.Views;
@@ -26,6 +27,9 @@ public partial class App : Application
     private BackgroundJobService? _backgroundJobService;
     private readonly List<MainWindow> _windows = [];
     private int _secondaryWindowSequence;
+    private MainViewModel? _mainViewModel;
+    private readonly Dictionary<Guid, ChatWindow> _chatWindows = [];
+    private bool _isShuttingDown;
 
     public override void Initialize()
     {
@@ -55,6 +59,10 @@ public partial class App : Application
 #endif
             );
             _backgroundJobService = vm.BackgroundJobService;
+            _mainViewModel = vm;
+            vm.OpenChatWindowRequested += OpenChatWindow;
+            vm.DetachedChatFocusRequested += FocusDetachedChatWindow;
+            vm.ChatDeleted += CloseChatWindow;
 
             // Save data and dispose CopilotService on app shutdown.
             // The window is already hidden at this point so nothing blocks the user.
@@ -62,6 +70,10 @@ public partial class App : Application
             // an in-flight fire-and-forget save that needs the dispatcher to complete.
             desktop.ShutdownRequested += (_, _) =>
             {
+                _isShuttingDown = true;
+                foreach (var chatWindow in _chatWindows.Values.ToList())
+                    chatWindow.Close();
+                _chatWindows.Clear();
                 updateService.Dispose();
                 var viewModels = _windows
                     .Select(static window => window.DataContext)
@@ -293,6 +305,138 @@ public partial class App : Application
 
         if (_mainWindow?.DataContext is MainViewModel vm)
             _ = vm.OpenChatByIdAsync(targetChatId);
+    }
+
+    private void OpenChatWindow(Chat? chat)
+    {
+        Dispatcher.UIThread.Post(() => _ = OpenChatWindowAsync(chat));
+    }
+
+    private async Task OpenChatWindowAsync(Chat? chat)
+    {
+        if (_dataStore is null || _copilotService is null)
+            return;
+
+        var initialChatId = chat?.Id;
+        if (initialChatId is Guid chatId && _chatWindows.TryGetValue(chatId, out var existingWindow))
+        {
+            FocusChatWindow(existingWindow);
+            return;
+        }
+
+        var chatVm = new ChatViewModel(_dataStore, _copilotService)
+        {
+            SendWithEnter = _dataStore.Data.Settings.SendWithEnter
+        };
+        if (_mainViewModel is not null)
+            chatVm.CopyModelCatalogFrom(_mainViewModel.ChatVM);
+
+        chatVm.ChatUpdated += OnDetachedChatUpdated;
+        chatVm.ChatTitleChanged += OnDetachedChatTitleChanged;
+        chatVm.FeatureManagementStateChanged += OnDetachedChatUpdated;
+
+        Guid? trackedChatId = initialChatId;
+        ChatWindow? window = null;
+        void TrackCurrentChat()
+        {
+            if (window is null || chatVm.CurrentChat is not { } currentChat || trackedChatId == currentChat.Id)
+                return;
+
+            if (trackedChatId is Guid previousChatId
+                && _chatWindows.TryGetValue(previousChatId, out var trackedWindow)
+                && ReferenceEquals(trackedWindow, window))
+                _chatWindows.Remove(previousChatId);
+
+            trackedChatId = currentChat.Id;
+            _chatWindows[currentChat.Id] = window;
+        }
+
+        void OnDetachedCurrentChatChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName == nameof(ChatViewModel.CurrentChat))
+                TrackCurrentChat();
+        }
+
+        chatVm.PropertyChanged += OnDetachedCurrentChatChanged;
+
+        window = new ChatWindow(_dataStore, chatVm);
+        if (trackedChatId is Guid trackedId)
+            _chatWindows[trackedId] = window;
+
+        window.Closed += (_, _) =>
+        {
+            if (trackedChatId is Guid closedChatId
+                && _chatWindows.TryGetValue(closedChatId, out var trackedWindow)
+                && ReferenceEquals(trackedWindow, window))
+                _chatWindows.Remove(closedChatId);
+
+            chatVm.PropertyChanged -= OnDetachedCurrentChatChanged;
+            chatVm.ChatUpdated -= OnDetachedChatUpdated;
+            chatVm.ChatTitleChanged -= OnDetachedChatTitleChanged;
+            chatVm.FeatureManagementStateChanged -= OnDetachedChatUpdated;
+            chatVm.Dispose();
+        };
+
+        if (Loc.IsRightToLeft)
+            window.FlowDirection = Avalonia.Media.FlowDirection.RightToLeft;
+
+        window.Show();
+
+        if (chat is null)
+        {
+            window.FocusComposer();
+            return;
+        }
+
+        try
+        {
+            await chatVm.LoadChatAsync(chat);
+            window.FocusComposer();
+        }
+        catch (OperationCanceledException) when (_isShuttingDown)
+        {
+        }
+    }
+
+    private bool FocusDetachedChatWindow(Chat chat)
+    {
+        if (!_chatWindows.TryGetValue(chat.Id, out var window))
+            return false;
+
+        FocusChatWindow(window);
+        return true;
+    }
+
+    private static void FocusChatWindow(ChatWindow window)
+    {
+        window.Show();
+        window.ShowInTaskbar = true;
+        window.WindowState = WindowState.Normal;
+        window.Activate();
+        window.FocusComposer();
+    }
+
+    private void CloseChatWindow(Guid chatId)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (_chatWindows.TryGetValue(chatId, out var window))
+                window.Close();
+        });
+    }
+
+    private void OnDetachedChatUpdated()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            _mainViewModel?.RefreshChatList();
+            _mainViewModel?.RefreshProjectRunningState();
+        });
+    }
+
+    private void OnDetachedChatTitleChanged(Guid chatId, string title)
+    {
+        Dispatcher.UIThread.Post(() => _mainViewModel?.RefreshChatList());
     }
 
     /// <summary>Toggle window visibility. Called by the global hotkey.</summary>

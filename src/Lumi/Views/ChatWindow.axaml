@@ -1,0 +1,185 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:chrome="using:Avalonia.Controls.Chrome"
+        xmlns:vm="using:Lumi.ViewModels"
+        xmlns:views="using:Lumi.Views"
+        xmlns:sc="using:StrataTheme.Controls"
+        xmlns:loc="using:Lumi.Localization"
+        x:Class="Lumi.Views.ChatWindow"
+        x:DataType="vm:ChatViewModel"
+        x:CompileBindings="True"
+        Title="Lumi"
+        Width="1120"
+        Height="760"
+        MinWidth="760"
+        MinHeight="520"
+        WindowStartupLocation="CenterOwner"
+        TransparencyLevelHint="AcrylicBlur,Mica,Blur"
+        UseLayoutRounding="True"
+        Background="Transparent">
+
+  <Window.Resources>
+    <x:Double x:Key="ChatWindow.SplitPaneMinWidth">220</x:Double>
+  </Window.Resources>
+
+  <Border x:Name="WindowIsland"
+          CornerRadius="{DynamicResource Radius.Overlay}"
+          Background="{DynamicResource Brush.Surface1Translucent}"
+          BorderThickness="1"
+          ClipToBounds="True">
+    <Border.BorderBrush>
+      <SolidColorBrush Color="{DynamicResource Color.TextPrimary}" Opacity="0.08" />
+    </Border.BorderBrush>
+
+    <Grid RowDefinitions="38,*">
+      <Border Grid.Row="0"
+              BorderThickness="0,0,0,1"
+              Background="Transparent">
+        <Border.BorderBrush>
+          <SolidColorBrush Color="{DynamicResource Color.TextPrimary}" Opacity="0.06" />
+        </Border.BorderBrush>
+        <Grid ColumnDefinitions="*,140">
+          <Border x:Name="TitleDragRegion"
+                  Grid.Column="0"
+                  chrome:WindowDecorationProperties.ElementRole="TitleBar"
+                  Background="Transparent" />
+        </Grid>
+      </Border>
+
+      <Grid x:Name="ChatContentGrid"
+            Grid.Row="1"
+            ColumnDefinitions="1*,0,0">
+        <views:ChatView x:Name="DetachedChatView"
+                        Grid.Column="0"
+                        MinWidth="{StaticResource ChatWindow.SplitPaneMinWidth}"
+                        ShowInternalTitle="False"
+                        DataContext="{Binding}" />
+
+        <GridSplitter x:Name="PreviewSplitter"
+                      Grid.Column="1"
+                      IsVisible="False"
+                      Width="6"
+                      Background="Transparent"
+                      ResizeDirection="Columns" />
+
+        <Border x:Name="BrowserIsland"
+                Grid.Column="2"
+                IsVisible="False"
+                MinWidth="{StaticResource ChatWindow.SplitPaneMinWidth}"
+                Margin="0,8,8,8"
+                CornerRadius="{DynamicResource Radius.Overlay}"
+                Background="{DynamicResource Brush.SurfaceCard}"
+                BorderBrush="{DynamicResource Brush.BorderSubtle}"
+                BorderThickness="1"
+                BoxShadow="0 0 24 0 #1A000000, 0 0 4 0 #08000000"
+                ClipToBounds="True">
+          <DockPanel>
+            <DockPanel DockPanel.Dock="Top" Margin="12,8,12,0">
+              <Button DockPanel.Dock="Right"
+                      x:Name="CloseBrowserButton"
+                      Classes="subtle"
+                      Padding="6"
+                      MinHeight="0"
+                      MinWidth="0"
+                      ToolTip.Tip="{loc:Str Browser_Close}">
+                <PathIcon Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.TextPrimary}"
+                          Data="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+              </Button>
+              <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <PathIcon Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.AccentDefault}"
+                          Data="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1 4h2v2h-2V6zm0 4h2v8h-2v-8z" />
+                <TextBlock Text="{loc:Str Browser_Title}" Classes="body-strong" FontWeight="SemiBold" />
+              </StackPanel>
+            </DockPanel>
+            <ContentControl x:Name="BrowserHost" />
+          </DockPanel>
+        </Border>
+
+        <Border x:Name="DiffIsland"
+                Grid.Column="2"
+                IsVisible="False"
+                MinWidth="{StaticResource ChatWindow.SplitPaneMinWidth}"
+                Margin="0,8,8,8"
+                CornerRadius="{DynamicResource Radius.Overlay}"
+                Background="{DynamicResource Brush.SurfaceCard}"
+                BorderBrush="{DynamicResource Brush.BorderSubtle}"
+                BorderThickness="1"
+                BoxShadow="0 0 24 0 #1A000000, 0 0 4 0 #08000000"
+                ClipToBounds="True">
+          <DockPanel>
+            <DockPanel DockPanel.Dock="Top" Margin="12,8,12,0">
+              <Button DockPanel.Dock="Right"
+                      x:Name="CloseDiffButton"
+                      Classes="subtle"
+                      Padding="6"
+                      MinHeight="0"
+                      MinWidth="0"
+                      ToolTip.Tip="{loc:Str Diff_Close}">
+                <PathIcon Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.TextPrimary}"
+                          Data="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+              </Button>
+              <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <PathIcon Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.AccentDefault}"
+                          Data="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
+                <TextBlock x:Name="DiffFileNameText"
+                           Text="{loc:Str Diff_Title}"
+                           Classes="body-strong"
+                           FontWeight="SemiBold" />
+              </StackPanel>
+            </DockPanel>
+            <ContentControl x:Name="DiffHost" />
+          </DockPanel>
+        </Border>
+
+        <Border x:Name="PlanIsland"
+                Grid.Column="2"
+                IsVisible="False"
+                MinWidth="{StaticResource ChatWindow.SplitPaneMinWidth}"
+                Margin="0,8,8,8"
+                CornerRadius="{DynamicResource Radius.Overlay}"
+                Background="{DynamicResource Brush.SurfaceCard}"
+                BorderBrush="{DynamicResource Brush.BorderSubtle}"
+                BorderThickness="1"
+                BoxShadow="0 0 24 0 #1A000000, 0 0 4 0 #08000000"
+                ClipToBounds="True">
+          <DockPanel>
+            <DockPanel DockPanel.Dock="Top" Margin="12,8,12,0">
+              <Button DockPanel.Dock="Right"
+                      x:Name="ClosePlanButton"
+                      Classes="subtle"
+                      Padding="6"
+                      MinHeight="0"
+                      MinWidth="0"
+                      ToolTip.Tip="{loc:Str Plan_Close}">
+                <PathIcon Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.TextPrimary}"
+                          Data="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+              </Button>
+              <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <PathIcon Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.AccentDefault}"
+                          Data="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM17.99 9l-1.41-1.42-6.59 6.59-2.58-2.57-1.42 1.41 4 3.99z" />
+                <TextBlock Text="{loc:Str Plan_Title}" Classes="body-strong" FontWeight="SemiBold" />
+              </StackPanel>
+            </DockPanel>
+            <ScrollViewer Margin="12,8,12,12"
+                          HorizontalScrollBarVisibility="Disabled"
+                          VerticalScrollBarVisibility="Auto">
+              <sc:StrataMarkdown IsInline="True" Markdown="{Binding PlanContent}" />
+            </ScrollViewer>
+          </DockPanel>
+        </Border>
+      </Grid>
+    </Grid>
+  </Border>
+</Window>

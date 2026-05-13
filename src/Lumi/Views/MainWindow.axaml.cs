@@ -43,7 +43,6 @@ public partial class MainWindow : Window
     private Panel? _onboardingPanel;
     private DockPanel? _mainPanel;
     private Border? _acrylicFallback;
-    private Border? _chatIsland;
     private Border? _windowContentRoot;
     private Control?[] _pages = [];
     private Panel?[] _sidebarPanels = [];
@@ -63,8 +62,6 @@ public partial class MainWindow : Window
     private ScrollViewer? _chatListScroller;
     private readonly List<(Project Project, PropertyChangedEventHandler Handler)> _projectFilterHandlers = [];
     private ChatView? _chatView;
-    private BrowserView? _browserView;
-    private ContentControl? _browserHost;
     private ContentControl? _jobsHost;
     private ContentControl? _projectsHost;
     private ContentControl? _skillsHost;
@@ -73,9 +70,6 @@ public partial class MainWindow : Window
     private ContentControl? _mcpServersHost;
     private ContentControl? _settingsHost;
     private SettingsView? _settingsView;
-    private Border? _browserIsland;
-    private GridSplitter? _browserSplitter;
-    private Grid? _chatContentGrid;
     private Border? _sidebarBorder;
     private Thumb? _sidebarResizeThumb;
     private Border? _navPill;
@@ -84,20 +78,12 @@ public partial class MainWindow : Window
     private ImplicitAnimationCollection?[] _navButtonOffsetAnimations = [];
     private CancellationTokenSource? _sidebarAnimCts;
     private CancellationTokenSource? _navHoverIntentCts;
-    private Border? _diffIsland;
-    private ContentControl? _diffHost;
-    private DiffView? _diffView;
-    private TextBlock? _diffFileNameText;
-    private List<GitFileChangeViewModel>? _lastGitChangesList;
-    private Border? _planIsland;
-    private CancellationTokenSource? _previewAnimCts;
     private CancellationTokenSource? _projectSwitcherDrawerCts;
     private bool _suppressSelectionSync;
     private bool _isProjectChatListRevealArmed;
     private bool _isProjectChatListRevealQueued;
     private bool _isProjectSwitcherOpen;
     private int _chatListRevealVersion;
-    private CancellationTokenSource? _browserAnimCts;
     private CancellationTokenSource? _shellAnimCts;
     private int _currentShellIndex = -1;
     private int _activeNavIndex = -1;
@@ -111,6 +97,7 @@ public partial class MainWindow : Window
     private double[] _navBaseButtonWidths = [];
     private double[] _navMinButtonWidths = [];
     private MainViewModel? _wiredVm;
+    private ChatPreviewPanelController? _chatPreviewPanel;
     private const int NavHoverIntentDelayMs = 85;
 
     public bool IsPrimaryWindow { get; set; } = true;
@@ -169,10 +156,10 @@ public partial class MainWindow : Window
         DisposeCancellationTokenSource(ref _sidebarAnimCts);
         DisposeCancellationTokenSource(ref _navHoverIntentCts);
         DisposeCancellationTokenSource(ref _titleAnimCts);
-        DisposeCancellationTokenSource(ref _browserAnimCts);
-        DisposeCancellationTokenSource(ref _previewAnimCts);
         DisposeCancellationTokenSource(ref _chatListRevealCts);
         DisposeCancellationTokenSource(ref _projectSwitcherDrawerCts);
+        _chatPreviewPanel?.Dispose();
+        _chatPreviewPanel = null;
     }
 
     private static CancellationTokenSource ReplaceCancellationTokenSource(ref CancellationTokenSource? source)
@@ -216,7 +203,6 @@ public partial class MainWindow : Window
         _onboardingPanel = this.FindControl<Panel>("OnboardingPanel");
         _mainPanel = this.FindControl<DockPanel>("MainPanel");
         _acrylicFallback = this.FindControl<Border>("AcrylicFallback");
-        _chatIsland = this.FindControl<Border>("ChatIsland");
         _windowContentRoot = this.FindControl<Border>("WindowContentRoot");
         _sidebarBorder = this.FindControl<Border>("SidebarBorder");
         _sidebarResizeThumb = this.FindControl<Thumb>("SidebarResizeThumb");
@@ -301,7 +287,6 @@ public partial class MainWindow : Window
         if (shortcutLabel is not null && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             shortcutLabel.Text = "⌘K";
 
-        _browserHost = this.FindControl<ContentControl>("BrowserHost");
         _jobsHost = this.FindControl<ContentControl>("PageJobsHost");
         _projectsHost = this.FindControl<ContentControl>("PageProjectsHost");
         _skillsHost = this.FindControl<ContentControl>("PageSkillsHost");
@@ -309,13 +294,6 @@ public partial class MainWindow : Window
         _memoriesHost = this.FindControl<ContentControl>("PageMemoriesHost");
         _mcpServersHost = this.FindControl<ContentControl>("PageMcpServersHost");
         _settingsHost = this.FindControl<ContentControl>("PageSettingsHost");
-        _browserIsland = this.FindControl<Border>("BrowserIsland");
-        _browserSplitter = this.FindControl<GridSplitter>("BrowserSplitter");
-        _chatContentGrid = this.FindControl<Grid>("ChatContentGrid");
-        _diffIsland = this.FindControl<Border>("DiffIsland");
-        _diffHost = this.FindControl<ContentControl>("DiffHost");
-        _diffFileNameText = this.FindControl<TextBlock>("DiffFileNameText");
-        _planIsland = this.FindControl<Border>("PlanIsland");
 
         if (_sidebarResizeThumb is not null)
         {
@@ -675,6 +653,17 @@ public partial class MainWindow : Window
             return;
         }
 
+        // ── Ctrl+Shift+N — Open active chat, or a new chat, in a new window ──
+        if (ctrl && !alt && shift && e.Key == Key.N)
+        {
+            if (vm.ChatVM.CurrentChat is null)
+                vm.OpenNewChatInNewWindowCommand.Execute(null);
+            else
+                vm.OpenChatInNewWindowCommand.Execute(vm.ChatVM.CurrentChat);
+            e.Handled = true;
+            return;
+        }
+
         // ── Ctrl+L — Focus chat input ──
         if (ctrl && !alt && !shift && e.Key == Key.L)
         {
@@ -839,6 +828,45 @@ public partial class MainWindow : Window
         // no manual padding workaround needed.
     }
 
+    private ChatPreviewPanelController CreateChatPreviewPanel(MainViewModel vm)
+    {
+        var contentGrid = this.FindControl<Grid>("ChatContentGrid")
+            ?? throw new InvalidOperationException("Main window is missing ChatContentGrid.");
+        var chatIsland = this.FindControl<Border>("ChatIsland")
+            ?? throw new InvalidOperationException("Main window is missing ChatIsland.");
+        var browserPanel = this.FindControl<Border>("BrowserIsland")
+            ?? throw new InvalidOperationException("Main window is missing BrowserIsland.");
+        var browserHost = this.FindControl<ContentControl>("BrowserHost")
+            ?? throw new InvalidOperationException("Main window is missing BrowserHost.");
+        var diffPanel = this.FindControl<Border>("DiffIsland")
+            ?? throw new InvalidOperationException("Main window is missing DiffIsland.");
+        var diffHost = this.FindControl<ContentControl>("DiffHost")
+            ?? throw new InvalidOperationException("Main window is missing DiffHost.");
+        var diffTitle = this.FindControl<TextBlock>("DiffFileNameText")
+            ?? throw new InvalidOperationException("Main window is missing DiffFileNameText.");
+        var planPanel = this.FindControl<Border>("PlanIsland")
+            ?? throw new InvalidOperationException("Main window is missing PlanIsland.");
+
+        return new ChatPreviewPanelController(
+            this,
+            vm.DataStore,
+            vm.ChatVM,
+            contentGrid,
+            chatIsland,
+            this.FindControl<GridSplitter>("BrowserSplitter"),
+            browserPanel,
+            browserHost,
+            diffPanel,
+            diffHost,
+            diffTitle,
+            planPanel,
+            ensureChatVisible: () =>
+            {
+                if (vm.SelectedNavIndex != 0)
+                    vm.SelectedNavIndex = 0;
+            });
+    }
+
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
@@ -875,6 +903,10 @@ public partial class MainWindow : Window
             {
                 Dispatcher.UIThread.Post(() => AnimateSidebarTitle(chatId, newTitle));
             };
+            vm.ChatSelectionSyncRequested += activeChatId =>
+            {
+                Dispatcher.UIThread.Post(() => SyncListBoxSelection(activeChatId), DispatcherPriority.Loaded);
+            };
 
             // Wire search overlay result selection
             vm.SearchOverlayVM.ResultSelected += result => OnSearchResultSelected(vm, result);
@@ -888,6 +920,8 @@ public partial class MainWindow : Window
 
             // Apply initial font size
             ApplyFontSize(vm.SettingsVM.FontSize);
+            _chatPreviewPanel?.Dispose();
+            _chatPreviewPanel = CreateChatPreviewPanel(vm);
 
             // Wire browser panel show/hide (per-chat aware)
             vm.ChatVM.BrowserShowRequested += (chatId) =>
@@ -896,21 +930,18 @@ public partial class MainWindow : Window
                 {
                     // Only show browser panel if the requesting chat is currently active
                     if (vm.ActiveChatId == chatId)
-                    {
                         ShowBrowserPanel(chatId);
-                        vm.ChatVM.IsBrowserOpen = IsBrowserOpen;
-                    }
                 });
             };
             vm.ChatVM.BrowserHideRequested += () =>
             {
-                Dispatcher.UIThread.Post(() => { HideBrowserPanel(); vm.ChatVM.IsBrowserOpen = IsBrowserOpen; });
+                Dispatcher.UIThread.Post(HideBrowserPanel);
             };
 
             // Close browser button
             var closeBrowserBtn = this.FindControl<Button>("CloseBrowserButton");
             if (closeBrowserBtn is not null)
-                closeBrowserBtn.Click += (_, _) => { HideBrowserPanel(); vm.ChatVM.IsBrowserOpen = false; };
+                closeBrowserBtn.Click += (_, _) => HideBrowserPanel();
 
             // Wire diff panel show/hide
             vm.ChatVM.DiffShowRequested += (item) =>
@@ -925,7 +956,7 @@ public partial class MainWindow : Window
             // Close diff button
             var closeDiffBtn = this.FindControl<Button>("CloseDiffButton");
             if (closeDiffBtn is not null)
-                closeDiffBtn.Click += (_, _) => { HideDiffPanel(); if (DataContext is MainViewModel m) m.ChatVM.IsDiffOpen = false; };
+                closeDiffBtn.Click += (_, _) => HideDiffPanel();
 
             // Wire git changes panel show
             vm.ChatVM.GitChangesShowRequested += (files) =>
@@ -946,7 +977,7 @@ public partial class MainWindow : Window
             // Plan close button
             var closePlanBtn = this.FindControl<Button>("ClosePlanButton");
             if (closePlanBtn is not null)
-                closePlanBtn.Click += (_, _) => { HidePlanPanel(); if (DataContext is MainViewModel m) m.ChatVM.IsPlanOpen = false; };
+                closePlanBtn.Click += (_, _) => HidePlanPanel();
 
             // Sync initial browser theme
             vm.SettingsBrowserService.SetTheme(vm.IsDarkTheme);
@@ -1096,11 +1127,10 @@ public partial class MainWindow : Window
             HideDiffPanel();
             HidePlanPanel();
         }
-        else if (_browserIsland is { IsVisible: true })
+        else if (_chatPreviewPanel?.IsBrowserOpen == true)
         {
             // Returning to chat with browser open — show the overlay and refresh bounds
-            _browserView?.ShowCurrentController();
-            Dispatcher.UIThread.Post(() => _browserView?.RefreshBounds(), DispatcherPriority.Loaded);
+            _chatPreviewPanel.ShowCurrentBrowserController();
         }
 
         // When projects tab is shown, update chat counts and refresh selected project chats
@@ -2872,7 +2902,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Whether the browser panel is currently visible.</summary>
-    private bool IsBrowserOpen => _browserIsland is { IsVisible: true };
+    private bool IsBrowserOpen => _chatPreviewPanel?.IsBrowserOpen == true;
 
     private void EnsurePageViewLoaded(int index)
     {
@@ -2918,727 +2948,18 @@ public partial class MainWindow : Window
         }
     }
 
-    private void EnsureBrowserViewLoaded(MainViewModel vm, BrowserService browserService)
-    {
-        if (_browserView is null)
-        {
-            if (_browserHost is null) return;
-            _browserView = new BrowserView();
-            _browserHost.Content = _browserView;
-        }
-        _browserView.SetBrowserService(browserService, vm.DataStore);
-    }
-
-    private async void ShowBrowserPanel(Guid chatId)
-    {
-        if (_browserIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        var vm = DataContext as MainViewModel;
-        if (vm is null) return;
-
-        // Get the per-chat browser service
-        var browserService = vm.ChatVM.GetBrowserServiceForChat(chatId);
-        if (browserService is null) return;
-
-        // Hide diff panel if open (they share column 2)
-        if (_diffIsland is { IsVisible: true })
-        {
-            _diffIsland.IsVisible = false;
-            _diffIsland.Opacity = 1;
-            _diffIsland.RenderTransform = null;
-            vm.ChatVM.IsDiffOpen = false;
-        }
-
-        // Hide plan panel if open (they share column 2)
-        if (_planIsland is { IsVisible: true })
-        {
-            _planIsland.IsVisible = false;
-            _planIsland.Opacity = 1;
-            _planIsland.RenderTransform = null;
-            vm.ChatVM.IsPlanOpen = false;
-        }
-
-        // Switch to the correct per-chat BrowserService
-        EnsureBrowserViewLoaded(vm, browserService);
-
-        // If browser panel is already visible (switching chats), just refresh bounds
-        if (_browserIsland.IsVisible)
-        {
-            // Hide old controller, show new one
-            _browserView?.RefreshBounds();
-            if (browserService.Controller is not null)
-                browserService.Controller.IsVisible = true;
-            return;
-        }
-
-        // Cancel any in-progress animation
-        var ct = ReplaceCancellationTokenSource(ref _browserAnimCts).Token;
-
-        // Ensure we're on the Chat tab
-        if (vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        // Switch to split layout: chat (1*) | splitter (Auto) | browser (1*)
-        const double browserOffsetX = 40.0;
-
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3)
-            defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_browserIsland, 2);
-
-        // Prepare initial state — transparent + shifted from the outer edge
-        _browserIsland.RenderTransform = new TranslateTransform(browserOffsetX, 0);
-        _browserIsland.Opacity = 0;
-        _browserIsland.IsVisible = true;
-        if (_browserSplitter is not null)
-            _browserSplitter.IsVisible = true;
-
-        // Animate fade-in + slide from the outer edge (both on the Border visual)
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame
-                {
-                    Cue = new Cue(0),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 0.0),
-                        new Setter(TranslateTransform.XProperty, browserOffsetX),
-                    }
-                },
-                new KeyFrame
-                {
-                    Cue = new Cue(1),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 1.0),
-                        new Setter(TranslateTransform.XProperty, 0.0),
-                    }
-                },
-            }
-        };
-
-        try { await anim.RunAsync(_browserIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        // Finalize — clear transform and show WebView2 overlay after animation
-        _browserIsland.Opacity = 1;
-        _browserIsland.RenderTransform = null;
-
-        if (browserService.Controller is not null)
-            browserService.Controller.IsVisible = true;
-        Dispatcher.UIThread.Post(() => _browserView?.RefreshBounds(), DispatcherPriority.Loaded);
-    }
-
-    /// <summary>Hides the browser panel and returns to single-column chat layout.</summary>
-    private async void HideBrowserPanel()
-    {
-        if (_browserIsland is null || _chatContentGrid is null) return;
-        if (!_browserIsland.IsVisible) return;
-
-        // Cancel any in-progress animation
-        var ct = ReplaceCancellationTokenSource(ref _browserAnimCts).Token;
-
-        // Hide WebView2 overlay immediately so it doesn't float during animation
-        _browserView?.ClearBrowserService();
-
-        const double browserOffsetX = 40.0;
-
-        // Animate fade-out + slide to the outer edge
-        _browserIsland.RenderTransform = new TranslateTransform(0, 0);
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new CubicEaseIn(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame
-                {
-                    Cue = new Cue(0),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 1.0),
-                        new Setter(TranslateTransform.XProperty, 0.0),
-                    }
-                },
-                new KeyFrame
-                {
-                    Cue = new Cue(1),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 0.0),
-                        new Setter(TranslateTransform.XProperty, browserOffsetX),
-                    }
-                },
-            }
-        };
-
-        try { await anim.RunAsync(_browserIsland, ct); }
-        catch (OperationCanceledException) { /* cancelled — cleanup below */ }
-
-        // Collapse regardless of cancellation
-        _browserIsland.IsVisible = false;
-        _browserIsland.Opacity = 1;
-        _browserIsland.RenderTransform = null;
-        if (_browserSplitter is not null && !(_diffIsland?.IsVisible ?? false) && !(_planIsland?.IsVisible ?? false))
-            _browserSplitter.IsVisible = false;
-
-        // Reset to single-column layout if nothing else is open
-        if (!(_diffIsland?.IsVisible ?? false) && !(_planIsland?.IsVisible ?? false))
-        {
-            var defs = _chatContentGrid.ColumnDefinitions;
-            while (defs.Count < 3)
-                defs.Add(new ColumnDefinition());
-            defs[0].Width = new GridLength(1, GridUnitType.Star);
-            defs[1].Width = new GridLength(0);
-            defs[2].Width = new GridLength(0);
-
-            if (_chatIsland is not null)
-                Grid.SetColumn(_chatIsland, 0);
-        }
-        Grid.SetColumn(_browserIsland, 2);
-    }
+    private void ShowBrowserPanel(Guid chatId) => _chatPreviewPanel?.ShowBrowserPanel(chatId);
+    private void HideBrowserPanel() => _chatPreviewPanel?.HideBrowserPanel();
 
     /// <summary>Whether the diff panel is currently visible.</summary>
-    private bool IsDiffOpen => _diffIsland is { IsVisible: true };
+    private bool IsDiffOpen => _chatPreviewPanel?.IsDiffOpen == true;
 
-    private void EnsureDiffViewLoaded()
-    {
-        if (_diffHost is null) return;
-        if (_diffView is null)
-            _diffView = new DiffView();
-        // Always restore DiffView as the host content (may have been swapped for git changes list)
-        if (_diffHost.Content != _diffView)
-            _diffHost.Content = _diffView;
-    }
-
-    private async void ShowDiffPanel(FileChangeItem fileChange)
-    {
-        if (_diffIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        // Hide browser panel if it's open (they share column 2)
-        if (_browserIsland is { IsVisible: true })
-        {
-            _browserIsland.IsVisible = false;
-            _browserIsland.Opacity = 1;
-            _browserIsland.RenderTransform = null;
-            if (_browserSplitter is not null) _browserSplitter.IsVisible = false;
-            _browserView?.ClearBrowserService();
-            if (DataContext is MainViewModel vmb)
-                vmb.ChatVM.IsBrowserOpen = false;
-        }
-
-        // Hide plan panel if open (they share column 2)
-        if (_planIsland is { IsVisible: true })
-        {
-            _planIsland.IsVisible = false;
-            _planIsland.Opacity = 1;
-            _planIsland.RenderTransform = null;
-            if (DataContext is MainViewModel vmp) vmp.ChatVM.IsPlanOpen = false;
-        }
-
-        // Cancel any in-progress animation
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        var vm = DataContext as MainViewModel;
-
-        // Ensure we're on the Chat tab
-        if (vm is not null && vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        EnsureDiffViewLoaded();
-
-        // Update header text
-        if (_diffFileNameText is not null)
-            _diffFileNameText.Text = System.IO.Path.GetFileName(fileChange.FilePath);
-
-        // Set diff content
-        _diffView?.SetFileChangeDiff(fileChange);
-
-        // Switch to split layout
-        const double offsetX = 40.0;
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3) defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_diffIsland, 2);
-
-        _diffIsland.RenderTransform = new TranslateTransform(offsetX, 0);
-        _diffIsland.Opacity = 0;
-        _diffIsland.IsVisible = true;
-        if (_browserSplitter is not null) _browserSplitter.IsVisible = true;
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-            }
-        };
-
-        try { await anim.RunAsync(_diffIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        _diffIsland.Opacity = 1;
-        _diffIsland.RenderTransform = null;
-
-        if (vm is not null) vm.ChatVM.IsDiffOpen = true;
-    }
-
-    private async void HideDiffPanel()
-    {
-        if (_diffIsland is null || _chatContentGrid is null) return;
-        if (!_diffIsland.IsVisible) return;
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        const double offsetX = 40.0;
-        _diffIsland.RenderTransform = new TranslateTransform(0, 0);
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new CubicEaseIn(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-            }
-        };
-
-        try { await anim.RunAsync(_diffIsland, ct); }
-        catch (OperationCanceledException) { }
-
-        _diffIsland.IsVisible = false;
-        _diffIsland.Opacity = 1;
-        _diffIsland.RenderTransform = null;
-        if (_browserSplitter is not null && !(_browserIsland?.IsVisible ?? false))
-            _browserSplitter.IsVisible = false;
-
-        // Reset to single-column if nothing else is open
-        if (!(_browserIsland?.IsVisible ?? false) && !(_planIsland?.IsVisible ?? false))
-        {
-            var defs = _chatContentGrid.ColumnDefinitions;
-            while (defs.Count < 3) defs.Add(new ColumnDefinition());
-            defs[0].Width = new GridLength(1, GridUnitType.Star);
-            defs[1].Width = new GridLength(0);
-            defs[2].Width = new GridLength(0);
-            if (_chatIsland is not null) Grid.SetColumn(_chatIsland, 0);
-        }
-
-        if (DataContext is MainViewModel vm) vm.ChatVM.IsDiffOpen = false;
-    }
-
-    /// <summary>Shows a list of git changed files in the diff panel. Clicking a file opens its diff.</summary>
+    private void ShowDiffPanel(FileChangeItem fileChange) => _chatPreviewPanel?.ShowDiffPanel(fileChange);
+    private void HideDiffPanel() => _chatPreviewPanel?.HideDiffPanel();
     private void ShowGitChangesPanel(List<GitFileChangeViewModel> files)
-    {
-        if (_diffIsland is null || _chatContentGrid is null || _chatIsland is null) return;
+        => _chatPreviewPanel?.ShowGitChangesPanel(files);
 
-        _lastGitChangesList = files;
-
-        var tertiaryBrush = Avalonia.Media.Brushes.Gray as Avalonia.Media.IBrush;
-        if (this.TryFindResource("Brush.TextTertiary", this.ActualThemeVariant, out var tObj) && tObj is Avalonia.Media.IBrush tBrush)
-            tertiaryBrush = tBrush;
-
-        // Build a file list panel
-        var listPanel = new StackPanel { Spacing = 2, Margin = new Thickness(8, 4) };
-        foreach (var file in files)
-        {
-            var kindColor = file.Kind switch
-            {
-                GitChangeKind.Added or GitChangeKind.Untracked => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(63, 185, 80)),
-                GitChangeKind.Deleted => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(248, 81, 73)),
-                GitChangeKind.Renamed => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(88, 166, 255)),
-                _ => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(210, 153, 34))
-            };
-
-            var row = new Button
-            {
-                Name = CreateGitDiffRowName(file.FileName, listPanel.Children.Count),
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                Padding = new Thickness(10, 8),
-                Background = Avalonia.Media.Brushes.Transparent,
-                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
-            };
-            AutomationProperties.SetName(row, $"Open diff for {file.FileName}");
-            row.Classes.Add("subtle");
-
-            var content = new DockPanel();
-
-            // Status letter badge
-            var badge = new Border
-            {
-                Width = 22, Height = 22,
-                CornerRadius = new CornerRadius(4),
-                Background = new Avalonia.Media.SolidColorBrush(kindColor.Color, 0.15),
-                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 10, 0),
-                Child = new TextBlock
-                {
-                    Text = file.KindIcon,
-                    FontSize = 11,
-                    FontWeight = Avalonia.Media.FontWeight.Bold,
-                    Foreground = kindColor,
-                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
-                }
-            };
-            DockPanel.SetDock(badge, Dock.Left);
-            content.Children.Add(badge);
-
-            var textStack = new StackPanel { Spacing = 1, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
-            textStack.Children.Add(new TextBlock
-            {
-                Text = file.FileName,
-                FontSize = 12,
-                FontWeight = Avalonia.Media.FontWeight.Medium,
-            });
-            if (!string.IsNullOrEmpty(file.Directory))
-            {
-                textStack.Children.Add(new TextBlock
-                {
-                    Text = file.Directory,
-                    FontSize = 10,
-                    Foreground = tertiaryBrush,
-                });
-            }
-            content.Children.Add(textStack);
-
-            // Line stats on the right
-            if (file.HasStats)
-            {
-                var statsPanel = new StackPanel
-                {
-                    Orientation = Avalonia.Layout.Orientation.Horizontal,
-                    Spacing = 6,
-                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                    Margin = new Thickness(8, 0, 0, 0),
-                };
-                DockPanel.SetDock(statsPanel, Dock.Right);
-                if (file.LinesAdded > 0)
-                    statsPanel.Children.Add(new TextBlock
-                    {
-                        Text = $"+{file.LinesAdded}",
-                        FontSize = 11,
-                        FontFamily = new Avalonia.Media.FontFamily("Cascadia Code, Consolas, monospace"),
-                        Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(63, 185, 80)),
-                    });
-                if (file.LinesRemoved > 0)
-                    statsPanel.Children.Add(new TextBlock
-                    {
-                        Text = $"−{file.LinesRemoved}",
-                        FontSize = 11,
-                        FontFamily = new Avalonia.Media.FontFamily("Cascadia Code, Consolas, monospace"),
-                        Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(248, 81, 73)),
-                    });
-                // Insert before textStack so DockPanel docks it right
-                content.Children.Insert(1, statsPanel);
-            }
-
-            row.Content = content;
-
-            // Click opens the diff for this file with a back button
-            var capturedFile = file;
-            row.Click += (_, _) => ShowGitFileDiffWithBackNav(capturedFile);
-
-            listPanel.Children.Add(row);
-        }
-
-        // Update header
-        if (_diffFileNameText is not null)
-            _diffFileNameText.Text = $"Changes ({files.Count})";
-
-        // Show the list in the diff host (bypass EnsureDiffViewLoaded since we want custom content)
-        if (_diffHost is not null)
-        {
-            _diffHost.Content = new ScrollViewer
-            {
-                Content = listPanel,
-                HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
-            };
-        }
-
-        // Show the diff panel (reuse the same show animation logic)
-        ShowDiffPanelAnimated();
-    }
-
-    private static string CreateGitDiffRowName(string fileName, int rowIndex)
-    {
-        var safeFileName = new string(fileName.Select(ch => char.IsLetterOrDigit(ch) ? ch : '_').ToArray());
-        return $"GitDiffRow_{rowIndex}_{safeFileName}";
-    }
-
-    /// <summary>Opens a single file diff with breadcrumb back-nav in the header.</summary>
-    private void ShowGitFileDiffWithBackNav(GitFileChangeViewModel file)
-    {
-        if (_diffHost is null) return;
-
-        // Create a fresh DiffView for this file
-        var diffView = new DiffView();
-        _diffHost.Content = diffView;
-
-        // Update header: clickable "Changes" breadcrumb + file name
-        if (_diffFileNameText is not null)
-        {
-            _diffFileNameText.Text = null;
-            _diffFileNameText.Inlines?.Clear();
-            var inlines = _diffFileNameText.Inlines ??= new Avalonia.Controls.Documents.InlineCollection();
-
-            var accentBrush = Avalonia.Media.Brushes.DodgerBlue as Avalonia.Media.IBrush;
-            var tertiaryBrush = Avalonia.Media.Brushes.Gray as Avalonia.Media.IBrush;
-            if (this.TryFindResource("Brush.AccentDefault", this.ActualThemeVariant, out var accentObj) && accentObj is Avalonia.Media.IBrush ab)
-                accentBrush = ab;
-            if (this.TryFindResource("Brush.TextTertiary", this.ActualThemeVariant, out var tertiaryObj) && tertiaryObj is Avalonia.Media.IBrush tb)
-                tertiaryBrush = tb;
-
-            var changesRun = new Avalonia.Controls.Documents.Run("Changes")
-            {
-                Foreground = accentBrush,
-            };
-            inlines.Add(changesRun);
-            inlines.Add(new Avalonia.Controls.Documents.Run("  ›  ") { Foreground = tertiaryBrush });
-            inlines.Add(new Avalonia.Controls.Documents.Run(file.FileName));
-
-            _diffFileNameText.Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);
-
-            _diffFileNameText.PointerPressed -= OnDiffBreadcrumbClick;
-            _diffFileNameText.PointerPressed += OnDiffBreadcrumbClick;
-        }
-
-        // Build the diff view
-        if (file.Change.Kind is GitChangeKind.Added or GitChangeKind.Untracked)
-        {
-            _ = ShowAddedGitFileDiffAsync(file.Change.FullPath, diffView);
-        }
-        else
-        {
-            _ = LoadGitUnifiedDiffAsync(file.Change, diffView);
-        }
-    }
-
-    private async Task ShowAddedGitFileDiffAsync(string filePath, DiffView diffView)
-    {
-        var content = await Task.Run(() =>
-        {
-            try { return System.IO.File.Exists(filePath) ? System.IO.File.ReadAllText(filePath) : string.Empty; }
-            catch { return string.Empty; }
-        });
-        Dispatcher.UIThread.Post(() => diffView.SetSnapshotDiff(filePath, string.Empty, content));
-    }
-
-    private void OnDiffBreadcrumbClick(object? sender, Avalonia.Input.PointerPressedEventArgs e)
-    {
-        if (_lastGitChangesList is not null)
-            ShowGitChangesPanel(_lastGitChangesList);
-    }
-
-    private async Task LoadGitUnifiedDiffAsync(GitFileChange change, DiffView diffView)
-    {
-        var repoDir = System.IO.Path.GetDirectoryName(change.FullPath) ?? "";
-        var diff = await GitService.GetFileDiffAsync(repoDir, System.IO.Path.GetFileName(change.FullPath));
-        if (diff is null)
-            diff = await GitService.GetFileDiffAsync(repoDir, change.RelativePath);
-        Dispatcher.UIThread.Post(() => diffView.SetUnifiedDiffText(change.FullPath, diff));
-    }
-
-    /// <summary>Shows the diff island with animation (shared by file diff and git changes list).</summary>
-    private async void ShowDiffPanelAnimated()
-    {
-        if (_diffIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        // Hide browser panel if it's open
-        if (_browserIsland is { IsVisible: true })
-        {
-            _browserIsland.IsVisible = false;
-            _browserIsland.Opacity = 1;
-            _browserIsland.RenderTransform = null;
-            if (_browserSplitter is not null) _browserSplitter.IsVisible = false;
-            _browserView?.ClearBrowserService();
-            if (DataContext is MainViewModel vmb)
-                vmb.ChatVM.IsBrowserOpen = false;
-        }
-
-        // Hide plan panel if open
-        if (_planIsland is { IsVisible: true })
-        {
-            _planIsland.IsVisible = false;
-            _planIsland.Opacity = 1;
-            _planIsland.RenderTransform = null;
-            if (DataContext is MainViewModel vmp) vmp.ChatVM.IsPlanOpen = false;
-        }
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-        var vm = DataContext as MainViewModel;
-        if (vm is not null && vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        const double offsetX = 40.0;
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3) defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_diffIsland, 2);
-
-        _diffIsland.RenderTransform = new TranslateTransform(offsetX, 0);
-        _diffIsland.Opacity = 0;
-        _diffIsland.IsVisible = true;
-        if (_browserSplitter is not null) _browserSplitter.IsVisible = true;
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-            }
-        };
-
-        try { await anim.RunAsync(_diffIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        _diffIsland.Opacity = 1;
-        _diffIsland.RenderTransform = null;
-        if (vm is not null) vm.ChatVM.IsDiffOpen = true;
-    }
-
-    private bool IsPlanOpen => _planIsland is { IsVisible: true };
-
-    private async void ShowPlanPanel()
-    {
-        if (_planIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        // Hide browser panel if open (they share column 2)
-        if (_browserIsland is { IsVisible: true })
-        {
-            _browserIsland.IsVisible = false;
-            _browserIsland.Opacity = 1;
-            _browserIsland.RenderTransform = null;
-            if (_browserSplitter is not null) _browserSplitter.IsVisible = false;
-            _browserView?.ClearBrowserService();
-            if (DataContext is MainViewModel vmb)
-                vmb.ChatVM.IsBrowserOpen = false;
-        }
-
-        // Hide diff panel if open
-        if (_diffIsland is { IsVisible: true })
-        {
-            _diffIsland.IsVisible = false;
-            _diffIsland.Opacity = 1;
-            _diffIsland.RenderTransform = null;
-            if (DataContext is MainViewModel vmd) vmd.ChatVM.IsDiffOpen = false;
-        }
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        var vm = DataContext as MainViewModel;
-        if (vm is not null && vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        // Switch to split layout
-        const double offsetX = 40.0;
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3) defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_planIsland, 2);
-
-        _planIsland.RenderTransform = new TranslateTransform(offsetX, 0);
-        _planIsland.Opacity = 0;
-        _planIsland.IsVisible = true;
-        if (_browserSplitter is not null) _browserSplitter.IsVisible = true;
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-            }
-        };
-
-        try { await anim.RunAsync(_planIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        _planIsland.Opacity = 1;
-        _planIsland.RenderTransform = null;
-
-        if (vm is not null) vm.ChatVM.IsPlanOpen = true;
-    }
-
-    private async void HidePlanPanel()
-    {
-        if (_planIsland is null || _chatContentGrid is null) return;
-        if (!_planIsland.IsVisible) return;
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        const double offsetX = 40.0;
-        _planIsland.RenderTransform = new TranslateTransform(0, 0);
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new CubicEaseIn(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-            }
-        };
-
-        try { await anim.RunAsync(_planIsland, ct); }
-        catch (OperationCanceledException) { }
-
-        _planIsland.IsVisible = false;
-        _planIsland.Opacity = 1;
-        _planIsland.RenderTransform = null;
-        if (_browserSplitter is not null && !(_browserIsland?.IsVisible ?? false))
-            _browserSplitter.IsVisible = false;
-
-        // Reset to single-column if nothing else is open
-        if (!(_browserIsland?.IsVisible ?? false) && !(_diffIsland?.IsVisible ?? false))
-        {
-            var defs = _chatContentGrid.ColumnDefinitions;
-            while (defs.Count < 3) defs.Add(new ColumnDefinition());
-            defs[0].Width = new GridLength(1, GridUnitType.Star);
-            defs[1].Width = new GridLength(0);
-            defs[2].Width = new GridLength(0);
-            if (_chatIsland is not null) Grid.SetColumn(_chatIsland, 0);
-        }
-
-        if (DataContext is MainViewModel vm) vm.ChatVM.IsPlanOpen = false;
-    }
+    private bool IsPlanOpen => _chatPreviewPanel?.IsPlanOpen == true;
+    private void ShowPlanPanel() => _chatPreviewPanel?.ShowPlanPanel();
+    private void HidePlanPanel() => _chatPreviewPanel?.HidePlanPanel();
 }

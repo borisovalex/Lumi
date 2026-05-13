@@ -29,6 +29,9 @@ namespace Lumi.Views;
 
 public partial class ChatView : UserControl
 {
+    public static readonly StyledProperty<bool> ShowInternalTitleProperty =
+        AvaloniaProperty.Register<ChatView, bool>(nameof(ShowInternalTitle), true);
+
     private StrataChatShell? _chatShell;
     private StrataChatComposer? _composer;
     private Panel? _composerSpacer;
@@ -84,6 +87,12 @@ public partial class ChatView : UserControl
     public ChatView()
     {
         InitializeComponent();
+    }
+
+    public bool ShowInternalTitle
+    {
+        get => GetValue(ShowInternalTitleProperty);
+        set => SetValue(ShowInternalTitleProperty, value);
     }
 
     private void InitializeComponent()
