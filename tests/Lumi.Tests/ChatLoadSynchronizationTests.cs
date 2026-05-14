@@ -1,4 +1,7 @@
+using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Lumi.Models;
@@ -38,6 +41,35 @@ public sealed class ChatLoadSynchronizationTests
         }, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task LoadChatAsync_SameCurrentChatSweepsInactiveRuntimeStateWithoutEvictingMessages()
+    {
+        using var session = HeadlessTestSession.Start();
+
+        await session.Dispatch(async () =>
+        {
+            var dataStore = CreateDataStore();
+            var activeChat = new Chat { Title = "active" };
+            var inactiveChat = new Chat { Title = "inactive" };
+            activeChat.Messages.Add(new ChatMessage { Role = "user", Content = "question" });
+            inactiveChat.Messages.Add(new ChatMessage { Role = "assistant", Content = "finished answer" });
+            dataStore.Data.Chats.Add(activeChat);
+            dataStore.Data.Chats.Add(inactiveChat);
+            var vm = new ChatViewModel(dataStore, new CopilotService());
+
+            await vm.LoadChatAsync(activeChat);
+            var runtimeStates = GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates");
+            runtimeStates[inactiveChat.Id] = new ChatRuntimeState { Chat = inactiveChat };
+
+            await vm.LoadChatAsync(activeChat);
+
+            Assert.False(runtimeStates.ContainsKey(inactiveChat.Id));
+            Assert.Single(inactiveChat.Messages);
+            Assert.Equal("finished answer", inactiveChat.Messages[0].Content);
+            vm.Dispose();
+        }, CancellationToken.None);
+    }
+
     private static DataStore CreateDataStore()
         => new(new AppData
         {
@@ -47,4 +79,10 @@ public sealed class ChatLoadSynchronizationTests
                 EnableMemoryAutoSave = false
             }
         });
+
+    private static T GetField<T>(object instance, string name) where T : class
+        => (T)(instance.GetType()
+            .GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?.GetValue(instance)
+            ?? throw new InvalidOperationException($"Field {name} was not found."));
 }

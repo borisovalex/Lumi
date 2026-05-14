@@ -137,8 +137,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// <summary>Tracks the last assistant message ID that already produced suggestions per chat.</summary>
     private readonly Dictionary<Guid, Guid> _lastSuggestedAssistantMessageByChat = new();
 
-    internal Func<Guid, bool>? IsChatVisibleInAnySurface { get; set; }
-
     /// <summary>Gets or lazily creates a per-chat BrowserService instance.</summary>
     private BrowserService GetOrCreateBrowserService(Guid chatId)
     {
@@ -959,6 +957,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 chat.HasUnreadMessages = false;
                 SynchronizeDisplayedMessagesFromChat(chat, forceRebuild: true);
                 RestoreSuggestionsForChat(chat);
+                SweepInactiveChatStates();
             }
             finally
             {
@@ -1049,7 +1048,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
                 // Release all non-active, non-busy runtime states that may have
                 // accumulated (e.g. from chats the user left while they were streaming).
-                await SweepInactiveChatStatesAsync();
+                SweepInactiveChatStates();
 
                 // If this chat has an active browser, show its panel (after CurrentChat is set
                 // so ActiveChatId is already updated when the MainWindow handler runs)
@@ -3027,7 +3026,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private async Task SaveChatAsync(Chat chat, bool saveIndex, bool releaseIfInactive = false, CancellationToken cancellationToken = default)
     {
-        var canEvictMessages = false;
         try
         {
             if (_dataStore.Data.Settings.AutoSaveChats)
@@ -3035,7 +3033,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 await _dataStore.SaveChatAsync(chat, cancellationToken);
                 if (saveIndex)
                     await _dataStore.SaveAsync(cancellationToken);
-                canEvictMessages = true;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -3048,28 +3045,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         if (releaseIfInactive)
-            await ReleaseInactiveChatStateOnUiAsync(chat, canEvictMessages);
-    }
-
-    private Task ReleaseInactiveChatStateOnUiAsync(Chat chat, bool canEvictMessages)
-    {
-        if (Dispatcher.UIThread.CheckAccess())
-            return ReleaseInactiveChatStateAsync(chat, canEvictMessages);
-
-        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        Dispatcher.UIThread.Post(async () =>
         {
-            try
-            {
-                await ReleaseInactiveChatStateAsync(chat, canEvictMessages);
-                tcs.TrySetResult();
-            }
-            catch (Exception ex)
-            {
-                tcs.TrySetException(ex);
-            }
-        });
-        return tcs.Task;
+            if (Dispatcher.UIThread.CheckAccess())
+                ReleaseInactiveChatState(chat);
+            else
+                Dispatcher.UIThread.Post(() => ReleaseInactiveChatState(chat));
+        }
     }
 
     private async Task SaveIndexAsync()

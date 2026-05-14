@@ -48,12 +48,6 @@ public sealed class ChatSurfaceRegistry : IDisposable
             return _ownersByChatId.TryGetValue(chatId, out surface!);
     }
 
-    public bool HasOwner(Guid chatId)
-    {
-        lock (_sync)
-            return _ownersByChatId.ContainsKey(chatId);
-    }
-
     public IReadOnlyList<ChatViewModel> SnapshotSurfaces()
     {
         lock (_sync)

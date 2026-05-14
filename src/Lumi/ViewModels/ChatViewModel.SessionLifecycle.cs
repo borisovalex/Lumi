@@ -1830,7 +1830,6 @@ public partial class ChatViewModel
         _runtimeStates.Remove(chatId);
         RemoveSuggestionTracking(chatId);
         DisposeBrowserService(chatId);
-        _dataStore.RemoveChatLoadLock(chatId);
     }
 
     private void DetachSessionAfterRemoteShutdown(Chat chat, bool wasActive)

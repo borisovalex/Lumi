@@ -1,7 +1,6 @@
 using System;
 using System.Linq;
 using System.Threading;
-using System.Threading.Tasks;
 using Lumi.Models;
 
 namespace Lumi.ViewModels;
@@ -38,7 +37,6 @@ public partial class ChatViewModel
             ReleaseSessionResources(chatId, cancelActiveRequest: true, deleteServerSession: false);
             RemoveSuggestionTracking(chatId);
             DisposeBrowserService(chatId);
-            _dataStore.RemoveChatLoadLock(chatId);
         }
 
         _runtimeStates.Clear();
@@ -245,39 +243,16 @@ public partial class ChatViewModel
         _inProgressMessages.Remove(chatId);
     }
 
-    private bool ShouldReleaseInactiveChatState(Chat chat)
-        => CurrentChat?.Id != chat.Id
-           && !IsChatRuntimeActive(chat.Id)
-           && IsChatVisibleInAnySurface?.Invoke(chat.Id) != true;
-
-    private void ReleaseInactiveChatResources(Chat chat)
+    private void ReleaseInactiveChatState(Chat chat)
     {
+        if (CurrentChat?.Id == chat.Id || IsChatRuntimeActive(chat.Id))
+            return;
+
         CancelPendingQuestions(chat);
         ReleaseSessionResources(chat.Id, cancelActiveRequest: false, deleteServerSession: false);
         RemoveSuggestionTracking(chat.Id);
         DisposeBrowserService(chat.Id);
         _runtimeStates.Remove(chat.Id);
-    }
-
-    private async Task ReleaseInactiveChatStateAsync(Chat chat, bool canEvictMessages)
-    {
-        if (!ShouldReleaseInactiveChatState(chat))
-            return;
-
-        if (canEvictMessages && chat.Messages.Count > 0)
-        {
-            await _dataStore.EvictChatMessagesAsync(chat, () =>
-            {
-                if (!ShouldReleaseInactiveChatState(chat))
-                    return false;
-
-                ReleaseInactiveChatResources(chat);
-                return true;
-            });
-            return;
-        }
-
-        ReleaseInactiveChatResources(chat);
     }
 
     /// <summary>
@@ -286,7 +261,7 @@ public partial class ChatViewModel
     /// Call this on chat switch to catch states that event-driven cleanup missed
     /// (e.g. chats whose background work completed but cleanup was skipped).
     /// </summary>
-    private async Task SweepInactiveChatStatesAsync()
+    private void SweepInactiveChatStates()
     {
         var currentChatId = CurrentChat?.Id;
         var staleIds = _runtimeStates
@@ -301,7 +276,7 @@ public partial class ChatViewModel
         {
             var chat = _dataStore.Data.Chats.FirstOrDefault(c => c.Id == chatId);
             if (chat is not null)
-                await ReleaseInactiveChatStateAsync(chat, canEvictMessages: true);
+                ReleaseInactiveChatState(chat);
             else
             {
                 // Chat was deleted but runtime state lingered — clean up directly
@@ -309,7 +284,6 @@ public partial class ChatViewModel
                 RemoveSuggestionTracking(chatId);
                 DisposeBrowserService(chatId);
                 _runtimeStates.Remove(chatId);
-                _dataStore.RemoveChatLoadLock(chatId);
             }
         }
     }
