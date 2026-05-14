@@ -25,27 +25,22 @@
       <SolidColorBrush Color="{DynamicResource Color.TextPrimary}" Opacity="0.08" />
     </Border.BorderBrush>
 
-    <Grid RowDefinitions="38,*">
-      <Border Grid.Row="0"
-              BorderThickness="0,0,0,1"
-              Background="Transparent">
-        <Border.BorderBrush>
-          <SolidColorBrush Color="{DynamicResource Color.TextPrimary}" Opacity="0.06" />
-        </Border.BorderBrush>
-        <Grid ColumnDefinitions="*,140">
-          <Border x:Name="TitleDragRegion"
-                  Grid.Column="0"
-                  chrome:WindowDecorationProperties.ElementRole="TitleBar"
-                  Background="Transparent" />
-        </Grid>
-      </Border>
-
+    <Grid>
       <views:ChatWorkspaceView x:Name="DetachedChatView"
-                               Grid.Row="1"
                                DataContext="{Binding ChatVM}"
                                ShowInternalTitle="False"
                                UseChatIslandChrome="False"
                                PreviewIslandMargin="0,8,8,8" />
+
+      <Grid Height="10"
+            VerticalAlignment="Top"
+            ColumnDefinitions="*,140"
+            Panel.ZIndex="10"
+            Background="Transparent">
+        <Border x:Name="TitleDragRegion"
+                chrome:WindowDecorationProperties.ElementRole="TitleBar"
+                Background="Transparent" />
+      </Grid>
     </Grid>
   </Border>
 </Window>
