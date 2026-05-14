@@ -35,6 +35,10 @@ public partial class MainWindow : Window
     private const double DefaultSidebarWidth = 280;
     private const double MinSidebarWidth = 240;
     private const double MaxSidebarWidth = 420;
+    private static readonly TimeSpan ChatListDoubleClickThreshold = TimeSpan.FromMilliseconds(500);
+    private const double ChatListDoubleClickMaxDistance = 8;
+    private static readonly AttachedProperty<bool> ChatListHandlersAttachedProperty =
+        AvaloniaProperty.RegisterAttached<MainWindow, ListBox, bool>("ChatListHandlersAttached");
     private static readonly Thickness NavButtonBasePadding = new(6, 0);
     private static readonly Thickness NavButtonCompactPadding = new(1, 0);
     private const double NavLabelGap = 3;
@@ -93,6 +97,9 @@ public partial class MainWindow : Window
     private int _navPillScaleAnimationVersion;
     private bool _isNavPillWidthLocked;
     private double _expandedSidebarWidth = DefaultSidebarWidth;
+    private Guid? _lastChatListClickChatId;
+    private DateTimeOffset _lastChatListClickAt;
+    private Point _lastChatListClickPosition;
     private sealed record ProjectFilterCandidate(Project Project, int ChatCount, DateTimeOffset? LastActivity, double SearchScore);
 
     private double[] _navBaseButtonWidths = [];
@@ -1717,42 +1724,71 @@ public partial class MainWindow : Window
         foreach (var lb in this.GetVisualDescendants().OfType<ListBox>())
         {
             if (!lb.Classes.Contains("chat-list")) continue;
-            if (lb.Tag is "hooked") continue;
-            lb.Tag = "hooked";
+            if (lb.GetValue(ChatListHandlersAttachedProperty)) continue;
+            lb.SetValue(ChatListHandlersAttachedProperty, true);
             lb.SelectionChanged += OnChatListBoxSelectionChanged;
-
-            // Intercept right-click to prevent selection change.
-            // Use ContainerPrepared to hook each ListBoxItem as it's created.
-            lb.ContainerPrepared += (_, args) =>
-            {
-                if (args.Container is ListBoxItem item)
-                {
-                    item.AddHandler(
-                        PointerPressedEvent,
-                        (_, pe) =>
-                        {
-                            if (pe.GetCurrentPoint(item).Properties.IsRightButtonPressed)
-                                pe.Handled = true;
-                        },
-                        Avalonia.Interactivity.RoutingStrategies.Tunnel,
-                        handledEventsToo: true);
-                }
-            };
-
-            // Hook items already materialized
-            foreach (var item in lb.GetVisualDescendants().OfType<ListBoxItem>())
-            {
-                item.AddHandler(
-                    PointerPressedEvent,
-                    (_, pe) =>
-                    {
-                        if (pe.GetCurrentPoint(item).Properties.IsRightButtonPressed)
-                            pe.Handled = true;
-                    },
-                    Avalonia.Interactivity.RoutingStrategies.Tunnel,
-                    handledEventsToo: true);
-            }
+            lb.AddHandler(
+                PointerPressedEvent,
+                OnChatListPointerPressed,
+                Avalonia.Interactivity.RoutingStrategies.Tunnel,
+                handledEventsToo: true);
         }
+    }
+
+    private void OnChatListPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (e.Source is not Visual source)
+            return;
+
+        var item = source.FindAncestorOfType<ListBoxItem>();
+        if (item is null)
+            return;
+
+        var point = e.GetCurrentPoint(item);
+        if (point.Properties.IsRightButtonPressed)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        if (!IsLeftPointerPress(point.Properties))
+            return;
+
+        if (item.DataContext is not Chat chat || DataContext is not MainViewModel vm)
+            return;
+
+        if (!IsChatListDoubleClick(chat, point.Position, e))
+            return;
+
+        if (vm.OpenChatInNewWindowCommand.CanExecute(chat))
+            vm.OpenChatInNewWindowCommand.Execute(chat);
+        e.Handled = true;
+    }
+
+    private bool IsChatListDoubleClick(Chat chat, Point position, PointerPressedEventArgs e)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var isSameChat = _lastChatListClickChatId == chat.Id;
+        var isRecent = isSameChat && now - _lastChatListClickAt <= ChatListDoubleClickThreshold;
+        var isNearby =
+            Math.Abs(position.X - _lastChatListClickPosition.X) <= ChatListDoubleClickMaxDistance &&
+            Math.Abs(position.Y - _lastChatListClickPosition.Y) <= ChatListDoubleClickMaxDistance;
+        var isDoubleClick = e.ClickCount >= 2 || (isRecent && isNearby);
+
+        _lastChatListClickChatId = chat.Id;
+        _lastChatListClickAt = now;
+        _lastChatListClickPosition = position;
+
+        if (isDoubleClick)
+            _lastChatListClickChatId = null;
+
+        return isDoubleClick;
+    }
+
+    private static bool IsLeftPointerPress(PointerPointProperties properties)
+    {
+        return properties.IsLeftButtonPressed ||
+               properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed;
     }
 
     private void OnChatListBoxSelectionChanged(object? sender, SelectionChangedEventArgs e)
@@ -1786,10 +1822,15 @@ public partial class MainWindow : Window
             {
                 if (!lb.Classes.Contains("chat-list")) continue;
 
-                if (lb.Tag is not "hooked")
+                if (!lb.GetValue(ChatListHandlersAttachedProperty))
                 {
-                    lb.Tag = "hooked";
+                    lb.SetValue(ChatListHandlersAttachedProperty, true);
                     lb.SelectionChanged += OnChatListBoxSelectionChanged;
+                    lb.AddHandler(
+                        PointerPressedEvent,
+                        OnChatListPointerPressed,
+                        Avalonia.Interactivity.RoutingStrategies.Tunnel,
+                        handledEventsToo: true);
                 }
 
                 if (activeChatId is null)

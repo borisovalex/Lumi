@@ -76,12 +76,18 @@ public partial class ChatViewModel
     /// <summary>True when a chat exists (toggle is locked).</summary>
     public bool IsWorktreeLocked => CurrentChat is not null;
     private int _gitRefreshVersion;
+    private string? _gitStatusDirectory;
     public ObservableCollection<GitFileChangeViewModel> GitChangedFiles { get; } = [];
     /// <summary>Existing worktrees available for selection (excludes main repo).</summary>
     public ObservableCollection<WorktreeInfo> AvailableWorktrees { get; } = [];
     public bool HasAvailableWorktrees => AvailableWorktrees.Count > 0;
     public bool HasGitChanges => GitChangedFileCount > 0;
     public bool ShowGitStatusBadge => IsRefreshingGitStatus || HasGitChanges;
+    public string GitBranchLabel => !string.IsNullOrWhiteSpace(GitBranch)
+        ? GitBranch
+        : IsRefreshingGitStatus
+            ? Loc.Git_Refreshing
+            : "Git";
     public string GitChangesLabel => GitChangedFileCount switch
     {
         _ when IsRefreshingGitStatus => Loc.Git_Refreshing,
@@ -324,7 +330,7 @@ public partial class ChatViewModel
         RefreshProjectBadge();
         RefreshAgentBadge();
         UpdateQualityLevels(SelectedModel);
-        _ = RefreshCodingProjectState();
+        QueueRefreshCodingProjectState();
     }
 
     public void RefreshComposerCatalogs(bool syncProjectContextMcpSelections = true)
@@ -633,10 +639,16 @@ public partial class ChatViewModel
         OnPropertyChanged(nameof(GitChangesLabel));
     }
 
+    partial void OnGitBranchChanged(string? value)
+    {
+        OnPropertyChanged(nameof(GitBranchLabel));
+    }
+
     partial void OnIsRefreshingGitStatusChanged(bool value)
     {
         OnPropertyChanged(nameof(ShowGitStatusBadge));
         OnPropertyChanged(nameof(GitChangesLabel));
+        OnPropertyChanged(nameof(GitBranchLabel));
     }
 
     partial void OnSelectedAgentNameChanged(string? value)
@@ -1125,21 +1137,31 @@ public partial class ChatViewModel
             IsWorktreeMode = false;
         }
 
-        // Reset stale branch/change data immediately when switching chats.
-        GitBranch = null;
-        GitChangedFileCount = 0;
-        GitChangedFiles.Clear();
-        IsRefreshingGitStatus = isGit;
-
         if (!isGit)
         {
+            GitBranch = null;
+            GitChangedFileCount = 0;
+            GitChangedFiles.Clear();
+            _gitStatusDirectory = null;
             AvailableWorktrees.Clear();
             OnPropertyChanged(nameof(HasAvailableWorktrees));
+            IsRefreshingGitStatus = false;
             return;
         }
 
         // Use the effective dir (worktree or project) for status
         var workDir = savedWorktreePath ?? projectDir;
+        var normalizedWorkDir = Path.GetFullPath(workDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (!string.Equals(_gitStatusDirectory, normalizedWorkDir, StringComparison.OrdinalIgnoreCase))
+            GitBranch = null;
+        _gitStatusDirectory = normalizedWorkDir;
+
+        // Reset stale change data immediately; keep the branch visible while refreshing
+        // the same coding context so the strip does not flicker blank.
+        GitChangedFileCount = 0;
+        GitChangedFiles.Clear();
+        IsRefreshingGitStatus = true;
+
         var branchTask = GitService.GetCurrentBranchAsync(workDir);
         var changesTask = GitService.GetChangedFilesAsync(workDir);
         var worktreesTask = GitService.ListWorktreeInfoAsync(projectDir);
@@ -1181,6 +1203,24 @@ public partial class ChatViewModel
 
             IsRefreshingGitStatus = false;
         });
+    }
+
+    private void QueueRefreshCodingProjectState()
+    {
+        _ = RefreshCodingProjectStateSafelyAsync();
+    }
+
+    private async Task RefreshCodingProjectStateSafelyAsync()
+    {
+        try
+        {
+            await RefreshCodingProjectState().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Lumi] Git status refresh failed: {ex}");
+            Dispatcher.UIThread.Post(() => IsRefreshingGitStatus = false);
+        }
     }
 
     /// <summary>Toggles worktree mode. Only works before a chat is created (on the welcome screen).

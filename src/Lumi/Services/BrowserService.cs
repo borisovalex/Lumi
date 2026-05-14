@@ -49,9 +49,12 @@ public sealed partial class BrowserService : IAsyncDisposable
     private CoreWebView2? _webView;
     private IntPtr _parentHwnd;
     private bool _initialized;
+    private volatile bool _isDisposed;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly SemaphoreSlim _actionLock = new(1, 1);
+    private readonly object _parentHwndSync = new();
     private IntPtr _webViewHwnd;
+    private bool _isReparentQueued;
 
     // Navigation completion tracking — deterministic via WebView2 events
     private TaskCompletionSource<bool>? _navigationTcs;
@@ -109,6 +112,9 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// </summary>
     public void SetTheme(bool isDark)
     {
+        if (_isDisposed)
+            return;
+
         _isDark = isDark;
         if (_controller is not null)
             _controller.DefaultBackgroundColor = isDark
@@ -133,10 +139,12 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// </summary>
     public async Task InitializeAsync(IntPtr parentHwnd)
     {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_initialized) return;
         await _initLock.WaitAsync();
         try
         {
+            ObjectDisposedException.ThrowIf(_isDisposed, this);
             if (_initialized) return;
             _parentHwnd = parentHwnd;
 
@@ -331,6 +339,9 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// <summary>Updates the bounds of the WebView2 controller to fill the given area.</summary>
     public void SetBounds(int x, int y, int width, int height, int cornerRadiusPx = 0)
     {
+        if (_isDisposed)
+            return;
+
         if (_controller is null) return;
         _controller.Bounds = new System.Drawing.Rectangle(x, y, width, height);
 
@@ -369,6 +380,17 @@ public sealed partial class BrowserService : IAsyncDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);
 
+    private async Task WaitForActionLockAsync()
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        await _actionLock.WaitAsync().ConfigureAwait(false);
+        if (!_isDisposed)
+            return;
+
+        _actionLock.Release();
+        throw new ObjectDisposedException(GetType().FullName);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Tool Methods — called by the LLM via AIFunction tools
     // ═══════════════════════════════════════════════════════════════
@@ -377,7 +399,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> NavigateAsync(string url)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             TaskCompletionSource<bool> navTcs = new();
@@ -425,7 +447,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ClickAsync(string selector)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escaped = EscapeJs(selector);
@@ -471,7 +493,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ClickTextAsync(string text, bool exact = true, bool preferDialog = true)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedText = EscapeJs(text);
@@ -516,7 +538,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> PressKeyAsync(string key, string? selector = null)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedKey = EscapeJs(key);
@@ -551,7 +573,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> TypeAsync(string selector, string text)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedSel = EscapeJs(selector);
@@ -584,7 +606,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> EvaluateAsync(string javascript)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             // Wrap the user script in a synchronous try/catch so errors are returned as text instead of null.
@@ -625,7 +647,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> WaitForAsync(string selector, int timeoutMs = 10000)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var start = Environment.TickCount64;
@@ -653,7 +675,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> SelectAsync(string selector, string value)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedSel = EscapeJs(selector);
@@ -815,7 +837,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> LookAsync(string? filter = null)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedFilter = EscapeJs(filter ?? "");
@@ -860,7 +882,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> FindElementsAsync(string query, int limit = 12, bool preferDialog = true)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedQuery = EscapeJs(query ?? string.Empty);
@@ -1126,7 +1148,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ClickByNumberAsync(int index)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var script =
@@ -1162,7 +1184,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> TypeByNumberAsync(int index, string text)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedText = EscapeJs(text);
@@ -1199,7 +1221,7 @@ public sealed partial class BrowserService : IAsyncDisposable
         target = target.Trim();
 
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             string script;
@@ -1253,7 +1275,7 @@ public sealed partial class BrowserService : IAsyncDisposable
             return "Error: fill needs a value parameter — JSON object mapping field identifiers to values, e.g. {\"3\": \"John\", \"4\": \"john@email.com\", \"5\": true}";
 
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedJson = EscapeJs(fieldsJson);
@@ -1365,7 +1387,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ReadFormAsync()
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var script =
@@ -1546,14 +1568,66 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// <summary>Store the HWND for lazy initialization (called by BrowserView or MainWindow).</summary>
     public void SetParentHwnd(IntPtr hwnd)
     {
-        if (hwnd != IntPtr.Zero)
+        if (_isDisposed || hwnd == IntPtr.Zero)
+            return;
+
+        lock (_parentHwndSync)
+        {
             _pendingParentHwnd = hwnd;
+            if (!_initialized || _controller is null || _parentHwnd == hwnd)
+                return;
+        }
+
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+        {
+            ReparentController(hwnd);
+        }
+        else
+        {
+            lock (_parentHwndSync)
+            {
+                if (_isReparentQueued)
+                    return;
+                _isReparentQueued = true;
+            }
+
+            Avalonia.Threading.Dispatcher.UIThread.Post(
+                ReparentToPendingParent,
+                Avalonia.Threading.DispatcherPriority.Loaded);
+        }
+    }
+
+    private void ReparentToPendingParent()
+    {
+        IntPtr hwnd;
+        lock (_parentHwndSync)
+        {
+            _isReparentQueued = false;
+            hwnd = _pendingParentHwnd;
+        }
+
+        ReparentController(hwnd);
+    }
+
+    private void ReparentController(IntPtr hwnd)
+    {
+        if (_isDisposed || hwnd == IntPtr.Zero || _controller is null || _parentHwnd == hwnd)
+            return;
+
+        var wasVisible = _controller.IsVisible;
+        _controller.IsVisible = false;
+        _controller.ParentWindow = hwnd;
+        _parentHwnd = hwnd;
+        _webViewHwnd = IntPtr.Zero;
+        _controller.IsVisible = wasVisible;
+        _controller.NotifyParentWindowPositionChanged();
     }
 
     /// <summary>Ensures the browser is initialized, using the stored HWND if needed.
     /// Marshals to the UI thread if called from a background thread.</summary>
     private async Task EnsureInitializedAsync()
     {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_initialized && _webView is not null) return;
 
         if (_pendingParentHwnd == IntPtr.Zero)
@@ -1830,27 +1904,56 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<int> ImportCookiesAsync(BrowserCookieService.BrowserProfile profile)
     {
         await EnsureInitializedAsync();
-        return await InvokeOnUiThreadAsync(() => BrowserCookieService.ImportCookiesAsync(profile, _webView!));
+        await WaitForActionLockAsync();
+        try
+        {
+            return await InvokeOnUiThreadAsync(() => BrowserCookieService.ImportCookiesAsync(profile, _webView!));
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_webView is not null)
+        if (_isDisposed)
+            return;
+
+        _isDisposed = true;
+
+        await _initLock.WaitAsync().ConfigureAwait(false);
+        await _actionLock.WaitAsync().ConfigureAwait(false);
+        try
         {
-            _webView.NavigationCompleted -= OnNavigationCompleted;
-            _webView.SourceChanged -= OnSourceChanged;
-            _webView.NewWindowRequested -= OnNewWindowRequested;
-            _webView.DownloadStarting -= OnDownloadStarting;
+            lock (_parentHwndSync)
+            {
+                _isReparentQueued = false;
+                _pendingParentHwnd = IntPtr.Zero;
+            }
+
+            if (_webView is not null)
+            {
+                _webView.NavigationCompleted -= OnNavigationCompleted;
+                _webView.SourceChanged -= OnSourceChanged;
+                _webView.NewWindowRequested -= OnNewWindowRequested;
+                _webView.DownloadStarting -= OnDownloadStarting;
+            }
+            if (_controller is not null)
+            {
+                _controller.Close();
+                _controller = null;
+            }
+            _webView = null;
+            _environment = null;
+            _initialized = false;
         }
-        if (_controller is not null)
+        finally
         {
-            _controller.Close();
-            _controller = null;
+            _actionLock.Release();
+            _initLock.Release();
+            // Do not dispose these semaphores: late browser/tool calls may already be
+            // waiting and need to observe _isDisposed cleanly instead of racing disposal.
         }
-        _webView = null;
-        _environment = null;
-        _initialized = false;
-        _initLock.Dispose();
-        _actionLock.Dispose();
     }
 }

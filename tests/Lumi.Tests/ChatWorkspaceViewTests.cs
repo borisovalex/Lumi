@@ -1,9 +1,14 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Headless;
+using Avalonia.Input;
+using Avalonia.Threading;
+using Avalonia.VisualTree;
 using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
@@ -135,6 +140,105 @@ public sealed class ChatWorkspaceViewTests
         Assert.DoesNotContain("x:Name=\"PlanIsland\"", chatWindowXaml);
     }
 
+    [Fact]
+    public void ChatViewKeepsCodingBranchSlotVisibleForCodingProjects()
+    {
+        var root = FindRepoRoot();
+        var chatViewXaml = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatView.axaml"));
+
+        Assert.Contains("IsVisible=\"{Binding IsCodingProject}\"", chatViewXaml);
+        Assert.Contains("Text=\"{Binding GitBranchLabel}\"", chatViewXaml);
+    }
+
+    [Fact]
+    public void MainWindowChatListDoubleClickUsesDetachedWindowCommand()
+    {
+        var root = FindRepoRoot();
+        var mainWindowCode = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "MainWindow.axaml.cs"));
+
+        Assert.Contains("OnChatListPointerPressed", mainWindowCode);
+        Assert.Contains("IsChatListDoubleClick(chat, point.Position, e)", mainWindowCode);
+        Assert.Contains("ChatListHandlersAttachedProperty", mainWindowCode);
+        Assert.Contains("OpenChatInNewWindowCommand.Execute(chat)", mainWindowCode);
+    }
+
+    [Fact]
+    public async Task MainWindowChatListDoubleClickRequestsDetachedWindow()
+    {
+        using var session = HeadlessTestSession.Start();
+
+        await session.Dispatch(async () =>
+        {
+            Loc.Load("en");
+            var chat = new Chat
+            {
+                Title = "Open by double click",
+                CreatedAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            };
+            var data = CreateAppData();
+            data.Settings.IsOnboarded = true;
+            data.Chats.Add(chat);
+            var dataStore = new DataStore(data);
+            var viewModel = new MainViewModel(
+                dataStore,
+                new CopilotService(),
+                new UpdateService(),
+                startBackgroundJobs: false);
+            DetachedChatWindowRequest? request = null;
+            viewModel.OpenChatWindowRequested += requested => request = requested;
+
+            var window = new MainWindow
+            {
+                DataContext = viewModel,
+                Width = 1100,
+                Height = 820,
+            };
+
+            window.Show();
+            try
+            {
+                await PumpAsync();
+
+                var listItem = window.GetVisualDescendants()
+                    .OfType<ListBoxItem>()
+                    .First(item => ReferenceEquals(item.DataContext, chat));
+                var topLeft = listItem.TranslatePoint(new Point(0, 0), window)
+                    ?? throw new InvalidOperationException("Chat list item is not attached.");
+                var point = topLeft + new Point(listItem.Bounds.Width / 2, listItem.Bounds.Height / 2);
+
+                window.MouseDown(point, MouseButton.Left, RawInputModifiers.None);
+                window.MouseUp(point, MouseButton.Left, RawInputModifiers.None);
+                await Task.Delay(80);
+                window.MouseDown(point, MouseButton.Left, RawInputModifiers.None);
+                window.MouseUp(point, MouseButton.Left, RawInputModifiers.None);
+                await PumpAsync();
+
+                Assert.Same(chat, request?.Chat);
+            }
+            finally
+            {
+                window.Close();
+                viewModel.Dispose();
+                request?.WindowVM.Dispose();
+                request?.WindowVM.ChatVM.Dispose();
+            }
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public void BrowserViewReparentsNativeWebViewBeforeBoundsUpdates()
+    {
+        var root = FindRepoRoot();
+        var browserViewCode = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "BrowserView.axaml.cs"));
+        var browserServiceCode = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Services", "BrowserService.cs"));
+
+        Assert.Contains("_browserService.SetParentHwnd(platformHandle.Handle)", browserViewCode);
+        Assert.Contains("_controller.ParentWindow = hwnd", browserServiceCode);
+        Assert.Contains("_controller.NotifyParentWindowPositionChanged()", browserServiceCode);
+        Assert.Contains("_webViewHwnd = IntPtr.Zero", browserServiceCode);
+    }
+
     private static AppData CreateAppData() => new()
     {
         Settings = new UserSettings
@@ -155,5 +259,13 @@ public sealed class ChatWorkspaceViewTests
         }
 
         throw new InvalidOperationException("Could not locate Lumi repository root.");
+    }
+
+    private static async Task PumpAsync()
+    {
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Input);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
     }
 }

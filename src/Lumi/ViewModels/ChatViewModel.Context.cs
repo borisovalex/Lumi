@@ -88,7 +88,7 @@ public partial class ChatViewModel
         SyncComposerProjectSelectionFromState();
         RefreshProjectBadge();
         RefreshComposerCatalogs(); // Re-scan project-context and user Copilot agents/skills for the new project
-        _ = RefreshCodingProjectState();
+        QueueRefreshCodingProjectState();
     }
 
     private Guid? _pendingProjectId;
@@ -109,6 +109,7 @@ public partial class ChatViewModel
             _activeProjectFilterId = value;
             SyncComposerProjectSelectionFromState();
             RefreshProjectBadge();
+            QueueRefreshCodingProjectState();
         }
     }
 
@@ -138,7 +139,7 @@ public partial class ChatViewModel
         SyncComposerProjectSelectionFromState();
         RefreshProjectBadge();
         RefreshComposerCatalogs(); // Re-scan to remove project-context and user Copilot agents/skills
-        _ = RefreshCodingProjectState();
+        QueueRefreshCodingProjectState();
     }
     public void AddSkill(Skill skill)
     {

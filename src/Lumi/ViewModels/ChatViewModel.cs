@@ -453,7 +453,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             _transcriptBuilder.HideTypingIndicator();
             // Refresh git status after turn completes
             if (IsCodingProject)
-                _ = RefreshCodingProjectState();
+                QueueRefreshCodingProjectState();
         }
     }
 
@@ -1074,7 +1074,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
             // Git status can be slow in large repos/worktrees. Do not keep the chat
             // loading overlay up after the transcript is already interactive.
-            _ = RefreshCodingProjectState();
+            QueueRefreshCodingProjectState();
 
             // Refresh SDK agents if we have a session
             if (_activeSession is not null)
@@ -1170,7 +1170,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         TranscriptTurns.Clear();
         _transcriptBuilder.ResetState();
         CurrentChat = null;
-        _ = RefreshCodingProjectState();
+        QueueRefreshCodingProjectState();
         IsBusy = false;
         IsStreaming = false;
         TotalInputTokens = 0;
@@ -1682,7 +1682,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         if (createdChat)
         {
-            _ = RefreshCodingProjectState();
+            QueueRefreshCodingProjectState();
             QueueGeneratedChatTitle(targetChat, prompt);
         }
 

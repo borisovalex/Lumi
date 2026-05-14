@@ -336,10 +336,22 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private DetachedChatWindowRequest CreateDetachedChatWindowRequest(Chat? chat, ChatViewModel? chatVm = null)
     {
         var ownsSurface = chatVm is null;
+        var surface = chatVm ?? CreateChatViewModel();
+        if (chat is null)
+            SetDraftChatProjectContext(surface, SelectedProjectFilter);
+
         return new DetachedChatWindowRequest(
             chat,
-            new ChatWindowViewModel(chatVm ?? CreateChatViewModel()),
+            new ChatWindowViewModel(surface),
             ownsSurface);
+    }
+
+    private static void SetDraftChatProjectContext(ChatViewModel chatVm, Guid? projectId)
+    {
+        if (projectId.HasValue)
+            chatVm.SetProjectId(projectId.Value);
+        else
+            chatVm.ClearProjectId();
     }
 
     private void ReplaceChatViewModel(ChatViewModel replacement, bool disposePrevious)

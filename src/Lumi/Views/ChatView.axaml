@@ -1238,7 +1238,7 @@
           <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="5"
                       IsVisible="{Binding IsCodingProject}">
           <Button Classes="subtle" Padding="5,1" MinHeight="0" Height="20" CornerRadius="4"
-                  IsVisible="{Binding GitBranch, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                  IsVisible="{Binding IsCodingProject}"
                   Cursor="Hand" Background="{DynamicResource Brush.Surface2}">
             <Button.Flyout>
               <MenuFlyout Placement="TopEdgeAlignedLeft">
@@ -1294,7 +1294,7 @@
             <StackPanel Orientation="Horizontal" Spacing="3">
               <PathIcon Width="8" Height="8" Foreground="{DynamicResource Brush.TextTertiary}"
                         Data="M6 3v6a3 3 0 0 0 3 3h2a1 1 0 0 1 1 1v2m0 0a2 2 0 1 0 4 0 2 2 0 0 0-4 0zM6 3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm0 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm0 0V9" />
-              <TextBlock Text="{Binding GitBranch}" FontSize="10"
+              <TextBlock Text="{Binding GitBranchLabel}" FontSize="10"
                          Foreground="{DynamicResource Brush.TextTertiary}" VerticalAlignment="Center"
                          MaxWidth="120" TextTrimming="CharacterEllipsis" />
             </StackPanel>

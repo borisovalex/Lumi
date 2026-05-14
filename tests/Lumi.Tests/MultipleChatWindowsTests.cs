@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
@@ -70,6 +71,44 @@ public sealed class MultipleChatWindowsTests
         viewModel.Dispose();
         request?.WindowVM.Dispose();
         request?.WindowVM.ChatVM.Dispose();
+    }
+
+    [Fact]
+    public void OpenNewChatInNewWindowCommand_AppliesProjectFilterToDetachedDraft()
+    {
+        Loc.Load("en");
+        var projectId = Guid.NewGuid();
+        var data = new AppData
+        {
+            Settings = new UserSettings
+            {
+                AutoSaveChats = false,
+                EnableMemoryAutoSave = false
+            },
+            Projects =
+            [
+                new Project
+                {
+                    Id = projectId,
+                    Name = "Coding project",
+                    WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                }
+            ]
+        };
+        var viewModel = new MainViewModel(new DataStore(data), new CopilotService(), new UpdateService());
+        DetachedChatWindowRequest? request = null;
+        viewModel.OpenChatWindowRequested += requested => request = requested;
+
+        viewModel.SelectedProjectFilter = projectId;
+        viewModel.OpenNewChatInNewWindowCommand.Execute(null);
+
+        Assert.NotNull(request);
+        Assert.Null(request.Chat);
+        Assert.Equal(projectId, request.WindowVM.ChatVM.ActiveProjectFilterId);
+        Assert.Equal(projectId, GetPrivateField<Guid?>(request.WindowVM.ChatVM, "_pendingProjectId"));
+        viewModel.Dispose();
+        request.WindowVM.Dispose();
+        request.WindowVM.ChatVM.Dispose();
     }
 
     [Fact]
@@ -240,5 +279,12 @@ public sealed class MultipleChatWindowsTests
         };
 
         return new MainViewModel(new DataStore(data), new CopilotService(), new UpdateService());
+    }
+
+    private static T GetPrivateField<T>(object target, string fieldName)
+    {
+        var field = target.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException($"Field '{fieldName}' was not found.");
+        return (T)field.GetValue(target)!;
     }
 }
