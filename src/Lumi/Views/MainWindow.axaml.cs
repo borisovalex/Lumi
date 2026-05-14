@@ -61,6 +61,7 @@ public partial class MainWindow : Window
     private TextBlock? _projectFilterMoreText;
     private ScrollViewer? _chatListScroller;
     private readonly List<(Project Project, PropertyChangedEventHandler Handler)> _projectFilterHandlers = [];
+    private ChatWorkspaceView? _chatWorkspace;
     private ChatView? _chatView;
     private ContentControl? _jobsHost;
     private ContentControl? _projectsHost;
@@ -97,7 +98,6 @@ public partial class MainWindow : Window
     private double[] _navBaseButtonWidths = [];
     private double[] _navMinButtonWidths = [];
     private MainViewModel? _wiredVm;
-    private ChatPreviewPanelController? _chatPreviewPanel;
     private const int NavHoverIntentDelayMs = 85;
 
     public bool IsPrimaryWindow { get; set; } = true;
@@ -158,8 +158,7 @@ public partial class MainWindow : Window
         DisposeCancellationTokenSource(ref _titleAnimCts);
         DisposeCancellationTokenSource(ref _chatListRevealCts);
         DisposeCancellationTokenSource(ref _projectSwitcherDrawerCts);
-        _chatPreviewPanel?.Dispose();
-        _chatPreviewPanel = null;
+        _chatWorkspace?.Dispose();
     }
 
     private static CancellationTokenSource ReplaceCancellationTokenSource(ref CancellationTokenSource? source)
@@ -210,7 +209,7 @@ public partial class MainWindow : Window
 
         _pages =
         [
-            this.FindControl<Grid>("ChatContentGrid"),         // 0 = Chat (container grid)
+            this.FindControl<Control>("ChatContentGrid"),      // 0 = Chat workspace
             this.FindControl<Control>("PageJobs"),             // 1
             this.FindControl<Control>("PageProjects"),         // 2
             this.FindControl<Control>("PageSkills"),           // 3
@@ -280,7 +279,8 @@ public partial class MainWindow : Window
         if (_chatListScroller is not null)
             _chatListScroller.ScrollChanged += OnChatListScrollChanged;
 
-        _chatView = this.FindControl<ChatView>("PageChat");
+        _chatWorkspace = this.FindControl<ChatWorkspaceView>("ChatContentGrid");
+        _chatView = _chatWorkspace?.ChatView;
 
         // Set OS-specific shortcut label
         var shortcutLabel = this.FindControl<TextBlock>("SearchButtonShortcut");
@@ -828,43 +828,28 @@ public partial class MainWindow : Window
         // no manual padding workaround needed.
     }
 
-    private ChatPreviewPanelController CreateChatPreviewPanel(MainViewModel vm)
+    private void AttachChatWorkspace(MainViewModel vm)
     {
-        var contentGrid = this.FindControl<Grid>("ChatContentGrid")
-            ?? throw new InvalidOperationException("Main window is missing ChatContentGrid.");
-        var chatIsland = this.FindControl<Border>("ChatIsland")
-            ?? throw new InvalidOperationException("Main window is missing ChatIsland.");
-        var browserPanel = this.FindControl<Border>("BrowserIsland")
-            ?? throw new InvalidOperationException("Main window is missing BrowserIsland.");
-        var browserHost = this.FindControl<ContentControl>("BrowserHost")
-            ?? throw new InvalidOperationException("Main window is missing BrowserHost.");
-        var diffPanel = this.FindControl<Border>("DiffIsland")
-            ?? throw new InvalidOperationException("Main window is missing DiffIsland.");
-        var diffHost = this.FindControl<ContentControl>("DiffHost")
-            ?? throw new InvalidOperationException("Main window is missing DiffHost.");
-        var diffTitle = this.FindControl<TextBlock>("DiffFileNameText")
-            ?? throw new InvalidOperationException("Main window is missing DiffFileNameText.");
-        var planPanel = this.FindControl<Border>("PlanIsland")
-            ?? throw new InvalidOperationException("Main window is missing PlanIsland.");
+        if (_chatWorkspace is null)
+            return;
 
-        return new ChatPreviewPanelController(
-            this,
-            vm.DataStore,
-            vm.ChatVM,
-            contentGrid,
-            chatIsland,
-            this.FindControl<GridSplitter>("BrowserSplitter"),
-            browserPanel,
-            browserHost,
-            diffPanel,
-            diffHost,
-            diffTitle,
-            planPanel,
-            ensureChatVisible: () =>
-            {
-                if (vm.SelectedNavIndex != 0)
-                    vm.SelectedNavIndex = 0;
-            });
+        _chatWorkspace.EnsureChatVisible = () =>
+        {
+            if (vm.SelectedNavIndex != 0)
+                vm.SelectedNavIndex = 0;
+        };
+        _chatWorkspace.CanShowBrowserPanel = chatId => vm.ActiveChatId == chatId;
+        _chatWorkspace.DataStore = vm.DataStore;
+
+        if (!ReferenceEquals(_chatWorkspace.DataContext, vm.ChatVM))
+            _chatWorkspace.DataContext = vm.ChatVM;
+
+        _chatView = _chatWorkspace.ChatView;
+        foreach (var svc in vm.ChatVM.ChatBrowserServices.Values)
+            svc.SetTheme(vm.IsDarkTheme);
+        HideBrowserPanel();
+        HideDiffPanel();
+        HidePlanPanel();
     }
 
     protected override void OnDataContextChanged(EventArgs e)
@@ -920,64 +905,7 @@ public partial class MainWindow : Window
 
             // Apply initial font size
             ApplyFontSize(vm.SettingsVM.FontSize);
-            _chatPreviewPanel?.Dispose();
-            _chatPreviewPanel = CreateChatPreviewPanel(vm);
-
-            // Wire browser panel show/hide (per-chat aware)
-            vm.ChatVM.BrowserShowRequested += (chatId) =>
-            {
-                Dispatcher.UIThread.Post(() =>
-                {
-                    // Only show browser panel if the requesting chat is currently active
-                    if (vm.ActiveChatId == chatId)
-                        ShowBrowserPanel(chatId);
-                });
-            };
-            vm.ChatVM.BrowserHideRequested += () =>
-            {
-                Dispatcher.UIThread.Post(HideBrowserPanel);
-            };
-
-            // Close browser button
-            var closeBrowserBtn = this.FindControl<Button>("CloseBrowserButton");
-            if (closeBrowserBtn is not null)
-                closeBrowserBtn.Click += (_, _) => HideBrowserPanel();
-
-            // Wire diff panel show/hide
-            vm.ChatVM.DiffShowRequested += (item) =>
-            {
-                Dispatcher.UIThread.Post(() => ShowDiffPanel(item));
-            };
-            vm.ChatVM.DiffHideRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => HideDiffPanel());
-            };
-
-            // Close diff button
-            var closeDiffBtn = this.FindControl<Button>("CloseDiffButton");
-            if (closeDiffBtn is not null)
-                closeDiffBtn.Click += (_, _) => HideDiffPanel();
-
-            // Wire git changes panel show
-            vm.ChatVM.GitChangesShowRequested += (files) =>
-            {
-                Dispatcher.UIThread.Post(() => ShowGitChangesPanel(files));
-            };
-
-            // Wire plan panel show/hide
-            vm.ChatVM.PlanShowRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => ShowPlanPanel());
-            };
-            vm.ChatVM.PlanHideRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => HidePlanPanel());
-            };
-
-            // Plan close button
-            var closePlanBtn = this.FindControl<Button>("ClosePlanButton");
-            if (closePlanBtn is not null)
-                closePlanBtn.Click += (_, _) => HidePlanPanel();
+            AttachChatWorkspace(vm);
 
             // Sync initial browser theme
             vm.SettingsBrowserService.SetTheme(vm.IsDarkTheme);
@@ -1030,6 +958,11 @@ public partial class MainWindow : Window
                     HidePlanPanel();
                     Dispatcher.UIThread.Post(() => SyncListBoxSelection(vm.ActiveChatId),
                         DispatcherPriority.Loaded);
+                }
+                else if (args.PropertyName == nameof(MainViewModel.ChatVM))
+                {
+                    AttachChatWorkspace(vm);
+                    Dispatcher.UIThread.Post(() => _chatView?.FocusComposer(), DispatcherPriority.Loaded);
                 }
                 else if (args.PropertyName == nameof(MainViewModel.RenamingChat))
                 {
@@ -1127,10 +1060,10 @@ public partial class MainWindow : Window
             HideDiffPanel();
             HidePlanPanel();
         }
-        else if (_chatPreviewPanel?.IsBrowserOpen == true)
+        else if (_chatWorkspace?.IsBrowserOpen == true)
         {
             // Returning to chat with browser open — show the overlay and refresh bounds
-            _chatPreviewPanel.ShowCurrentBrowserController();
+            _chatWorkspace.ShowCurrentBrowserController();
         }
 
         // When projects tab is shown, update chat counts and refresh selected project chats
@@ -2902,7 +2835,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Whether the browser panel is currently visible.</summary>
-    private bool IsBrowserOpen => _chatPreviewPanel?.IsBrowserOpen == true;
+    private bool IsBrowserOpen => _chatWorkspace?.IsBrowserOpen == true;
 
     private void EnsurePageViewLoaded(int index)
     {
@@ -2948,18 +2881,18 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ShowBrowserPanel(Guid chatId) => _chatPreviewPanel?.ShowBrowserPanel(chatId);
-    private void HideBrowserPanel() => _chatPreviewPanel?.HideBrowserPanel();
+    private void ShowBrowserPanel(Guid chatId) => _chatWorkspace?.ShowBrowserPanel(chatId);
+    private void HideBrowserPanel() => _chatWorkspace?.HideBrowserPanel();
 
     /// <summary>Whether the diff panel is currently visible.</summary>
-    private bool IsDiffOpen => _chatPreviewPanel?.IsDiffOpen == true;
+    private bool IsDiffOpen => _chatWorkspace?.IsDiffOpen == true;
 
-    private void ShowDiffPanel(FileChangeItem fileChange) => _chatPreviewPanel?.ShowDiffPanel(fileChange);
-    private void HideDiffPanel() => _chatPreviewPanel?.HideDiffPanel();
+    private void ShowDiffPanel(FileChangeItem fileChange) => _chatWorkspace?.ShowDiffPanel(fileChange);
+    private void HideDiffPanel() => _chatWorkspace?.HideDiffPanel();
     private void ShowGitChangesPanel(List<GitFileChangeViewModel> files)
-        => _chatPreviewPanel?.ShowGitChangesPanel(files);
+        => _chatWorkspace?.ShowGitChangesPanel(files);
 
-    private bool IsPlanOpen => _chatPreviewPanel?.IsPlanOpen == true;
-    private void ShowPlanPanel() => _chatPreviewPanel?.ShowPlanPanel();
-    private void HidePlanPanel() => _chatPreviewPanel?.HidePlanPanel();
+    private bool IsPlanOpen => _chatWorkspace?.IsPlanOpen == true;
+    private void ShowPlanPanel() => _chatWorkspace?.ShowPlanPanel();
+    private void HidePlanPanel() => _chatWorkspace?.HidePlanPanel();
 }

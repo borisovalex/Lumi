@@ -42,11 +42,13 @@ internal sealed class ChatPreviewPanelController : IDisposable
     private readonly TextBlock _diffTitleText;
     private readonly Border _planPanel;
     private readonly Action? _ensureChatVisible;
+    private readonly Func<Guid, bool>? _canShowBrowserPanel;
     private BrowserView? _browserView;
     private DiffView? _diffView;
     private List<GitFileChangeViewModel>? _lastGitChangesList;
     private CancellationTokenSource? _browserAnimCts;
     private CancellationTokenSource? _previewAnimCts;
+    private bool _isDisposed;
 
     public ChatPreviewPanelController(
         Control resourceScope,
@@ -61,7 +63,8 @@ internal sealed class ChatPreviewPanelController : IDisposable
         ContentControl diffHost,
         TextBlock diffTitleText,
         Border planPanel,
-        Action? ensureChatVisible = null)
+        Action? ensureChatVisible = null,
+        Func<Guid, bool>? canShowBrowserPanel = null)
     {
         _resourceScope = resourceScope;
         _dataStore = dataStore;
@@ -76,6 +79,8 @@ internal sealed class ChatPreviewPanelController : IDisposable
         _diffTitleText = diffTitleText;
         _planPanel = planPanel;
         _ensureChatVisible = ensureChatVisible;
+        _canShowBrowserPanel = canShowBrowserPanel;
+        WireViewModel();
     }
 
     public bool IsBrowserOpen => _browserPanel.IsVisible;
@@ -84,10 +89,59 @@ internal sealed class ChatPreviewPanelController : IDisposable
 
     public void Dispose()
     {
+        if (_isDisposed)
+            return;
+
+        _isDisposed = true;
+        UnwireViewModel();
         _browserView?.ClearBrowserService();
         DisposeCancellationTokenSource(ref _browserAnimCts);
         DisposeCancellationTokenSource(ref _previewAnimCts);
     }
+
+    private void WireViewModel()
+    {
+        _viewModel.BrowserShowRequested += OnBrowserShowRequested;
+        _viewModel.BrowserHideRequested += OnBrowserHideRequested;
+        _viewModel.DiffShowRequested += OnDiffShowRequested;
+        _viewModel.DiffHideRequested += OnDiffHideRequested;
+        _viewModel.GitChangesShowRequested += OnGitChangesShowRequested;
+        _viewModel.PlanShowRequested += OnPlanShowRequested;
+        _viewModel.PlanHideRequested += OnPlanHideRequested;
+    }
+
+    private void UnwireViewModel()
+    {
+        _viewModel.BrowserShowRequested -= OnBrowserShowRequested;
+        _viewModel.BrowserHideRequested -= OnBrowserHideRequested;
+        _viewModel.DiffShowRequested -= OnDiffShowRequested;
+        _viewModel.DiffHideRequested -= OnDiffHideRequested;
+        _viewModel.GitChangesShowRequested -= OnGitChangesShowRequested;
+        _viewModel.PlanShowRequested -= OnPlanShowRequested;
+        _viewModel.PlanHideRequested -= OnPlanHideRequested;
+    }
+
+    private void PostIfActive(Action action)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_isDisposed)
+                action();
+        });
+    }
+
+    private void OnBrowserShowRequested(Guid chatId) => PostIfActive(() =>
+    {
+        if (_canShowBrowserPanel?.Invoke(chatId) != false)
+            ShowBrowserPanel(chatId);
+    });
+
+    private void OnBrowserHideRequested() => PostIfActive(HideBrowserPanel);
+    private void OnDiffShowRequested(FileChangeItem item) => PostIfActive(() => ShowDiffPanel(item));
+    private void OnDiffHideRequested() => PostIfActive(HideDiffPanel);
+    private void OnGitChangesShowRequested(List<GitFileChangeViewModel> files) => PostIfActive(() => ShowGitChangesPanel(files));
+    private void OnPlanShowRequested() => PostIfActive(ShowPlanPanel);
+    private void OnPlanHideRequested() => PostIfActive(HidePlanPanel);
 
     public void ShowCurrentBrowserController()
     {

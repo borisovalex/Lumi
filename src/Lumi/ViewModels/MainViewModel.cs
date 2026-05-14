@@ -20,6 +20,11 @@ public class ChatGroup
     public ObservableCollection<Chat> Chats { get; set; } = [];
 }
 
+public sealed record DetachedChatWindowRequest(
+    Chat? Chat,
+    ChatWindowViewModel WindowVM,
+    bool DisposeSurfaceIfNotOpened);
+
 public partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly DataStore _dataStore;
@@ -28,6 +33,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private readonly BrowserService _settingsBrowserService;
     private readonly BackgroundJobService _backgroundJobService;
     private readonly bool _ownsBackgroundJobService;
+    private readonly ChatSurfaceRegistry _chatSurfaceRegistry;
+    private readonly bool _ownsChatSurfaceRegistry;
+    private readonly ChatViewModel? _backgroundJobChatVM;
     private readonly HashSet<Chat> _runningStateSubscriptions = [];
     private bool _isDisposed;
     private bool _isRefreshingCopilotState;
@@ -109,7 +117,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private Guid? _activeChatId;
 
     // Sub-ViewModels
-    public ChatViewModel ChatVM { get; }
+    private ChatViewModel _chatVM = null!;
+    public ChatViewModel ChatVM
+    {
+        get => _chatVM;
+        private set => SetProperty(ref _chatVM, value);
+    }
     public BackgroundJobsViewModel JobsVM { get; }
     public SkillsViewModel SkillsVM { get; }
     public AgentsViewModel AgentsVM { get; }
@@ -128,6 +141,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public DataStore DataStore => _dataStore;
 
     public BackgroundJobService BackgroundJobService => _backgroundJobService;
+    public ChatSurfaceRegistry ChatSurfaceRegistry => _chatSurfaceRegistry;
 
     // Grouped chat list for sidebar
     public ObservableCollection<ChatGroup> ChatGroups { get; } = [];
@@ -141,7 +155,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         UpdateService updateService,
         bool forceOnboarding = false,
         BackgroundJobService? backgroundJobService = null,
-        bool startBackgroundJobs = true
+        bool startBackgroundJobs = true,
+        ChatSurfaceRegistry? chatSurfaceRegistry = null
 #if DEBUG
         , bool openAgentDebugHarness = false
 #endif
@@ -150,6 +165,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _dataStore = dataStore;
         _copilotService = copilotService;
         _settingsBrowserService = new BrowserService();
+        _chatSurfaceRegistry = chatSurfaceRegistry ?? new ChatSurfaceRegistry();
+        _ownsChatSurfaceRegistry = chatSurfaceRegistry is null;
 
         var settings = _dataStore.Data.Settings;
         _isDarkTheme = settings.IsDarkTheme;
@@ -178,8 +195,18 @@ public partial class MainViewModel : ObservableObject, IDisposable
         };
         OnboardingVM.ThemeChanged += isDark => IsDarkTheme = isDark;
 
-        ChatVM = new ChatViewModel(dataStore, copilotService);
-        _backgroundJobService = backgroundJobService ?? new BackgroundJobService(dataStore, ChatVM);
+        _chatVM = CreateChatViewModel();
+        _chatSurfaceRegistry.Attach(ChatVM);
+        if (backgroundJobService is null)
+        {
+            _backgroundJobChatVM = CreateChatViewModel();
+            AttachBackgroundJobChatViewModel(_backgroundJobChatVM);
+            _backgroundJobService = new BackgroundJobService(dataStore, _chatSurfaceRegistry, _backgroundJobChatVM);
+        }
+        else
+        {
+            _backgroundJobService = backgroundJobService;
+        }
         _ownsBackgroundJobService = backgroundJobService is null;
         JobsVM = new BackgroundJobsViewModel(dataStore, _backgroundJobService);
         SkillsVM = new SkillsViewModel(dataStore);
@@ -192,23 +219,6 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SearchOverlayVM = new SearchOverlayViewModel(
             new GlobalSearchService(() => _dataStore.Data, _dataStore.GetChatSearchSnapshot),
             () => SelectedNavIndex);
-
-        // When the chat model selector changes the global default, sync it to SettingsVM.
-        ChatVM.DefaultModelSelectionChanged += (model, reasoningEffort) =>
-        {
-            if (SettingsVM.PreferredModel != model || SettingsVM.ReasoningEffort != (reasoningEffort ?? string.Empty))
-            {
-                _isSyncingDefaultModelSelectionFromChat = true;
-                try
-                {
-                    SettingsVM.SyncDefaultModelSelectionFromChat(model, reasoningEffort);
-                }
-                finally
-                {
-                    _isSyncingDefaultModelSelectionFromChat = false;
-                }
-            }
-        };
 
         // Sync settings changes back to MainViewModel
         SettingsVM.PropertyChanged += (_, args) =>
@@ -277,15 +287,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             RefreshChatList();
         };
 
-        ChatVM.ChatUpdated += () => { SubscribeChatRunningState(); RefreshChatList(); };
-        ChatVM.ChatTitleChanged += OnChatTitleChanged;
-        ChatVM.PropertyChanged += (_, args) =>
-        {
-            if (args.PropertyName == nameof(ChatViewModel.CurrentChat))
-                ActiveChatId = ChatVM.CurrentChat?.Id;
-            else if (args.PropertyName == nameof(ChatViewModel.IsBusy))
-                RefreshProjectRunningState();
-        };
+        AttachChatViewModel(ChatVM);
 
         ProjectsVM.ProjectsChanged += () =>
         {
@@ -301,28 +303,6 @@ public partial class MainViewModel : ObservableObject, IDisposable
             ChatVM.RefreshComposerCatalogs();
             RefreshFeatureManagementUi();
         };
-        ChatVM.FeatureManagementStateChanged += () =>
-        {
-            _backgroundJobService.Reschedule();
-            RefreshFeatureManagementUi();
-        };
-
-        ChatVM.ComposerProjectFilterRequested += projectId =>
-        {
-            if (projectId == SelectedProjectFilter)
-                return;
-
-            if (!projectId.HasValue)
-            {
-                ClearProjectFilterCommand.Execute(null);
-                return;
-            }
-
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == projectId.Value);
-            if (project is not null)
-                SelectProjectFilterCommand.Execute(project);
-        };
-
         LoadProjects();
         SubscribeChatRunningState();
         RefreshChatList();
@@ -339,6 +319,139 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _ = InitializeAsync();
     }
 
+    private ChatViewModel CreateChatViewModel()
+    {
+        var chatVm = new ChatViewModel(_dataStore, _copilotService)
+        {
+            SendWithEnter = _dataStore.Data.Settings.SendWithEnter,
+            ActiveProjectFilterId = SelectedProjectFilter
+        };
+
+        if (_chatVM is not null)
+            chatVm.CopyModelCatalogFrom(_chatVM);
+
+        return chatVm;
+    }
+
+    private DetachedChatWindowRequest CreateDetachedChatWindowRequest(Chat? chat, ChatViewModel? chatVm = null)
+    {
+        var ownsSurface = chatVm is null;
+        return new DetachedChatWindowRequest(
+            chat,
+            new ChatWindowViewModel(chatVm ?? CreateChatViewModel()),
+            ownsSurface);
+    }
+
+    private void ReplaceChatViewModel(ChatViewModel replacement, bool disposePrevious)
+    {
+        var previous = ChatVM;
+        if (ReferenceEquals(previous, replacement))
+            return;
+
+        DetachChatViewModel(previous);
+        if (disposePrevious)
+            _chatSurfaceRegistry.Detach(previous);
+        ChatVM = replacement;
+        _chatSurfaceRegistry.Attach(replacement);
+        AttachChatViewModel(replacement);
+        ActiveChatId = replacement.CurrentChat?.Id;
+
+        if (disposePrevious)
+            previous.Dispose();
+    }
+
+    private void AttachChatViewModel(ChatViewModel chatVm)
+    {
+        chatVm.DefaultModelSelectionChanged += OnChatDefaultModelSelectionChanged;
+        chatVm.ChatUpdated += OnChatUpdated;
+        chatVm.ChatTitleChanged += OnChatTitleChanged;
+        chatVm.PropertyChanged += OnChatViewModelPropertyChanged;
+        chatVm.FeatureManagementStateChanged += OnChatFeatureManagementStateChanged;
+        chatVm.ComposerProjectFilterRequested += OnComposerProjectFilterRequested;
+    }
+
+    private void DetachChatViewModel(ChatViewModel chatVm)
+    {
+        chatVm.DefaultModelSelectionChanged -= OnChatDefaultModelSelectionChanged;
+        chatVm.ChatUpdated -= OnChatUpdated;
+        chatVm.ChatTitleChanged -= OnChatTitleChanged;
+        chatVm.PropertyChanged -= OnChatViewModelPropertyChanged;
+        chatVm.FeatureManagementStateChanged -= OnChatFeatureManagementStateChanged;
+        chatVm.ComposerProjectFilterRequested -= OnComposerProjectFilterRequested;
+    }
+
+    private void AttachBackgroundJobChatViewModel(ChatViewModel chatVm)
+    {
+        chatVm.ChatUpdated += OnChatUpdated;
+        chatVm.ChatTitleChanged += OnChatTitleChanged;
+        chatVm.FeatureManagementStateChanged += OnChatFeatureManagementStateChanged;
+    }
+
+    private void DetachBackgroundJobChatViewModel(ChatViewModel chatVm)
+    {
+        chatVm.ChatUpdated -= OnChatUpdated;
+        chatVm.ChatTitleChanged -= OnChatTitleChanged;
+        chatVm.FeatureManagementStateChanged -= OnChatFeatureManagementStateChanged;
+    }
+
+    private void OnChatDefaultModelSelectionChanged(string model, string? reasoningEffort)
+    {
+        if (SettingsVM.PreferredModel == model && SettingsVM.ReasoningEffort == (reasoningEffort ?? string.Empty))
+            return;
+
+        _isSyncingDefaultModelSelectionFromChat = true;
+        try
+        {
+            SettingsVM.SyncDefaultModelSelectionFromChat(model, reasoningEffort);
+        }
+        finally
+        {
+            _isSyncingDefaultModelSelectionFromChat = false;
+        }
+    }
+
+    public void SyncDefaultModelSelectionFromChatSurface(string model, string? reasoningEffort)
+        => OnChatDefaultModelSelectionChanged(model, reasoningEffort);
+
+    private void OnChatUpdated()
+    {
+        SubscribeChatRunningState();
+        RefreshChatList();
+    }
+
+    private void OnChatViewModelPropertyChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (!ReferenceEquals(sender, ChatVM))
+            return;
+
+        if (args.PropertyName == nameof(ChatViewModel.CurrentChat))
+            ActiveChatId = ChatVM.CurrentChat?.Id;
+        else if (args.PropertyName == nameof(ChatViewModel.IsBusy))
+            RefreshProjectRunningState();
+    }
+
+    private void OnChatFeatureManagementStateChanged()
+    {
+        _backgroundJobService.Reschedule();
+        RefreshFeatureManagementUi();
+    }
+
+    private void OnComposerProjectFilterRequested(Guid? projectId)
+    {
+        if (projectId == SelectedProjectFilter)
+            return;
+
+        if (!projectId.HasValue)
+        {
+            ClearProjectFilterCommand.Execute(null);
+            return;
+        }
+
+        var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == projectId.Value);
+        if (project is not null)
+            SelectProjectFilterCommand.Execute(project);
+    }
+
     private async Task InitializeAsync()
     {
         await RefreshCopilotStateAsync(refreshAuthStatus: true);
@@ -351,10 +464,17 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         _isDisposed = true;
         _backgroundJobService.JobsChanged -= OnBackgroundJobServiceJobsChanged;
+        DetachChatViewModel(ChatVM);
+        _chatSurfaceRegistry.Detach(ChatVM);
+        if (_backgroundJobChatVM is not null)
+            DetachBackgroundJobChatViewModel(_backgroundJobChatVM);
         UnsubscribeChatRunningState();
         if (_ownsBackgroundJobService)
             _backgroundJobService.Dispose();
         ChatVM.Dispose();
+        _backgroundJobChatVM?.Dispose();
+        if (_ownsChatSurfaceRegistry)
+            _chatSurfaceRegistry.Dispose();
         SettingsVM.Dispose();
         _ = _settingsBrowserService.DisposeAsync();
     }
@@ -499,7 +619,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public event Action? ProjectRunningStateChanged;
 
     public event Action<Guid, string>? ChatTitleChanged;
-    public event Action<Chat?>? OpenChatWindowRequested;
+    public event Action<DetachedChatWindowRequest>? OpenChatWindowRequested;
     public event Func<Chat, bool>? DetachedChatFocusRequested;
     public event Action<Guid?>? ChatSelectionSyncRequested;
     public event Action<Guid>? ChatDeleted;
@@ -907,30 +1027,43 @@ public partial class MainViewModel : ObservableObject, IDisposable
         var targetChat = chat ?? ChatVM.CurrentChat;
         if (targetChat is null)
         {
-            OpenChatWindowRequested?.Invoke(null);
+            OpenChatWindowRequested?.Invoke(CreateDetachedChatWindowRequest(null));
             SelectedNavIndex = 0;
             return;
         }
 
-        OpenChatWindowRequested?.Invoke(targetChat);
-        MoveMainSurfaceAwayFromChat(targetChat.Id);
+        if (TryFocusDetachedChat(targetChat))
+        {
+            if (ChatVM.CurrentChat?.Id == targetChat.Id)
+            {
+                ChatVM.ClearChat();
+                ActiveChatId = null;
+                SelectedNavIndex = 0;
+            }
+            return;
+        }
+
+        var detachedViewModel = DetachMainSurfaceIfShowing(targetChat);
+        OpenChatWindowRequested?.Invoke(CreateDetachedChatWindowRequest(targetChat, detachedViewModel));
     }
 
     [RelayCommand]
     private void OpenNewChatInNewWindow()
     {
-        OpenChatWindowRequested?.Invoke(null);
+        OpenChatWindowRequested?.Invoke(CreateDetachedChatWindowRequest(null));
         SelectedNavIndex = 0;
     }
 
-    private void MoveMainSurfaceAwayFromChat(Guid chatId)
+    private ChatViewModel? DetachMainSurfaceIfShowing(Chat chat)
     {
-        if (ChatVM.CurrentChat?.Id != chatId)
-            return;
+        if (ChatVM.CurrentChat?.Id != chat.Id)
+            return null;
 
-        ChatVM.ClearChat();
+        var detachedViewModel = ChatVM;
+        ReplaceChatViewModel(CreateChatViewModel(), disposePrevious: false);
         SetDraftChatProjectContext(SelectedProjectFilter);
         SelectedNavIndex = 0;
+        return detachedViewModel;
     }
 
     /// <summary>Returns the project name for a given project ID, or null.</summary>

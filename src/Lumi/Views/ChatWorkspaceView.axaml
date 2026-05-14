@@ -1,0 +1,188 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Lumi.ViewModels"
+             xmlns:views="using:Lumi.Views"
+             xmlns:sc="using:StrataTheme.Controls"
+             xmlns:loc="using:Lumi.Localization"
+             x:Class="Lumi.Views.ChatWorkspaceView"
+             x:DataType="vm:ChatViewModel"
+             x:CompileBindings="True">
+
+  <UserControl.Resources>
+    <x:Double x:Key="ChatWorkspace.SplitPaneMinWidth">220</x:Double>
+  </UserControl.Resources>
+
+  <UserControl.Styles>
+    <Style Selector="Border#ChatIsland.workspace-island">
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Overlay}" />
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface1Translucent}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BoxShadow" Value="0 18 44 0 #14000000, 0 3 12 0 #0A000000" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border#ChatIsland.workspace-flat">
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="BoxShadow" Value="0 0 0 0 #00000000" />
+      <Setter Property="ClipToBounds" Value="False" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid x:Name="WorkspaceGrid" ColumnDefinitions="1*,Auto,0">
+    <Border x:Name="ChatIsland"
+            Grid.Column="0"
+            Classes="workspace-island"
+            MinWidth="{StaticResource ChatWorkspace.SplitPaneMinWidth}"
+            MaxWidth="{Binding Bounds.Width, RelativeSource={RelativeSource AncestorType=Grid}}"
+            FlowDirection="{Binding FlowDirection, RelativeSource={RelativeSource AncestorType=Window}}">
+      <Border.BorderBrush>
+        <SolidColorBrush Color="{DynamicResource Color.TextPrimary}" Opacity="0.08" />
+      </Border.BorderBrush>
+      <Grid>
+        <Border x:Name="ChatIslandHighlight"
+                IsHitTestVisible="False"
+                CornerRadius="{DynamicResource Radius.Overlay}"
+                BorderThickness="0,1,0,0"
+                Opacity="0.75">
+          <Border.BorderBrush>
+            <SolidColorBrush Color="White" Opacity="0.12" />
+          </Border.BorderBrush>
+        </Border>
+        <views:ChatView x:Name="PageChat"
+                        ShowInternalTitle="{Binding ShowInternalTitle, RelativeSource={RelativeSource AncestorType=views:ChatWorkspaceView}}"
+                        DataContext="{Binding}" />
+      </Grid>
+    </Border>
+
+    <GridSplitter x:Name="PreviewSplitter"
+                  Grid.Column="1"
+                  IsVisible="False"
+                  Width="6"
+                  Background="Transparent"
+                  ResizeDirection="Columns" />
+
+    <Border x:Name="BrowserIsland"
+            Grid.Column="2"
+            IsVisible="False"
+            MinWidth="{StaticResource ChatWorkspace.SplitPaneMinWidth}"
+            MaxWidth="{Binding Bounds.Width, RelativeSource={RelativeSource AncestorType=Grid}}"
+            Margin="{Binding PreviewIslandMargin, RelativeSource={RelativeSource AncestorType=views:ChatWorkspaceView}}"
+            CornerRadius="{DynamicResource Radius.Overlay}"
+            Background="{DynamicResource Brush.SurfaceCard}"
+            BorderBrush="{DynamicResource Brush.BorderSubtle}"
+            BorderThickness="1"
+            BoxShadow="0 0 24 0 #1A000000, 0 0 4 0 #08000000"
+            ClipToBounds="True">
+      <DockPanel>
+        <DockPanel DockPanel.Dock="Top" Margin="12,8,12,0">
+          <Button DockPanel.Dock="Right"
+                  x:Name="CloseBrowserButton"
+                  Classes="subtle"
+                  Padding="6"
+                  MinHeight="0"
+                  MinWidth="0"
+                  ToolTip.Tip="{loc:Str Browser_Close}">
+            <PathIcon Width="14"
+                      Height="14"
+                      Foreground="{DynamicResource Brush.TextPrimary}"
+                      Data="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+          </Button>
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <PathIcon Width="14"
+                      Height="14"
+                      Foreground="{DynamicResource Brush.AccentDefault}"
+                      Data="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1 4h2v2h-2V6zm0 4h2v8h-2v-8z" />
+            <TextBlock Text="{loc:Str Browser_Title}" Classes="body-strong" FontWeight="SemiBold" />
+          </StackPanel>
+        </DockPanel>
+        <ContentControl x:Name="BrowserHost" />
+      </DockPanel>
+    </Border>
+
+    <Border x:Name="DiffIsland"
+            Grid.Column="2"
+            IsVisible="False"
+            MinWidth="{StaticResource ChatWorkspace.SplitPaneMinWidth}"
+            MaxWidth="{Binding Bounds.Width, RelativeSource={RelativeSource AncestorType=Grid}}"
+            Margin="{Binding PreviewIslandMargin, RelativeSource={RelativeSource AncestorType=views:ChatWorkspaceView}}"
+            CornerRadius="{DynamicResource Radius.Overlay}"
+            Background="{DynamicResource Brush.SurfaceCard}"
+            BorderBrush="{DynamicResource Brush.BorderSubtle}"
+            BorderThickness="1"
+            BoxShadow="0 0 24 0 #1A000000, 0 0 4 0 #08000000"
+            ClipToBounds="True">
+      <DockPanel>
+        <DockPanel DockPanel.Dock="Top" Margin="12,8,12,0">
+          <Button DockPanel.Dock="Right"
+                  x:Name="CloseDiffButton"
+                  Classes="subtle"
+                  Padding="6"
+                  MinHeight="0"
+                  MinWidth="0"
+                  ToolTip.Tip="{loc:Str Diff_Close}">
+            <PathIcon Width="14"
+                      Height="14"
+                      Foreground="{DynamicResource Brush.TextPrimary}"
+                      Data="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+          </Button>
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <PathIcon Width="14"
+                      Height="14"
+                      Foreground="{DynamicResource Brush.AccentDefault}"
+                      Data="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z" />
+            <TextBlock x:Name="DiffFileNameText"
+                       Text="{loc:Str Diff_Title}"
+                       Classes="body-strong"
+                       FontWeight="SemiBold" />
+          </StackPanel>
+        </DockPanel>
+        <ContentControl x:Name="DiffHost" />
+      </DockPanel>
+    </Border>
+
+    <Border x:Name="PlanIsland"
+            Grid.Column="2"
+            IsVisible="False"
+            MinWidth="{StaticResource ChatWorkspace.SplitPaneMinWidth}"
+            MaxWidth="{Binding Bounds.Width, RelativeSource={RelativeSource AncestorType=Grid}}"
+            Margin="{Binding PreviewIslandMargin, RelativeSource={RelativeSource AncestorType=views:ChatWorkspaceView}}"
+            CornerRadius="{DynamicResource Radius.Overlay}"
+            Background="{DynamicResource Brush.SurfaceCard}"
+            BorderBrush="{DynamicResource Brush.BorderSubtle}"
+            BorderThickness="1"
+            BoxShadow="0 0 24 0 #1A000000, 0 0 4 0 #08000000"
+            ClipToBounds="True">
+      <DockPanel>
+        <DockPanel DockPanel.Dock="Top" Margin="12,8,12,0">
+          <Button DockPanel.Dock="Right"
+                  x:Name="ClosePlanButton"
+                  Classes="subtle"
+                  Padding="6"
+                  MinHeight="0"
+                  MinWidth="0"
+                  ToolTip.Tip="{loc:Str Plan_Close}">
+            <PathIcon Width="14"
+                      Height="14"
+                      Foreground="{DynamicResource Brush.TextPrimary}"
+                      Data="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" />
+          </Button>
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+            <PathIcon Width="14"
+                      Height="14"
+                      Foreground="{DynamicResource Brush.AccentDefault}"
+                      Data="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V5h14v14zM17.99 9l-1.41-1.42-6.59 6.59-2.58-2.57-1.42 1.41 4 3.99z" />
+            <TextBlock Text="{loc:Str Plan_Title}" Classes="body-strong" FontWeight="SemiBold" />
+          </StackPanel>
+        </DockPanel>
+        <ScrollViewer Margin="12,8,12,12"
+                      HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+          <sc:StrataMarkdown x:Name="PlanMarkdown"
+                             IsInline="True"
+                             Markdown="{Binding PlanContent}" />
+        </ScrollViewer>
+      </DockPanel>
+    </Border>
+  </Grid>
+</UserControl>

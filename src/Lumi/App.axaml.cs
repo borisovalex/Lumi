@@ -25,6 +25,7 @@ public partial class App : Application
     private CopilotService? _copilotService;
     private UpdateService? _updateService;
     private BackgroundJobService? _backgroundJobService;
+    private ChatSurfaceRegistry? _chatSurfaceRegistry;
     private readonly List<MainWindow> _windows = [];
     private int _secondaryWindowSequence;
     private MainViewModel? _mainViewModel;
@@ -51,6 +52,7 @@ public partial class App : Application
             var updateService = new UpdateService();
             _updateService = updateService;
             updateService.Initialize();
+            _chatSurfaceRegistry = new ChatSurfaceRegistry();
             var vm = CreateMainViewModel(
                 forceOnboarding: Program.ForceOnboarding,
                 startBackgroundJobs: true
@@ -60,9 +62,6 @@ public partial class App : Application
             );
             _backgroundJobService = vm.BackgroundJobService;
             _mainViewModel = vm;
-            vm.OpenChatWindowRequested += OpenChatWindow;
-            vm.DetachedChatFocusRequested += FocusDetachedChatWindow;
-            vm.ChatDeleted += CloseChatWindow;
 
             // Save data and dispose CopilotService on app shutdown.
             // The window is already hidden at this point so nothing blocks the user.
@@ -85,6 +84,7 @@ public partial class App : Application
                 {
                     windowVm.Dispose();
                 }
+                _chatSurfaceRegistry?.Dispose();
 
                 Task.Run(async () =>
                 {
@@ -165,6 +165,8 @@ public partial class App : Application
     {
         if (_dataStore is null || _copilotService is null || _updateService is null)
             throw new InvalidOperationException("Lumi services are not initialized.");
+        if (_chatSurfaceRegistry is null)
+            throw new InvalidOperationException("Lumi chat surface registry is not initialized.");
 
         // Secondary windows share the primary scheduler so background jobs have a single runner.
         return new MainViewModel(
@@ -173,7 +175,8 @@ public partial class App : Application
             _updateService,
             forceOnboarding,
             _backgroundJobService,
-            startBackgroundJobs
+            startBackgroundJobs,
+            _chatSurfaceRegistry
 #if DEBUG
             , openAgentDebugHarness
 #endif
@@ -192,15 +195,38 @@ public partial class App : Application
         if (Loc.IsRightToLeft)
             window.FlowDirection = Avalonia.Media.FlowDirection.RightToLeft;
 
+        AttachWindowManagementHandlers(vm);
+
         window.Closed += (_, _) =>
         {
             _windows.Remove(window);
-            if (!isPrimary && window.DataContext is MainViewModel windowVm)
-                windowVm.Dispose();
+            if (window.DataContext is MainViewModel windowVm)
+            {
+                DetachWindowManagementHandlers(windowVm);
+                if (!isPrimary)
+                    windowVm.Dispose();
+            }
         };
 
         _windows.Add(window);
         return window;
+    }
+
+    private void AttachWindowManagementHandlers(MainViewModel vm)
+    {
+        vm.OpenChatWindowRequested -= OpenChatWindow;
+        vm.OpenChatWindowRequested += OpenChatWindow;
+        vm.DetachedChatFocusRequested -= FocusDetachedChatWindow;
+        vm.DetachedChatFocusRequested += FocusDetachedChatWindow;
+        vm.ChatDeleted -= CloseChatWindow;
+        vm.ChatDeleted += CloseChatWindow;
+    }
+
+    private void DetachWindowManagementHandlers(MainViewModel vm)
+    {
+        vm.OpenChatWindowRequested -= OpenChatWindow;
+        vm.DetachedChatFocusRequested -= FocusDetachedChatWindow;
+        vm.ChatDeleted -= CloseChatWindow;
     }
 
     private void OnGlobalHotkeyPressed()
@@ -307,33 +333,36 @@ public partial class App : Application
             _ = vm.OpenChatByIdAsync(targetChatId);
     }
 
-    private void OpenChatWindow(Chat? chat)
+    private void OpenChatWindow(DetachedChatWindowRequest request)
     {
-        Dispatcher.UIThread.Post(() => _ = OpenChatWindowAsync(chat));
+        Dispatcher.UIThread.Post(() => _ = OpenChatWindowAsync(request));
     }
 
-    private async Task OpenChatWindowAsync(Chat? chat)
+    private async Task OpenChatWindowAsync(DetachedChatWindowRequest request)
     {
         if (_dataStore is null || _copilotService is null)
+        {
+            DisposeUnopenedChatWindowRequest(request);
             return;
+        }
 
+        var chat = request.Chat;
         var initialChatId = chat?.Id;
         if (initialChatId is Guid chatId && _chatWindows.TryGetValue(chatId, out var existingWindow))
         {
             FocusChatWindow(existingWindow);
+            DisposeUnopenedChatWindowRequest(request);
             return;
         }
 
-        var chatVm = new ChatViewModel(_dataStore, _copilotService)
-        {
-            SendWithEnter = _dataStore.Data.Settings.SendWithEnter
-        };
-        if (_mainViewModel is not null)
-            chatVm.CopyModelCatalogFrom(_mainViewModel.ChatVM);
+        var windowVm = request.WindowVM;
+        var chatVm = windowVm.ChatVM;
 
         chatVm.ChatUpdated += OnDetachedChatUpdated;
         chatVm.ChatTitleChanged += OnDetachedChatTitleChanged;
         chatVm.FeatureManagementStateChanged += OnDetachedChatUpdated;
+        chatVm.DefaultModelSelectionChanged += OnDetachedDefaultModelSelectionChanged;
+        _mainViewModel?.ChatSurfaceRegistry.Attach(chatVm);
 
         Guid? trackedChatId = initialChatId;
         ChatWindow? window = null;
@@ -359,7 +388,7 @@ public partial class App : Application
 
         chatVm.PropertyChanged += OnDetachedCurrentChatChanged;
 
-        window = new ChatWindow(_dataStore, chatVm);
+        window = new ChatWindow(_dataStore, windowVm);
         if (trackedChatId is Guid trackedId)
             _chatWindows[trackedId] = window;
 
@@ -374,6 +403,9 @@ public partial class App : Application
             chatVm.ChatUpdated -= OnDetachedChatUpdated;
             chatVm.ChatTitleChanged -= OnDetachedChatTitleChanged;
             chatVm.FeatureManagementStateChanged -= OnDetachedChatUpdated;
+            chatVm.DefaultModelSelectionChanged -= OnDetachedDefaultModelSelectionChanged;
+            _mainViewModel?.ChatSurfaceRegistry.Detach(chatVm);
+            windowVm.Dispose();
             chatVm.Dispose();
         };
 
@@ -390,13 +422,24 @@ public partial class App : Application
 
         try
         {
-            await chatVm.LoadChatAsync(chat);
+            if (chatVm.CurrentChat?.Id != chat.Id)
+                await chatVm.LoadChatAsync(chat);
             window.FocusComposer();
         }
         catch (OperationCanceledException) when (_isShuttingDown)
         {
         }
     }
+
+    private static void DisposeUnopenedChatWindowRequest(DetachedChatWindowRequest request)
+    {
+        request.WindowVM.Dispose();
+        if (request.DisposeSurfaceIfNotOpened)
+            request.WindowVM.ChatVM.Dispose();
+    }
+
+    private void OnDetachedDefaultModelSelectionChanged(string model, string? reasoningEffort)
+        => _mainViewModel?.SyncDefaultModelSelectionFromChatSurface(model, reasoningEffort);
 
     private bool FocusDetachedChatWindow(Chat chat)
     {
