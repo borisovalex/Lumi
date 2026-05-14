@@ -32,6 +32,9 @@ public partial class ChatView : UserControl
     public static readonly StyledProperty<bool> ShowInternalTitleProperty =
         AvaloniaProperty.Register<ChatView, bool>(nameof(ShowInternalTitle), true);
 
+    public static readonly StyledProperty<bool> UseShellChromeProperty =
+        AvaloniaProperty.Register<ChatView, bool>(nameof(UseShellChrome), true);
+
     private StrataChatShell? _chatShell;
     private StrataChatComposer? _composer;
     private Panel? _composerSpacer;
@@ -95,11 +98,26 @@ public partial class ChatView : UserControl
         set => SetValue(ShowInternalTitleProperty, value);
     }
 
+    public bool UseShellChrome
+    {
+        get => GetValue(UseShellChromeProperty);
+        set => SetValue(UseShellChromeProperty, value);
+    }
+
+    protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
+    {
+        base.OnPropertyChanged(change);
+
+        if (change.Property == UseShellChromeProperty)
+            ApplyShellChrome();
+    }
+
     private void InitializeComponent()
     {
         AvaloniaXamlLoader.Load(this);
 
         _chatShell = this.FindControl<StrataChatShell>("ChatShell");
+        ApplyShellChrome();
         _composer = this.FindControl<StrataChatComposer>("Composer");
         if (_composer is not null)
             _composer.ClipboardPasteInterceptFormats = new DataFormat[] { LumiChatContextClipboardFormat, DataFormat.Text };
@@ -163,6 +181,11 @@ public partial class ChatView : UserControl
         if (searchPrevBtn is not null) searchPrevBtn.Click += (_, _) => NavigateSearchMatch(-1);
         if (searchNextBtn is not null) searchNextBtn.Click += (_, _) => NavigateSearchMatch(1);
         if (searchCloseBtn is not null) searchCloseBtn.Click += (_, _) => CloseSearch();
+    }
+
+    private void ApplyShellChrome()
+    {
+        _chatShell?.Classes.Set("flat-window", !UseShellChrome);
     }
 
     private void ApplyAgentAutomationLandmarks()

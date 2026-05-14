@@ -1132,10 +1132,10 @@ public class TranscriptBuilder
         {
             UpdateToolGroupLabel();
 
-            var canFlattenSingleTool = _currentToolGroupCount == 1 && !_currentToolGroup.IsActive
+            var hasRunningTool = _currentToolGroup.IsActive;
+            var canFlattenSingleTool = _currentToolGroupCount == 1 && !hasRunningTool
                 && _currentToolGroup.ToolCalls.Count == 1;
 
-            _currentToolGroup.IsActive = false;
             _currentToolGroup.StreamingSummary = null;
             _currentToolGroup.IsExpanded = false;
 

@@ -52,6 +52,10 @@
       <Setter Property="TextTrimming" Value="CharacterEllipsis" />
       <Setter Property="MaxLines" Value="1" />
     </Style>
+    <Style Selector="sc|StrataChatShell.flat-window /template/ Border#PART_Root">
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="ClipToBounds" Value="False" />
+    </Style>
     <Style Selector="Border.job-wake-card">
       <Setter Property="Background" Value="{DynamicResource Brush.SurfaceRaised}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderSubtle}" />

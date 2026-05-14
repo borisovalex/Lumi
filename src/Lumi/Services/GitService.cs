@@ -30,8 +30,20 @@ public static class GitService
     /// <summary>Gets the current branch name, or null if not a git repo.</summary>
     public static async Task<string?> GetCurrentBranchAsync(string dir)
     {
-        var result = await RunGitAsync(dir, "branch --show-current").ConfigureAwait(false);
-        return string.IsNullOrWhiteSpace(result) ? null : result.Trim();
+        var result = NormalizeBranchName(await RunGitAsync(dir, "branch --show-current").ConfigureAwait(false));
+        if (result is not null)
+            return result;
+
+        result = NormalizeBranchName(await RunGitAsync(dir, "rev-parse --abbrev-ref HEAD").ConfigureAwait(false));
+        if (result is not null)
+            return result;
+
+        result = ParseStatusBranch(await RunGitAsync(dir, "status --short --branch").ConfigureAwait(false));
+        if (result is not null)
+            return result;
+
+        var shortSha = (await RunGitAsync(dir, "rev-parse --short HEAD").ConfigureAwait(false))?.Trim();
+        return string.IsNullOrWhiteSpace(shortSha) ? null : $"Detached {shortSha}";
     }
 
     /// <summary>Returns the list of changed files (staged + unstaged + untracked) with line stats.</summary>
@@ -268,6 +280,40 @@ public static class GitService
         {
             return null;
         }
+    }
+
+    private static string? NormalizeBranchName(string? value)
+    {
+        var branch = value?.Trim();
+        return string.IsNullOrWhiteSpace(branch) || string.Equals(branch, "HEAD", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : branch;
+    }
+
+    private static string? ParseStatusBranch(string? statusOutput)
+    {
+        if (string.IsNullOrWhiteSpace(statusOutput))
+            return null;
+
+        var firstLine = statusOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault()
+            ?.Trim();
+        if (firstLine is null || !firstLine.StartsWith("## ", StringComparison.Ordinal))
+            return null;
+
+        var branch = firstLine[3..].Trim();
+        const string noCommitsPrefix = "No commits yet on ";
+        if (branch.StartsWith(noCommitsPrefix, StringComparison.OrdinalIgnoreCase))
+            return NormalizeBranchName(branch[noCommitsPrefix.Length..]);
+
+        var upstreamIndex = branch.IndexOf("...", StringComparison.Ordinal);
+        if (upstreamIndex >= 0)
+            branch = branch[..upstreamIndex];
+        var detailIndex = branch.IndexOf(' ');
+        if (detailIndex >= 0)
+            branch = branch[..detailIndex];
+
+        return NormalizeBranchName(branch);
     }
 }
 

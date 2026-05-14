@@ -60,6 +60,8 @@ public sealed class ChatWorkspaceViewTests
                 Assert.NotNull(workspace.FindControl<Border>("BrowserIsland"));
                 Assert.NotNull(workspace.FindControl<Border>("DiffIsland"));
                 Assert.NotNull(workspace.FindControl<Border>("PlanIsland"));
+                Assert.False(workspace.ChatView!.UseShellChrome);
+                Assert.Contains("flat-window", workspace.ChatView!.FindControl<StrataTheme.Controls.StrataChatShell>("ChatShell")!.Classes);
             }
             finally
             {
@@ -135,6 +137,7 @@ public sealed class ChatWorkspaceViewTests
         Assert.Contains("UseChatIslandChrome=\"False\"", chatWindowXaml);
         Assert.Contains("ShowInternalTitle=\"False\"", chatWindowXaml);
         Assert.Contains("PreviewIslandMargin=\"0,8,8,8\"", chatWindowXaml);
+        Assert.Contains("UseShellChrome=\"{Binding UseChatIslandChrome", File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatWorkspaceView.axaml")));
         Assert.DoesNotContain("x:Name=\"BrowserIsland\"", chatWindowXaml);
         Assert.DoesNotContain("x:Name=\"DiffIsland\"", chatWindowXaml);
         Assert.DoesNotContain("x:Name=\"PlanIsland\"", chatWindowXaml);

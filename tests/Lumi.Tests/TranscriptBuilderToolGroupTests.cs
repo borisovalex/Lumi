@@ -108,7 +108,7 @@ public sealed class TranscriptBuilderToolGroupTests
     }
 
     [Fact]
-    public void CloseCurrentToolGroup_ClearsLiveStateForIncompleteGroupBeforeIdle()
+    public void CloseCurrentToolGroup_PreservesIncompleteGroupActivityBeforeIdle()
     {
         var builder = CreateBuilder();
         var liveTurns = new ObservableCollection<TranscriptTurn>();
@@ -125,9 +125,28 @@ public sealed class TranscriptBuilderToolGroupTests
         builder.CollapseCompletedBlocksInCurrentTurn();
 
         group = Assert.IsType<ToolGroupItem>(Assert.Single(Assert.Single(liveTurns).Items));
-        Assert.False(group.IsActive);
+        Assert.True(group.IsActive);
         Assert.False(group.IsExpanded);
         Assert.Null(group.StreamingSummary);
+    }
+
+    [Fact]
+    public void Rebuild_PreservesInProgressToolGroupActivity()
+    {
+        var builder = CreateBuilder();
+
+        var turns = builder.Rebuild(
+        [
+            CreateToolVm("tool-1", "view", "Completed", "{\"path\":\"E:\\\\repo\\\\README.md\"}"),
+            CreateToolVm("tool-2", "powershell", "InProgress", "{\"command\":\"dotnet test\"}"),
+        ]);
+
+        var turn = Assert.Single(turns);
+        var group = Assert.IsType<ToolGroupItem>(Assert.Single(turn.Items));
+        Assert.True(group.IsActive);
+        Assert.Equal(2, group.ToolCalls.Count);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Completed, Assert.IsType<ToolCallItem>(group.ToolCalls[0]).Status);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.InProgress, Assert.IsType<TerminalPreviewItem>(group.ToolCalls[1]).Status);
     }
 
     [Fact]

@@ -51,6 +51,7 @@
         </Border>
         <views:ChatView x:Name="PageChat"
                         ShowInternalTitle="{Binding ShowInternalTitle, RelativeSource={RelativeSource AncestorType=views:ChatWorkspaceView}}"
+                        UseShellChrome="{Binding UseChatIslandChrome, RelativeSource={RelativeSource AncestorType=views:ChatWorkspaceView}}"
                         DataContext="{Binding}" />
       </Grid>
     </Border>
