@@ -17,7 +17,7 @@
         Background="Transparent">
 
   <Border x:Name="WindowIsland"
-          CornerRadius="{DynamicResource Radius.Overlay}"
+          CornerRadius="0"
           Background="{DynamicResource Brush.Surface1Translucent}"
           BorderThickness="1"
           ClipToBounds="True">
@@ -33,16 +33,7 @@
         <Border x:Name="TitleDragRegion"
                 Grid.Column="0"
                 chrome:WindowDecorationProperties.ElementRole="TitleBar"
-                Background="Transparent">
-          <TextBlock Text="{Binding WindowTitle}"
-                     Margin="14,0,8,0"
-                     VerticalAlignment="Center"
-                     FontSize="12.5"
-                     FontWeight="SemiBold"
-                     Foreground="{DynamicResource Brush.TextSecondary}"
-                     TextTrimming="CharacterEllipsis"
-                     IsHitTestVisible="False" />
-        </Border>
+                Background="Transparent" />
       </Grid>
 
       <views:ChatWorkspaceView x:Name="DetachedChatView"

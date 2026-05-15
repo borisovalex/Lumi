@@ -141,6 +141,10 @@ public sealed class ChatWorkspaceViewTests
         Assert.Contains("Grid.Row=\"1\"", chatWindowXaml);
         Assert.Contains("x:Name=\"TitleDragRegion\"", chatWindowXaml);
         Assert.Contains("chrome:WindowDecorationProperties.ElementRole=\"TitleBar\"", chatWindowXaml);
+        Assert.DoesNotContain("Text=\"{Binding WindowTitle}\"", chatWindowXaml);
+        Assert.Contains("x:Name=\"WindowIsland\"", chatWindowXaml);
+        Assert.Contains("CornerRadius=\"0\"", chatWindowXaml);
+        Assert.DoesNotContain("CornerRadius=\"{DynamicResource Radius.Overlay}\"", chatWindowXaml);
         Assert.DoesNotContain("<Grid Height=\"10\"", chatWindowXaml);
         Assert.Contains("Panel.ZIndex=\"10\"", chatWindowXaml);
         Assert.True(chatWindowXaml.IndexOf("x:Name=\"TitleDragRegion\"", StringComparison.Ordinal) <
