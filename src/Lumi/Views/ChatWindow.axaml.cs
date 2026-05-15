@@ -64,6 +64,7 @@ public partial class ChatWindow : Window
     private void UpdateAutomationName()
     {
         var windowTitle = _viewModel?.WindowTitle ?? Loc.Sidebar_NewChat;
+        Title = windowTitle;
         AutomationProperties.SetName(this, $"{windowTitle} - Lumi");
     }
 }

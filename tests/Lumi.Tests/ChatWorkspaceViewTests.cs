@@ -137,13 +137,14 @@ public sealed class ChatWorkspaceViewTests
         Assert.Contains("UseChatIslandChrome=\"False\"", chatWindowXaml);
         Assert.Contains("ShowInternalTitle=\"False\"", chatWindowXaml);
         Assert.Contains("PreviewIslandMargin=\"0,8,8,8\"", chatWindowXaml);
-        Assert.DoesNotContain("RowDefinitions=\"38,*\"", chatWindowXaml);
-        Assert.DoesNotContain("Grid.Row=\"1\"", chatWindowXaml);
-        Assert.Contains("<Grid Height=\"10\"", chatWindowXaml);
-        Assert.DoesNotContain("<Grid Height=\"38\"", chatWindowXaml);
+        Assert.Contains("RowDefinitions=\"38,*\"", chatWindowXaml);
+        Assert.Contains("Grid.Row=\"1\"", chatWindowXaml);
+        Assert.Contains("x:Name=\"TitleDragRegion\"", chatWindowXaml);
+        Assert.Contains("chrome:WindowDecorationProperties.ElementRole=\"TitleBar\"", chatWindowXaml);
+        Assert.DoesNotContain("<Grid Height=\"10\"", chatWindowXaml);
         Assert.Contains("Panel.ZIndex=\"10\"", chatWindowXaml);
-        Assert.True(chatWindowXaml.IndexOf("x:Name=\"DetachedChatView\"", StringComparison.Ordinal) <
-            chatWindowXaml.IndexOf("x:Name=\"TitleDragRegion\"", StringComparison.Ordinal));
+        Assert.True(chatWindowXaml.IndexOf("x:Name=\"TitleDragRegion\"", StringComparison.Ordinal) <
+            chatWindowXaml.IndexOf("x:Name=\"DetachedChatView\"", StringComparison.Ordinal));
         Assert.Contains("UseShellChrome=\"{Binding UseChatIslandChrome", File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatWorkspaceView.axaml")));
         var chatViewXaml = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatView.axaml"));
         Assert.Contains("StrataChatShell.flat-window /template/ Border#PART_Root", chatViewXaml);
