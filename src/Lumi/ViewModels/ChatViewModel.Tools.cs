@@ -109,7 +109,8 @@ public partial class ChatViewModel
             projectContextCatalog,
             chat,
             selectedServerNames,
-            activeAgent);
+            activeAgent,
+            McpProxyRuntime.Shared);
     }
 
     private List<AIFunction> BuildWebTools()

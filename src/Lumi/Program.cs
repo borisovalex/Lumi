@@ -45,6 +45,13 @@ class Program
             return;
         }
 
+        if (args.Any(DebugAgentHarness.IsProxyMcpStressFlag))
+        {
+            AttachParentConsole();
+            RunProxyMcpStressAsync().GetAwaiter().GetResult();
+            return;
+        }
+
         // Headless agent test mode — no UI, just runs the onboarding agent and prints output
         if (args.Contains("--test-onboarding-agent", StringComparer.OrdinalIgnoreCase))
         {
@@ -105,6 +112,13 @@ class Program
     {
         var copilotService = new Services.CopilotService();
         var exitCode = await DebugAgentHarness.RunNativeMcpStressAsync(copilotService, default);
+        Environment.ExitCode = exitCode;
+    }
+
+    private static async System.Threading.Tasks.Task RunProxyMcpStressAsync()
+    {
+        var copilotService = new Services.CopilotService();
+        var exitCode = await DebugAgentHarness.RunProxyMcpStressAsync(copilotService, default);
         Environment.ExitCode = exitCode;
     }
 

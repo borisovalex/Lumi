@@ -42,6 +42,42 @@ public sealed class McpSessionPlannerTests
     }
 
     [Fact]
+    public async Task Build_WithProxyRuntime_RoutesLocalServersThroughRemoteProxy()
+    {
+        await using var proxyRuntime = new McpProxyRuntime();
+        var local = new McpServer
+        {
+            Name = "filesystem",
+            Command = "node",
+            Args = ["server.js"],
+            Tools = ["read_file"]
+        };
+        var remote = new McpServer
+        {
+            Name = "jira",
+            ServerType = "remote",
+            Url = "https://example.test/mcp",
+            Tools = ["search_issues"]
+        };
+        var data = new AppData
+        {
+            McpServers = [local, remote]
+        };
+        var chat = new Chat
+        {
+            ActiveMcpServerNames = ["filesystem", "jira"]
+        };
+
+        var servers = McpSessionPlanner.Build(data, "C:\\repo", EmptyCatalog(), chat, null, null, proxyRuntime);
+
+        var proxiedLocal = Assert.IsType<McpHttpServerConfig>(servers["filesystem"]);
+        Assert.StartsWith("http://127.0.0.1:", proxiedLocal.Url, StringComparison.Ordinal);
+        Assert.Equal(["read_file"], proxiedLocal.Tools);
+        var nativeRemote = Assert.IsType<McpHttpServerConfig>(servers["jira"]);
+        Assert.Equal("https://example.test/mcp", nativeRemote.Url);
+    }
+
+    [Fact]
     public void Build_UsesCurrentSessionSelectionInsteadOfPersistedChatSelection()
     {
         var data = new AppData

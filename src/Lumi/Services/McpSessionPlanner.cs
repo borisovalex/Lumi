@@ -16,7 +16,8 @@ public static class McpSessionPlanner
         ProjectContextCatalogSnapshot projectContextCatalog,
         Chat chat,
         IReadOnlyCollection<string>? currentActiveServerNames,
-        LumiAgent? activeAgent)
+        LumiAgent? activeAgent,
+        McpProxyRuntime? proxyRuntime = null)
     {
         ArgumentNullException.ThrowIfNull(data);
         ArgumentNullException.ThrowIfNull(projectContextCatalog);
@@ -37,12 +38,12 @@ public static class McpSessionPlanner
         }
 
         foreach (var server in configuredServers)
-            result[server.Name] = ToSdkConfig(server, workDir);
+            result[server.Name] = ToSdkConfig(server, workDir, proxyRuntime);
 
         foreach (var contextServer in projectContextCatalog.McpServers)
         {
             if (selectedNames.Contains(contextServer.Name) && !result.ContainsKey(contextServer.Name))
-                result[contextServer.Name] = CloneContextConfig(contextServer);
+                result[contextServer.Name] = CloneContextConfig(contextServer, proxyRuntime);
         }
 
         GitHubMcpWebSearchBootstrap.Ensure(result, CopilotService.TryGetGitHubTokenForMcp());
@@ -72,7 +73,7 @@ public static class McpSessionPlanner
         return names;
     }
 
-    private static McpServerConfig ToSdkConfig(McpServer server, string workDir)
+    private static McpServerConfig ToSdkConfig(McpServer server, string workDir, McpProxyRuntime? proxyRuntime)
     {
         if (string.Equals(server.ServerType, "remote", StringComparison.OrdinalIgnoreCase))
         {
@@ -103,10 +104,18 @@ public static class McpSessionPlanner
         if (server.Timeout.HasValue)
             local.Timeout = server.Timeout.Value;
 
+        if (proxyRuntime is not null)
+        {
+            return proxyRuntime.Register(new McpProxyServerDefinition(
+                $"lumi:{server.Id}",
+                server.Name,
+                local));
+        }
+
         return local;
     }
 
-    private static McpServerConfig CloneContextConfig(ProjectContextMcpServerDefinition contextServer)
+    private static McpServerConfig CloneContextConfig(ProjectContextMcpServerDefinition contextServer, McpProxyRuntime? proxyRuntime)
     {
         switch (contextServer.Config)
         {
@@ -123,6 +132,14 @@ public static class McpSessionPlanner
 
                 if (local.Env is not null)
                     clone.Env = new Dictionary<string, string>(local.Env, StringComparer.OrdinalIgnoreCase);
+
+                if (proxyRuntime is not null)
+                {
+                    return proxyRuntime.Register(new McpProxyServerDefinition(
+                        $"project:{contextServer.SourcePath}:{contextServer.Name}",
+                        contextServer.Name,
+                        clone));
+                }
 
                 return clone;
             }

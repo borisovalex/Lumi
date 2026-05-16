@@ -22,6 +22,8 @@ public static class DebugAgentHarness
     private const string ExpectedToolInput = "lumi-agent-harness";
     private const string ExpectedNativeMcpOutput = "LUMI_MCP_NATIVE_OK";
     private const string ExpectedNativeMcpResumeOutput = "LUMI_MCP_NATIVE_RESUME_OK";
+    private const string ExpectedProxyMcpOutput = "LUMI_MCP_PROXY_OK";
+    private const string ExpectedProxyMcpResumeOutput = "LUMI_MCP_PROXY_RESUME_OK";
 
     public static bool IsUiHarnessFlag(string arg)
         => string.Equals(arg, "--debug-agent-harness", StringComparison.OrdinalIgnoreCase)
@@ -34,6 +36,10 @@ public static class DebugAgentHarness
     public static bool IsNativeMcpStressFlag(string arg)
         => string.Equals(arg, "--test-mcp-native", StringComparison.OrdinalIgnoreCase)
            || string.Equals(arg, "--stress-mcp-native", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsProxyMcpStressFlag(string arg)
+        => string.Equals(arg, "--test-mcp-proxy", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "--stress-mcp-proxy", StringComparison.OrdinalIgnoreCase);
 
     public static Chat CreateTranscriptFixtureChat(DataStore dataStore)
     {
@@ -342,12 +348,26 @@ public static class DebugAgentHarness
         return 1;
     }
 
-    public static async Task<int> RunNativeMcpStressAsync(CopilotService copilotService, CancellationToken ct)
+    public static Task<int> RunNativeMcpStressAsync(CopilotService copilotService, CancellationToken ct)
+        => RunMcpStressAsync(copilotService, useProxy: false, ct);
+
+    public static Task<int> RunProxyMcpStressAsync(CopilotService copilotService, CancellationToken ct)
+        => RunMcpStressAsync(copilotService, useProxy: true, ct);
+
+    private static async Task<int> RunMcpStressAsync(CopilotService copilotService, bool useProxy, CancellationToken ct)
     {
-        Console.WriteLine("Lumi native MCP stress harness");
+        var harnessName = useProxy ? "proxy" : "native";
+        var marker = useProxy ? "PROXY_GLOBAL" : "NATIVE_GLOBAL";
+        var serverName = useProxy ? "proxy-global" : "native-global";
+        var expectedOutput = useProxy ? ExpectedProxyMcpOutput : ExpectedNativeMcpOutput;
+        var expectedResumeOutput = useProxy ? ExpectedProxyMcpResumeOutput : ExpectedNativeMcpResumeOutput;
+        var expectedMarker = $"MCP_MARKER:{marker}:SDK_NATIVE";
+        var expectedResumeMarker = $"MCP_MARKER:{marker}:SDK_RESUME";
+
+        Console.WriteLine($"Lumi {harnessName} MCP stress harness");
         if (!OperatingSystem.IsWindows())
         {
-            Console.Error.WriteLine("FAIL: native MCP stress harness currently uses a Windows PowerShell fake MCP server.");
+            Console.Error.WriteLine($"FAIL: {harnessName} MCP stress harness currently uses a Windows PowerShell fake MCP server.");
             return 1;
         }
 
@@ -367,10 +387,11 @@ public static class DebugAgentHarness
         var model = await copilotService.GetFastestModelIdAsync(ct).ConfigureAwait(false);
         Console.WriteLine($"Model: {model ?? "(default)"}");
 
-        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-native-stress-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), $"lumi-mcp-{harnessName}-stress-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var scriptPath = Path.Combine(root, "fake-mcp.ps1");
         var logPath = Path.Combine(root, "starts.log");
+        McpProxyRuntime? proxyRuntime = null;
 
         try
         {
@@ -396,22 +417,33 @@ public static class DebugAgentHarness
 
             var server = new McpServer
             {
-                Name = "native-global",
+                Name = serverName,
                 Command = powershell,
                 Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
                 Env =
                 {
-                    ["MCP_MARKER"] = "NATIVE_GLOBAL",
+                    ["MCP_MARKER"] = marker,
                     ["MCP_TEST_LOG"] = logPath,
                 },
             };
             var data = new AppData { McpServers = [server] };
-            var chat = new Chat { ActiveMcpServerNames = ["native-global"] };
-            var mcpServers = McpSessionPlanner.Build(data, root, new ProjectContextCatalogSnapshot([], [], []), chat, ["native-global"], null);
-            if (!mcpServers.ContainsKey("native-global"))
+            var chat = new Chat { ActiveMcpServerNames = [serverName] };
+            if (useProxy)
+                proxyRuntime = new McpProxyRuntime();
+            var mcpServers = McpSessionPlanner.Build(data, root, new ProjectContextCatalogSnapshot([], [], []), chat, [serverName], null, proxyRuntime);
+            if (!mcpServers.ContainsKey(serverName))
             {
-                Console.Error.WriteLine("FAIL: native-global MCP server was not included in the SDK config.");
+                Console.Error.WriteLine($"FAIL: {serverName} MCP server was not included in the SDK config.");
                 return 1;
+            }
+            if (useProxy)
+            {
+                if (mcpServers[serverName] is not McpHttpServerConfig { Url: var proxyUrl }
+                    || !proxyUrl.StartsWith("http://127.0.0.1:", StringComparison.Ordinal))
+                {
+                    Console.Error.WriteLine("FAIL: local MCP server was not routed through the loopback proxy.");
+                    return 1;
+                }
             }
 
             var toolStarted = 0;
@@ -419,10 +451,10 @@ public static class DebugAgentHarness
             string? finalContent = null;
             var config = SessionConfigBuilder.Build(
                 systemPrompt: $"""
-                    You are running Lumi's deterministic native MCP debug harness.
+                    You are running Lumi's deterministic {harnessName} MCP debug harness.
                     You have an MCP tool named emit_marker available through the Copilot SDK MCP integration.
                     You must call emit_marker with value "SDK_NATIVE".
-                    After the tool call, include "{ExpectedNativeMcpOutput}" and the exact MCP marker text in the final answer.
+                    After the tool call, include "{expectedOutput}" and the exact MCP marker text in the final answer.
                     """,
                 model: model,
                 workingDirectory: root,
@@ -455,10 +487,8 @@ public static class DebugAgentHarness
                 var result = await session.SendAndWaitAsync(
                     new MessageOptions
                     {
-                        Prompt = """
-                            Run the native MCP validation now. Use emit_marker with {"value":"SDK_NATIVE"}.
-                            Final answer must include LUMI_MCP_NATIVE_OK and MCP_MARKER:NATIVE_GLOBAL:SDK_NATIVE.
-                            """
+                        Prompt = $"Run the {harnessName} MCP validation now. Use emit_marker with {{\"value\":\"SDK_NATIVE\"}}.\n"
+                            + $"Final answer must include {expectedOutput} and {expectedMarker}."
                     },
                     TimeSpan.FromMinutes(3),
                     ct).ConfigureAwait(false);
@@ -472,16 +502,16 @@ public static class DebugAgentHarness
             var starts = File.Exists(logPath)
                 ? await File.ReadAllLinesAsync(logPath, ct).ConfigureAwait(false)
                 : [];
-            var serverStarts = starts.Count(line => line.StartsWith("NATIVE_GLOBAL|", StringComparison.Ordinal));
-            var hasExpectedOutput = finalContent?.Contains("MCP_MARKER:NATIVE_GLOBAL:SDK_NATIVE", StringComparison.Ordinal) == true;
-            var hasContract = finalContent?.Contains(ExpectedNativeMcpOutput, StringComparison.Ordinal) == true;
+            var serverStarts = starts.Count(line => line.StartsWith(marker + "|", StringComparison.Ordinal));
+            var hasExpectedOutput = finalContent?.Contains(expectedMarker, StringComparison.Ordinal) == true;
+            var hasContract = finalContent?.Contains(expectedOutput, StringComparison.Ordinal) == true;
             var hasToolLifecycle = toolStarted > 0 && toolCompleted > 0;
-            var startedServer = serverStarts > 0;
+            var startedServer = useProxy ? serverStarts == 1 : serverStarts > 0;
             var createPassed = hasExpectedOutput && hasContract && hasToolLifecycle && startedServer;
 
             Console.WriteLine($"Tool started: {toolStarted}");
             Console.WriteLine($"Tool completed: {toolCompleted}");
-            Console.WriteLine($"Native MCP starts: {serverStarts}");
+            Console.WriteLine($"{harnessName} MCP starts: {serverStarts}");
             Console.WriteLine($"Final content: {finalContent}");
 
             var resumeToolStarted = 0;
@@ -497,7 +527,7 @@ public static class DebugAgentHarness
                 try
                 {
                     var seedConfig = SessionConfigBuilder.Build(
-                        systemPrompt: "You are seeding Lumi's native MCP resume validation. Reply normally.",
+                        systemPrompt: $"You are seeding Lumi's {harnessName} MCP resume validation. Reply normally.",
                         model: model,
                         workingDirectory: root,
                         skillDirectories: null,
@@ -519,10 +549,10 @@ public static class DebugAgentHarness
 
                     var resumeConfig = SessionConfigBuilder.BuildForResume(
                         systemPrompt: $"""
-                            You are running Lumi's deterministic native MCP resume harness.
+                            You are running Lumi's deterministic {harnessName} MCP resume harness.
                             You have an MCP tool named emit_marker available through the Copilot SDK MCP integration.
                             You must call emit_marker with value "SDK_RESUME".
-                            After the tool call, include "{ExpectedNativeMcpResumeOutput}" and the exact MCP marker text in the final answer.
+                            After the tool call, include "{expectedResumeOutput}" and the exact MCP marker text in the final answer.
                             """,
                         model: model,
                         workingDirectory: root,
@@ -551,10 +581,8 @@ public static class DebugAgentHarness
                     var resumeResult = await resumedSession.SendAndWaitAsync(
                         new MessageOptions
                         {
-                            Prompt = """
-                                Run the native MCP resume validation now. Use emit_marker with {"value":"SDK_RESUME"}.
-                                Final answer must include LUMI_MCP_NATIVE_RESUME_OK and MCP_MARKER:NATIVE_GLOBAL:SDK_RESUME.
-                                """
+                            Prompt = $"Run the {harnessName} MCP resume validation now. Use emit_marker with {{\"value\":\"SDK_RESUME\"}}.\n"
+                                + $"Final answer must include {expectedResumeOutput} and {expectedResumeMarker}."
                         },
                         TimeSpan.FromMinutes(3),
                         ct).ConfigureAwait(false);
@@ -574,12 +602,13 @@ public static class DebugAgentHarness
                 var startsAfterResume = File.Exists(logPath)
                     ? await File.ReadAllLinesAsync(logPath, ct).ConfigureAwait(false)
                     : [];
-                var totalStartsAfterResume = startsAfterResume.Count(line => line.StartsWith("NATIVE_GLOBAL|", StringComparison.Ordinal));
+                var totalStartsAfterResume = startsAfterResume.Count(line => line.StartsWith(marker + "|", StringComparison.Ordinal));
                 resumeServerStarts = Math.Max(0, totalStartsAfterResume - serverStarts);
-                var hasResumeExpectedOutput = resumeFinalContent?.Contains("MCP_MARKER:NATIVE_GLOBAL:SDK_RESUME", StringComparison.Ordinal) == true;
-                var hasResumeContract = resumeFinalContent?.Contains(ExpectedNativeMcpResumeOutput, StringComparison.Ordinal) == true;
+                var hasResumeExpectedOutput = resumeFinalContent?.Contains(expectedResumeMarker, StringComparison.Ordinal) == true;
+                var hasResumeContract = resumeFinalContent?.Contains(expectedResumeOutput, StringComparison.Ordinal) == true;
                 var hasResumeToolLifecycle = resumeToolStarted > 0 && resumeToolCompleted > 0;
-                resumePassed = hasResumeExpectedOutput && hasResumeContract && hasResumeToolLifecycle && resumeServerStarts > 0;
+                var hasExpectedResumeStarts = useProxy ? resumeServerStarts == 0 : resumeServerStarts > 0;
+                resumePassed = hasResumeExpectedOutput && hasResumeContract && hasResumeToolLifecycle && hasExpectedResumeStarts;
             }
 
             Console.WriteLine($"Resume tool started: {resumeToolStarted}");
@@ -589,25 +618,29 @@ public static class DebugAgentHarness
 
             if (createPassed && resumePassed)
             {
-                Console.WriteLine("PASS: native Copilot SDK MCP stress check completed.");
+                Console.WriteLine($"PASS: {harnessName} Copilot SDK MCP stress check completed.");
                 return 0;
             }
 
-            Console.Error.WriteLine("FAIL: native MCP stress check did not satisfy the contract.");
+            Console.Error.WriteLine($"FAIL: {harnessName} MCP stress check did not satisfy the contract.");
             if (!hasToolLifecycle)
-                Console.Error.WriteLine("- native MCP tool lifecycle events were not observed.");
+                Console.Error.WriteLine($"- {harnessName} MCP tool lifecycle events were not observed.");
             if (!startedServer)
-                Console.Error.WriteLine("- fake MCP server did not start.");
+                Console.Error.WriteLine(useProxy
+                    ? "- fake MCP server did not start exactly once."
+                    : "- fake MCP server did not start.");
             if (!hasExpectedOutput)
-                Console.Error.WriteLine("- final response did not include MCP_MARKER:NATIVE_GLOBAL:SDK_NATIVE.");
+                Console.Error.WriteLine($"- final response did not include {expectedMarker}.");
             if (!hasContract)
-                Console.Error.WriteLine($"- final response did not include {ExpectedNativeMcpOutput}.");
+                Console.Error.WriteLine($"- final response did not include {expectedOutput}.");
             if (!resumePassed)
-                Console.Error.WriteLine("- native MCP resume validation did not satisfy the contract.");
+                Console.Error.WriteLine($"- {harnessName} MCP resume validation did not satisfy the contract.");
             return 1;
         }
         finally
         {
+            if (proxyRuntime is not null)
+                await proxyRuntime.DisposeAsync().ConfigureAwait(false);
             try { Directory.Delete(root, recursive: true); }
             catch { }
         }

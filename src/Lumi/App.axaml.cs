@@ -103,6 +103,12 @@ public partial class App : Application
                         await copilotService.DisposeAsync();
                     }
                     catch { }
+
+                    try
+                    {
+                        await McpProxyRuntime.Shared.DisposeAsync();
+                    }
+                    catch { }
                 }).GetAwaiter().GetResult();
             };
 
