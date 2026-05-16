@@ -21,7 +21,8 @@ public sealed class BackgroundJobService : IDisposable
     private readonly DataStore _dataStore;
     private readonly ChatSurfaceRegistry _chatSurfaceRegistry;
     private readonly bool _ownsChatSurfaceRegistry;
-    private readonly ChatViewModel _fallbackChatViewModel;
+    private readonly ChatViewModel? _fallbackChatViewModel;
+    private readonly ChatSessionStore? _chatSessionStore;
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly SemaphoreSlim _scanLock = new(1, 1);
     private readonly object _chatInvocationLocksSync = new();
@@ -43,6 +44,16 @@ public sealed class BackgroundJobService : IDisposable
     public BackgroundJobService(
         DataStore dataStore,
         ChatSurfaceRegistry chatSurfaceRegistry,
+        ChatSessionStore chatSessionStore)
+    {
+        _dataStore = dataStore;
+        _chatSurfaceRegistry = chatSurfaceRegistry;
+        _chatSessionStore = chatSessionStore;
+    }
+
+    public BackgroundJobService(
+        DataStore dataStore,
+        ChatSurfaceRegistry chatSurfaceRegistry,
         ChatViewModel fallbackChatViewModel)
     {
         _dataStore = dataStore;
@@ -59,11 +70,52 @@ public sealed class BackgroundJobService : IDisposable
     }
 
     private ChatViewModel ResolveChatExecutor(Guid chatId)
-        => _chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface)
-            ? visibleSurface
-            : _fallbackChatViewModel;
+    {
+        if (_chatSurfaceRegistry.TryGetLiveOwner(chatId, out var liveSurface))
+            return liveSurface;
+
+        if (_chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface))
+            return visibleSurface;
+
+        if (_fallbackChatViewModel is not null)
+            return _fallbackChatViewModel;
+
+        throw new InvalidOperationException($"No chat executor is available for chat {chatId}.");
+    }
+
+    private async Task<(ChatViewModel Executor, bool ReleaseWhenDone)> ResolveChatExecutorForInvocationAsync(Guid chatId)
+    {
+        if (_chatSurfaceRegistry.TryGetLiveOwner(chatId, out var liveSurface))
+            return (liveSurface, false);
+
+        if (_chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface))
+            return (visibleSurface, false);
+
+        if (_chatSessionStore is not null)
+        {
+            var chat = _dataStore.Data.Chats.FirstOrDefault(candidate => candidate.Id == chatId)
+                ?? throw new InvalidOperationException($"Background job chat not found: {chatId}");
+            return (await _chatSessionStore.AcquireChatAsync(chat), true);
+        }
+
+        if (_fallbackChatViewModel is not null)
+            return (_fallbackChatViewModel, false);
+
+        throw new InvalidOperationException($"No chat executor is available for chat {chatId}.");
+    }
 
     internal ChatViewModel ResolveChatExecutorForTest(Guid chatId) => ResolveChatExecutor(chatId);
+
+    private bool IsChatBusy(Guid chatId)
+    {
+        if (_chatSurfaceRegistry.TryGetLiveOwner(chatId, out var liveSurface))
+            return liveSurface.IsChatBusy(chatId);
+
+        if (_chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface))
+            return visibleSurface.IsChatBusy(chatId);
+
+        return _fallbackChatViewModel?.IsChatBusy(chatId) == true;
+    }
 
     public void Start()
     {
@@ -381,7 +433,17 @@ public sealed class BackgroundJobService : IDisposable
         {
             try
             {
-                await ResolveChatExecutor(job.ChatId).SendBackgroundJobMessageAsync(job, triggerContext, ct);
+                var (executor, releaseWhenDone) = await ResolveChatExecutorForInvocationAsync(job.ChatId);
+                try
+                {
+                    await executor.SendBackgroundJobMessageAsync(job, triggerContext, ct);
+                }
+                finally
+                {
+                    if (releaseWhenDone)
+                        _chatSessionStore?.Release(executor);
+                }
+
                 tcs.TrySetResult();
             }
             catch (Exception ex)
@@ -422,7 +484,7 @@ public sealed class BackgroundJobService : IDisposable
         {
             try
             {
-                tcs.TrySetResult(ResolveChatExecutor(chatId).IsChatBusy(chatId));
+                tcs.TrySetResult(IsChatBusy(chatId));
             }
             catch (Exception ex)
             {

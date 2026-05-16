@@ -48,6 +48,25 @@ public sealed class ChatSurfaceRegistry : IDisposable
             return _ownersByChatId.TryGetValue(chatId, out surface!);
     }
 
+    public bool TryGetLiveOwner(Guid chatId, out ChatViewModel surface)
+    {
+        ChatViewModel[] surfaces;
+        lock (_sync)
+            surfaces = _surfaces.ToArray();
+
+        foreach (var candidate in surfaces)
+        {
+            if (!candidate.OwnsLiveChat(chatId))
+                continue;
+
+            surface = candidate;
+            return true;
+        }
+
+        surface = null!;
+        return false;
+    }
+
     public IReadOnlyList<ChatViewModel> SnapshotSurfaces()
     {
         lock (_sync)

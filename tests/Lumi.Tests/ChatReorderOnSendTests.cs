@@ -57,15 +57,17 @@ public class ChatReorderOnSendTests
     [Fact]
     public void RefreshChatList_MovesOlderGroupChatToToday()
     {
+        var now = DateTimeOffset.Now;
+        var todayStart = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, now.Offset);
         var yesterday = new Chat
         {
             Title = "Yesterday Chat",
-            UpdatedAt = DateTimeOffset.Now.AddDays(-1).AddHours(-1)
+            UpdatedAt = todayStart.AddDays(-1).AddHours(12)
         };
         var today = new Chat
         {
             Title = "Today Chat",
-            UpdatedAt = DateTimeOffset.Now.AddMinutes(-30)
+            UpdatedAt = todayStart.AddTicks(1)
         };
         var ds = CreateDataStore(yesterday, today);
         var vm = new MainViewModel(ds, new CopilotService(), new UpdateService());
@@ -74,7 +76,7 @@ public class ChatReorderOnSendTests
         Assert.True(vm.ChatGroups.Count >= 2, "Expected at least two time groups");
 
         // Simulate message sent → timestamp becomes "now"
-        yesterday.UpdatedAt = DateTimeOffset.Now;
+        yesterday.UpdatedAt = now;
         ds.MarkChatChanged(yesterday);
         vm.RefreshChatList();
 

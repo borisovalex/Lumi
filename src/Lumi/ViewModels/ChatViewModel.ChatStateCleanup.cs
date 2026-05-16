@@ -60,6 +60,40 @@ public partial class ChatViewModel
            && (runtime.IsBusy || runtime.IsStreaming || runtime.HasPendingBackgroundWork
                || runtime.PendingSessionUserMessageCount > 0);
 
+    internal bool OwnsLiveChat(Guid chatId)
+    {
+        if (IsChatRuntimeActive(chatId)
+            || _ctsSources.ContainsKey(chatId)
+            || _inProgressMessages.ContainsKey(chatId))
+            return true;
+
+        var chat = _dataStore.Data.Chats.FirstOrDefault(candidate => candidate.Id == chatId);
+        return chat?.Messages.Any(message =>
+            message.ToolName == "ask_question"
+            && message.ToolStatus == "InProgress"
+            && message.QuestionId is { Length: > 0 } questionId
+            && _pendingQuestions.ContainsKey(questionId)) == true;
+    }
+
+    internal bool OwnsAnyLiveChat()
+    {
+        foreach (var chatId in _runtimeStates.Keys
+                     .Concat(_ctsSources.Keys)
+                     .Concat(_inProgressMessages.Keys)
+                     .Distinct())
+        {
+            if (OwnsLiveChat(chatId))
+                return true;
+        }
+
+        return _dataStore.Data.Chats.Any(chat =>
+            chat.Messages.Any(message =>
+                message.ToolName == "ask_question"
+                && message.ToolStatus == "InProgress"
+                && message.QuestionId is { Length: > 0 } questionId
+                && _pendingQuestions.ContainsKey(questionId)));
+    }
+
     private void QueueBusySendPrompt(Guid chatId, string prompt)
     {
         if (string.IsNullOrWhiteSpace(prompt))

@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
@@ -37,6 +40,59 @@ public sealed class ChatSurfaceRegistryTests
     }
 
     [Fact]
+    public void TryGetLiveOwner_FindsSurfaceThatOwnsInactiveRunningChat()
+    {
+        var running = new Chat { Title = "Running" };
+        var visible = new Chat { Title = "Visible" };
+        using var surface = CreateSurface(running, visible);
+        using var registry = new ChatSurfaceRegistry();
+        registry.Attach(surface);
+        var runtimeStates = GetField<Dictionary<Guid, ChatRuntimeState>>(surface, "_runtimeStates");
+        var runtime = new ChatRuntimeState { Chat = running };
+        runtime.IsBusy = true;
+        runtimeStates[running.Id] = runtime;
+        surface.CurrentChat = visible;
+
+        Assert.False(registry.TryGetOwner(running.Id, out _));
+        Assert.True(registry.TryGetLiveOwner(running.Id, out var owner));
+        Assert.Same(surface, owner);
+    }
+
+    [Fact]
+    public void TryGetLiveOwner_FindsSurfaceThatOwnsPendingQuestion()
+    {
+        var questionChat = new Chat { Title = "Question" };
+        questionChat.Messages.Add(new ChatMessage
+        {
+            Role = "tool",
+            ToolName = "ask_question",
+            ToolStatus = "InProgress",
+            QuestionId = "question-1"
+        });
+        var visible = new Chat { Title = "Visible" };
+        using var surface = CreateSurface(questionChat, visible);
+        using var registry = new ChatSurfaceRegistry();
+        registry.Attach(surface);
+        var pendingQuestions = GetField<Dictionary<string, TaskCompletionSource<string>>>(surface, "_pendingQuestions");
+        pendingQuestions["question-1"] = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        surface.CurrentChat = visible;
+
+        Assert.True(registry.TryGetLiveOwner(questionChat.Id, out var owner));
+        Assert.Same(surface, owner);
+    }
+
+    [Fact]
+    public void IsChatBusy_IgnoresModelRunningProjectionWithoutOwnedRuntime()
+    {
+        var chat = new Chat { Title = "Projected only" };
+        using var surface = CreateSurface(chat);
+
+        chat.IsRunning = true;
+
+        Assert.False(surface.IsChatBusy(chat.Id));
+    }
+
+    [Fact]
     public void Detach_RemovesTrackedOwner()
     {
         var chat = new Chat { Title = "Detached" };
@@ -66,4 +122,10 @@ public sealed class ChatSurfaceRegistryTests
             CurrentChat = chats.FirstOrDefault()
         };
     }
+
+    private static T GetField<T>(object instance, string name) where T : class
+        => (T)(instance.GetType()
+            .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?.GetValue(instance)
+            ?? throw new InvalidOperationException($"Field {name} was not found."));
 }

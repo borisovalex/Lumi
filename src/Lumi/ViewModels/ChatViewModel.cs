@@ -1345,8 +1345,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     public bool IsChatBusy(Guid chatId)
     {
-        return IsChatRuntimeActive(chatId)
-               || _dataStore.Data.Chats.FirstOrDefault(chat => chat.Id == chatId)?.IsRunning == true;
+        return OwnsLiveChat(chatId);
     }
 
     public async Task SendBackgroundJobMessageAsync(

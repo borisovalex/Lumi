@@ -26,6 +26,7 @@ public partial class App : Application
     private UpdateService? _updateService;
     private BackgroundJobService? _backgroundJobService;
     private ChatSurfaceRegistry? _chatSurfaceRegistry;
+    private ChatSessionStore? _chatSessionStore;
     private readonly List<MainWindow> _windows = [];
     private int _secondaryWindowSequence;
     private MainViewModel? _mainViewModel;
@@ -53,6 +54,7 @@ public partial class App : Application
             _updateService = updateService;
             updateService.Initialize();
             _chatSurfaceRegistry = new ChatSurfaceRegistry();
+            _chatSessionStore = new ChatSessionStore(dataStore, copilotService, _chatSurfaceRegistry);
             var vm = CreateMainViewModel(
                 forceOnboarding: Program.ForceOnboarding,
                 startBackgroundJobs: true
@@ -84,6 +86,7 @@ public partial class App : Application
                 {
                     windowVm.Dispose();
                 }
+                _chatSessionStore?.Dispose();
                 _chatSurfaceRegistry?.Dispose();
 
                 Task.Run(async () =>
@@ -167,6 +170,8 @@ public partial class App : Application
             throw new InvalidOperationException("Lumi services are not initialized.");
         if (_chatSurfaceRegistry is null)
             throw new InvalidOperationException("Lumi chat surface registry is not initialized.");
+        if (_chatSessionStore is null)
+            throw new InvalidOperationException("Lumi chat session store is not initialized.");
 
         // Secondary windows share the primary scheduler so background jobs have a single runner.
         return new MainViewModel(
@@ -176,7 +181,8 @@ public partial class App : Application
             forceOnboarding,
             _backgroundJobService,
             startBackgroundJobs,
-            _chatSurfaceRegistry
+            _chatSurfaceRegistry,
+            _chatSessionStore
 #if DEBUG
             , openAgentDebugHarness
 #endif
@@ -362,7 +368,6 @@ public partial class App : Application
         chatVm.ChatTitleChanged += OnDetachedChatTitleChanged;
         chatVm.FeatureManagementStateChanged += OnDetachedChatUpdated;
         chatVm.DefaultModelSelectionChanged += OnDetachedDefaultModelSelectionChanged;
-        _mainViewModel?.ChatSurfaceRegistry.Attach(chatVm);
 
         Guid? trackedChatId = initialChatId;
         ChatWindow? window = null;
@@ -404,9 +409,8 @@ public partial class App : Application
             chatVm.ChatTitleChanged -= OnDetachedChatTitleChanged;
             chatVm.FeatureManagementStateChanged -= OnDetachedChatUpdated;
             chatVm.DefaultModelSelectionChanged -= OnDetachedDefaultModelSelectionChanged;
-            _mainViewModel?.ChatSurfaceRegistry.Detach(chatVm);
             windowVm.Dispose();
-            chatVm.Dispose();
+            request.ReleaseSurface();
         };
 
         if (Loc.IsRightToLeft)
@@ -434,8 +438,7 @@ public partial class App : Application
     private static void DisposeUnopenedChatWindowRequest(DetachedChatWindowRequest request)
     {
         request.WindowVM.Dispose();
-        if (request.DisposeSurfaceIfNotOpened)
-            request.WindowVM.ChatVM.Dispose();
+        request.ReleaseSurface();
     }
 
     private void OnDetachedDefaultModelSelectionChanged(string model, string? reasoningEffort)
