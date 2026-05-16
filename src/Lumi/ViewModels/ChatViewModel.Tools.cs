@@ -99,72 +99,17 @@ public partial class ChatViewModel
         Chat chat,
         LumiAgent? activeAgent)
     {
-        var allServers = _dataStore.Data.McpServers.Where(s => s.IsEnabled).ToList();
-
-        var selectedServerNames = chat.ActiveMcpServerNames;
+        IReadOnlyCollection<string>? selectedServerNames = null;
         if (CurrentChat?.Id == chat.Id)
-            selectedServerNames = ActiveMcpServerNames;
+            selectedServerNames = ActiveMcpServerNames.ToList();
 
-        // Existing chats without saved MCP selections default to all enabled servers,
-        // matching the composer state restored when the chat is opened.
-        if (selectedServerNames.Count > 0)
-            allServers = allServers.Where(s => selectedServerNames.Contains(s.Name)).ToList();
-        else if (CurrentChat?.Id == chat.Id)
-            allServers.Clear();
-
-        // If an active agent restricts MCP servers, apply that as an intersection
-        // with the user's current selection rather than overriding it.
-        if (activeAgent is { McpServerIds.Count: > 0 })
-        {
-            var agentServerIds = activeAgent.McpServerIds;
-            allServers = allServers.Where(s => agentServerIds.Contains(s.Id)).ToList();
-        }
-
-        var dict = new Dictionary<string, McpServerConfig>();
-
-        // Add Lumi-configured MCP servers
-        foreach (var server in allServers)
-        {
-            if (server.ServerType == "remote")
-            {
-                var remote = new McpHttpServerConfig
-                {
-                    Url = server.Url,
-                    Tools = server.Tools.Count > 0 ? server.Tools.ToList() : ["*"]
-                };
-                if (server.Headers.Count > 0)
-                    remote.Headers = new Dictionary<string, string>(server.Headers);
-                if (server.Timeout.HasValue)
-                    remote.Timeout = server.Timeout.Value;
-                dict[server.Name] = remote;
-            }
-            else
-            {
-                var local = new McpStdioServerConfig
-                {
-                    Command = server.Command,
-                    Args = server.Args.ToList(),
-                    Cwd = workDir,
-                    Tools = server.Tools.Count > 0 ? server.Tools.ToList() : ["*"]
-                };
-                if (server.Env.Count > 0)
-                    local.Env = new Dictionary<string, string>(server.Env);
-                if (server.Timeout.HasValue)
-                    local.Timeout = server.Timeout.Value;
-                dict[server.Name] = local;
-            }
-        }
-
-        // Add project-scoped MCP servers from the project context catalog.
-        foreach (var contextServer in projectContextCatalog.McpServers)
-        {
-            if (!dict.ContainsKey(contextServer.Name))
-                dict[contextServer.Name] = contextServer.Config;
-        }
-
-        GitHubMcpWebSearchBootstrap.Ensure(dict, CopilotService.TryGetGitHubTokenForMcp());
-
-        return dict;
+        return McpSessionPlanner.Build(
+            _dataStore.Data,
+            workDir,
+            projectContextCatalog,
+            chat,
+            selectedServerNames,
+            activeAgent);
     }
 
     private List<AIFunction> BuildWebTools()
@@ -868,6 +813,7 @@ public partial class ChatViewModel
             && !CurrentChat.ActiveMcpServerNames.SequenceEqual(activeNames, StringComparer.OrdinalIgnoreCase))
         {
             CurrentChat.ActiveMcpServerNames = new List<string>(activeNames);
+            CurrentChat.HasExplicitMcpServerSelection = true;
             _dataStore.MarkChatChanged(CurrentChat);
             return true;
         }

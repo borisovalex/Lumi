@@ -1534,7 +1534,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public void EmptyCollections_NotAssignedToConfig()
+    public void EmptyCollections_NotAssignedToConfigExceptExplicitMcpSelection()
     {
         var config = SessionConfigBuilder.Build(
             systemPrompt: "test", model: null, workingDirectory: null,
@@ -1548,7 +1548,8 @@ public class CopilotIntegrationTests : IAsyncLifetime
         Assert.Null(config.SkillDirectories);
         Assert.Null(config.CustomAgents);
         Assert.Null(config.Tools);
-        Assert.Null(config.McpServers);
+        Assert.NotNull(config.McpServers);
+        Assert.Empty(config.McpServers!);
         Assert.Null(config.ReasoningEffort);
     }
 

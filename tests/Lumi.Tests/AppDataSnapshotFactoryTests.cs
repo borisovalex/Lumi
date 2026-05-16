@@ -441,6 +441,7 @@ public class AppDataSnapshotFactoryTests
         Assert.Equal(currentSnapshot.Chats[0].UpdatedAt, chat.UpdatedAt);
         Assert.Equal(currentSnapshot.Chats[0].ActiveSkillIds, chat.ActiveSkillIds);
         Assert.Equal(currentSnapshot.Chats[0].ActiveMcpServerNames, chat.ActiveMcpServerNames);
+        Assert.Equal(currentSnapshot.Chats[0].HasExplicitMcpServerSelection, chat.HasExplicitMcpServerSelection);
         Assert.Equal("gpt-5.4", chat.LastModelUsed);
         Assert.Equal("high", chat.LastReasoningEffortUsed);
         Assert.Equal(100, chat.TotalInputTokens);
@@ -647,6 +648,7 @@ public class AppDataSnapshotFactoryTests
             UpdatedAt = updatedAt,
             ActiveSkillIds = skillIds ?? [],
             ActiveMcpServerNames = mcpServers ?? [],
+            HasExplicitMcpServerSelection = mcpServers is not null,
             LastModelUsed = lastModelUsed,
             LastReasoningEffortUsed = lastReasoningEffortUsed,
             TotalInputTokens = totalInputTokens,

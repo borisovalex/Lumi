@@ -99,7 +99,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         "Debug-only agent map\n" +
         "Nav: #NavChat=0, #NavJobs=1, #NavProjects=2, #NavSkills=3, #NavAgents=4, #NavMemories=5, #NavMcpServers=6, #NavSettings=7\n" +
         "Chat controls: #PageChat, #ChatShell, #Transcript, #Composer, #SearchInput\n" +
-        "CLI: --debug-agent-harness opens fixture, --test-chat-stress runs real Copilot stress check";
+        "CLI: --debug-agent-harness opens fixture, --test-chat-stress checks tools, --test-mcp-native checks SDK MCP";
 
     partial void OnSelectedNavIndexChanged(int value)
     {

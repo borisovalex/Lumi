@@ -237,6 +237,7 @@ internal static class AppDataSnapshotFactory
             ActiveSkillIds = [..source.ActiveSkillIds],
             ActiveExternalSkillNames = [..source.ActiveExternalSkillNames],
             ActiveMcpServerNames = [..source.ActiveMcpServerNames],
+            HasExplicitMcpServerSelection = source.HasExplicitMcpServerSelection,
             SessionMode = source.SessionMode,
             SdkAgentName = source.SdkAgentName,
             WorktreePath = source.WorktreePath,

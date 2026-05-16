@@ -19,10 +19,13 @@ public sealed class LightweightSessionOptions
 /// <summary>
 /// Builds <see cref="SessionConfig"/> and <see cref="ResumeSessionConfig"/>
 /// for creating and resuming Copilot sessions with consistent defaults.
-/// </summary>
-public static class SessionConfigBuilder
-{
-    private const string ClientName = "lumi";
+    /// </summary>
+    public static class SessionConfigBuilder
+    {
+        private const string ClientName = "lumi";
+
+        /// <summary>Lumi owns MCP and skill selection explicitly; SDK discovery would bypass per-chat toggles.</summary>
+        private const bool EnableSdkConfigDiscovery = false;
 
     /// <summary>Tools that Lumi provides natively and should not be duplicated by the SDK.</summary>
     private static readonly List<string> ExcludedBuiltInTools = ["web_fetch"];
@@ -51,6 +54,7 @@ public static class SessionConfigBuilder
             Streaming = true,
             WorkingDirectory = workingDirectory,
             ConfigDir = GetDefaultConfigDir(),
+            EnableConfigDiscovery = EnableSdkConfigDiscovery,
             ExcludedTools = ExcludedBuiltInTools,
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
@@ -86,6 +90,7 @@ public static class SessionConfigBuilder
             Streaming = true,
             WorkingDirectory = workingDirectory,
             ConfigDir = GetDefaultConfigDir(),
+            EnableConfigDiscovery = EnableSdkConfigDiscovery,
             ExcludedTools = ExcludedBuiltInTools,
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
@@ -111,6 +116,7 @@ public static class SessionConfigBuilder
             Streaming = options.Streaming,
             WorkingDirectory = options.WorkingDirectory,
             ConfigDir = options.ConfigDir ?? GetDefaultConfigDir(),
+            EnableConfigDiscovery = EnableSdkConfigDiscovery,
             InfiniteSessions = new InfiniteSessionConfig { Enabled = false },
             OnPermissionRequest = PermissionHandler.ApproveAll,
             SystemMessage = new SystemMessageConfig
@@ -170,7 +176,7 @@ public static class SessionConfigBuilder
         if (tools is { Count: > 0 })
             config.Tools = tools;
 
-        if (mcpServers is { Count: > 0 })
+        if (mcpServers is not null)
             config.McpServers = mcpServers;
 
         if (userInputHandler is not null)
@@ -211,7 +217,7 @@ public static class SessionConfigBuilder
         if (tools is { Count: > 0 })
             config.Tools = tools;
 
-        if (mcpServers is { Count: > 0 })
+        if (mcpServers is not null)
             config.McpServers = mcpServers;
 
         if (userInputHandler is not null)

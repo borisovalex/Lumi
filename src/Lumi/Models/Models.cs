@@ -77,6 +77,7 @@ public class Chat : INotifyPropertyChanged
         set => _activeExternalSkillNames = value ?? [];
     }
     public List<string> ActiveMcpServerNames { get; set; } = [];
+    public bool HasExplicitMcpServerSelection { get; set; }
 
     /// <summary>Deprecated — session mode is no longer used. Kept for backward-compatible deserialization.</summary>
     public string? SessionMode { get; set; }

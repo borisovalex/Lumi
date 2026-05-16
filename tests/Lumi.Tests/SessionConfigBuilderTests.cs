@@ -28,6 +28,9 @@ public sealed class SessionConfigBuilderTests
         Assert.Equal(workDir, config.WorkingDirectory);
         Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
         Assert.NotEqual(workDir, config.ConfigDir);
+        Assert.False(config.EnableConfigDiscovery);
+        Assert.NotNull(config.McpServers);
+        Assert.Empty(config.McpServers!);
     }
 
     [Fact]
@@ -51,6 +54,9 @@ public sealed class SessionConfigBuilderTests
         Assert.Equal(workDir, config.WorkingDirectory);
         Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
         Assert.NotEqual(workDir, config.ConfigDir);
+        Assert.False(config.EnableConfigDiscovery);
+        Assert.NotNull(config.McpServers);
+        Assert.Empty(config.McpServers!);
     }
 
     [Fact]
@@ -62,6 +68,7 @@ public sealed class SessionConfigBuilderTests
         });
 
         Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
+        Assert.False(config.EnableConfigDiscovery);
     }
 
     [Fact]
@@ -76,5 +83,6 @@ public sealed class SessionConfigBuilderTests
         });
 
         Assert.Equal(configDir, config.ConfigDir);
+        Assert.False(config.EnableConfigDiscovery);
     }
 }

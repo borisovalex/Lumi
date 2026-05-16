@@ -1074,7 +1074,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 _activeExternalSkillNames.Add(skillName);
             RefreshActiveSkillChipsFromState();
 
-            // Restore active MCP servers from chat (default to all enabled if none saved)
+            // Restore active MCP servers from chat (default to all enabled for older chats with no saved selection)
             ActiveMcpServerNames.Clear();
             ActiveMcpChips.Clear();
             var enabledServersByName = new Dictionary<string, McpServer>(StringComparer.Ordinal);
@@ -1089,7 +1089,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 .Select(server => server.Name)
                 .ToList();
 
-            if (chat.ActiveMcpServerNames.Count > 0)
+            if (chat.HasExplicitMcpServerSelection || chat.ActiveMcpServerNames.Count > 0)
             {
                 foreach (var name in chat.ActiveMcpServerNames)
                 {
@@ -1107,7 +1107,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
             else
             {
-                // No MCPs saved — default to all enabled
+                // Older chats did not store whether an empty list was intentional, so default them to all enabled.
                 foreach (var server in enabledServersByName.Values)
                 {
                     ActiveMcpServerNames.Add(server.Name);
@@ -1275,13 +1275,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Called when MCP server config changes so the next message creates a fresh session with updated MCP servers.
+    /// Called when MCP server config changes so the next Copilot session create/resume uses the updated MCP catalog.
     /// </summary>
     public void InvalidateMcpSession()
     {
         if (CurrentChat is not null)
         {
-            InvalidateCurrentSession();
             _pendingSkillInjections.Clear();
             _activeExternalSkillNames.Clear();
         }
@@ -1652,6 +1651,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 ActiveSkillIds = new List<Guid>(ActiveSkillIds),
                 ActiveExternalSkillNames = new List<string>(_activeExternalSkillNames),
                 ActiveMcpServerNames = new List<string>(ActiveMcpServerNames),
+                HasExplicitMcpServerSelection = true,
                 SdkAgentName = SelectedSdkAgentName,
                 WorktreePath = IsWorktreeMode ? WorktreePath : null,
                 LastModelUsed = SelectedModel,

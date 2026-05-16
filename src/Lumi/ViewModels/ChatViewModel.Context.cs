@@ -251,12 +251,9 @@ public partial class ChatViewModel
         if (CurrentChat is not null)
         {
             CurrentChat.ActiveMcpServerNames = new List<string>(ActiveMcpServerNames);
+            CurrentChat.HasExplicitMcpServerSelection = true;
+            // MCP changes are applied at the next SDK create/resume boundary, not by rebuilding a live chat session.
             QueueSaveChat(CurrentChat, saveIndex: true);
-
-            // MCP configuration is session-scoped in the Copilot SDK.
-            // Any add/remove must invalidate the current backend session so
-            // the next send recreates/resumes with the updated MCP server set.
-            InvalidateCurrentSession();
         }
     }
 

@@ -38,6 +38,13 @@ class Program
             return;
         }
 
+        if (args.Any(DebugAgentHarness.IsNativeMcpStressFlag))
+        {
+            AttachParentConsole();
+            RunNativeMcpStressAsync().GetAwaiter().GetResult();
+            return;
+        }
+
         // Headless agent test mode — no UI, just runs the onboarding agent and prints output
         if (args.Contains("--test-onboarding-agent", StringComparer.OrdinalIgnoreCase))
         {
@@ -91,6 +98,13 @@ class Program
     {
         var copilotService = new Services.CopilotService();
         var exitCode = await DebugAgentHarness.RunChatStressAsync(copilotService, default);
+        Environment.ExitCode = exitCode;
+    }
+
+    private static async System.Threading.Tasks.Task RunNativeMcpStressAsync()
+    {
+        var copilotService = new Services.CopilotService();
+        var exitCode = await DebugAgentHarness.RunNativeMcpStressAsync(copilotService, default);
         Environment.ExitCode = exitCode;
     }
 

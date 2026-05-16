@@ -20,6 +20,8 @@ public static class DebugAgentHarness
 {
     private const string ExpectedStressOutput = "LUMI_CHAT_STRESS_OK";
     private const string ExpectedToolInput = "lumi-agent-harness";
+    private const string ExpectedNativeMcpOutput = "LUMI_MCP_NATIVE_OK";
+    private const string ExpectedNativeMcpResumeOutput = "LUMI_MCP_NATIVE_RESUME_OK";
 
     public static bool IsUiHarnessFlag(string arg)
         => string.Equals(arg, "--debug-agent-harness", StringComparison.OrdinalIgnoreCase)
@@ -28,6 +30,10 @@ public static class DebugAgentHarness
     public static bool IsChatStressFlag(string arg)
         => string.Equals(arg, "--test-chat-stress", StringComparison.OrdinalIgnoreCase)
            || string.Equals(arg, "--stress-chat", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsNativeMcpStressFlag(string arg)
+        => string.Equals(arg, "--test-mcp-native", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "--stress-mcp-native", StringComparison.OrdinalIgnoreCase);
 
     public static Chat CreateTranscriptFixtureChat(DataStore dataStore)
     {
@@ -334,6 +340,277 @@ public static class DebugAgentHarness
         if (!hasExpectedOutput)
             Console.Error.WriteLine($"- final response did not contain {ExpectedStressOutput}.");
         return 1;
+    }
+
+    public static async Task<int> RunNativeMcpStressAsync(CopilotService copilotService, CancellationToken ct)
+    {
+        Console.WriteLine("Lumi native MCP stress harness");
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.Error.WriteLine("FAIL: native MCP stress harness currently uses a Windows PowerShell fake MCP server.");
+            return 1;
+        }
+
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        if (!File.Exists(powershell))
+        {
+            Console.Error.WriteLine($"FAIL: PowerShell not found at {powershell}");
+            return 1;
+        }
+
+        Console.WriteLine("Connecting to Copilot...");
+        await copilotService.ConnectAsync(ct).ConfigureAwait(false);
+        var model = await copilotService.GetFastestModelIdAsync(ct).ConfigureAwait(false);
+        Console.WriteLine($"Model: {model ?? "(default)"}");
+
+        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-native-stress-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var scriptPath = Path.Combine(root, "fake-mcp.ps1");
+        var logPath = Path.Combine(root, "starts.log");
+
+        try
+        {
+            await File.WriteAllTextAsync(scriptPath, """
+                [System.IO.File]::AppendAllText($env:MCP_TEST_LOG, "$($env:MCP_MARKER)|$PID`n")
+                function Write-Json($obj) {
+                    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 30))
+                    [Console]::Out.Flush()
+                }
+                while ($null -ne ($line = [Console]::In.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $msg = $line | ConvertFrom-Json
+                    if ($msg.method -eq "initialize") {
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ protocolVersion = "2025-11-25"; capabilities = @{}; serverInfo = @{ name = "lumi-native-fake-mcp"; version = "1" } } }
+                    } elseif ($msg.method -eq "tools/list") {
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ tools = @(@{ name = "emit_marker"; description = "Return the configured native MCP stress marker and requested value."; inputSchema = @{ type = "object"; properties = @{ value = @{ type = "string" } }; required = @("value") } }) } }
+                    } elseif ($msg.method -eq "tools/call") {
+                        $value = [string]$msg.params.arguments.value
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ content = @(@{ type = "text"; text = "MCP_MARKER:$($env:MCP_MARKER):$value" }) } }
+                    }
+                }
+                """, ct).ConfigureAwait(false);
+
+            var server = new McpServer
+            {
+                Name = "native-global",
+                Command = powershell,
+                Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                Env =
+                {
+                    ["MCP_MARKER"] = "NATIVE_GLOBAL",
+                    ["MCP_TEST_LOG"] = logPath,
+                },
+            };
+            var data = new AppData { McpServers = [server] };
+            var chat = new Chat { ActiveMcpServerNames = ["native-global"] };
+            var mcpServers = McpSessionPlanner.Build(data, root, new ProjectContextCatalogSnapshot([], [], []), chat, ["native-global"], null);
+            if (!mcpServers.ContainsKey("native-global"))
+            {
+                Console.Error.WriteLine("FAIL: native-global MCP server was not included in the SDK config.");
+                return 1;
+            }
+
+            var toolStarted = 0;
+            var toolCompleted = 0;
+            string? finalContent = null;
+            var config = SessionConfigBuilder.Build(
+                systemPrompt: $"""
+                    You are running Lumi's deterministic native MCP debug harness.
+                    You have an MCP tool named emit_marker available through the Copilot SDK MCP integration.
+                    You must call emit_marker with value "SDK_NATIVE".
+                    After the tool call, include "{ExpectedNativeMcpOutput}" and the exact MCP marker text in the final answer.
+                    """,
+                model: model,
+                workingDirectory: root,
+                skillDirectories: null,
+                customAgents: null,
+                tools: null,
+                mcpServers: mcpServers,
+                reasoningEffort: null,
+                userInputHandler: null,
+                onPermission: null,
+                hooks: null);
+
+            CopilotSession? session = null;
+            try
+            {
+                session = await copilotService.CreateSessionAsync(config, ct).ConfigureAwait(false);
+                using var sub = session.On(evt =>
+                {
+                    switch (evt)
+                    {
+                        case ToolExecutionStartEvent:
+                            Interlocked.Increment(ref toolStarted);
+                            break;
+                        case ToolExecutionCompleteEvent:
+                            Interlocked.Increment(ref toolCompleted);
+                            break;
+                    }
+                });
+
+                var result = await session.SendAndWaitAsync(
+                    new MessageOptions
+                    {
+                        Prompt = """
+                            Run the native MCP validation now. Use emit_marker with {"value":"SDK_NATIVE"}.
+                            Final answer must include LUMI_MCP_NATIVE_OK and MCP_MARKER:NATIVE_GLOBAL:SDK_NATIVE.
+                            """
+                    },
+                    TimeSpan.FromMinutes(3),
+                    ct).ConfigureAwait(false);
+                finalContent = result?.Data?.Content;
+            }
+            finally
+            {
+                await copilotService.DisposeAndDeleteSessionAsync(session).ConfigureAwait(false);
+            }
+
+            var starts = File.Exists(logPath)
+                ? await File.ReadAllLinesAsync(logPath, ct).ConfigureAwait(false)
+                : [];
+            var serverStarts = starts.Count(line => line.StartsWith("NATIVE_GLOBAL|", StringComparison.Ordinal));
+            var hasExpectedOutput = finalContent?.Contains("MCP_MARKER:NATIVE_GLOBAL:SDK_NATIVE", StringComparison.Ordinal) == true;
+            var hasContract = finalContent?.Contains(ExpectedNativeMcpOutput, StringComparison.Ordinal) == true;
+            var hasToolLifecycle = toolStarted > 0 && toolCompleted > 0;
+            var startedServer = serverStarts > 0;
+            var createPassed = hasExpectedOutput && hasContract && hasToolLifecycle && startedServer;
+
+            Console.WriteLine($"Tool started: {toolStarted}");
+            Console.WriteLine($"Tool completed: {toolCompleted}");
+            Console.WriteLine($"Native MCP starts: {serverStarts}");
+            Console.WriteLine($"Final content: {finalContent}");
+
+            var resumeToolStarted = 0;
+            var resumeToolCompleted = 0;
+            var resumeServerStarts = 0;
+            string? resumeFinalContent = null;
+            var resumePassed = false;
+            if (createPassed)
+            {
+                string? resumeSessionId = null;
+                CopilotSession? seedSession = null;
+                CopilotSession? resumedSession = null;
+                try
+                {
+                    var seedConfig = SessionConfigBuilder.Build(
+                        systemPrompt: "You are seeding Lumi's native MCP resume validation. Reply normally.",
+                        model: model,
+                        workingDirectory: root,
+                        skillDirectories: null,
+                        customAgents: null,
+                        tools: null,
+                        mcpServers: [],
+                        reasoningEffort: null,
+                        userInputHandler: null,
+                        onPermission: null,
+                        hooks: null);
+                    seedSession = await copilotService.CreateSessionAsync(seedConfig, ct).ConfigureAwait(false);
+                    resumeSessionId = seedSession.SessionId;
+                    await seedSession.SendAndWaitAsync(
+                        new MessageOptions { Prompt = "Reply exactly MCP_RESUME_SEED_READY." },
+                        TimeSpan.FromMinutes(1),
+                        ct).ConfigureAwait(false);
+                    await seedSession.DisposeAsync().ConfigureAwait(false);
+                    seedSession = null;
+
+                    var resumeConfig = SessionConfigBuilder.BuildForResume(
+                        systemPrompt: $"""
+                            You are running Lumi's deterministic native MCP resume harness.
+                            You have an MCP tool named emit_marker available through the Copilot SDK MCP integration.
+                            You must call emit_marker with value "SDK_RESUME".
+                            After the tool call, include "{ExpectedNativeMcpResumeOutput}" and the exact MCP marker text in the final answer.
+                            """,
+                        model: model,
+                        workingDirectory: root,
+                        skillDirectories: null,
+                        customAgents: null,
+                        tools: null,
+                        mcpServers: mcpServers,
+                        reasoningEffort: null,
+                        userInputHandler: null,
+                        onPermission: null,
+                        hooks: null);
+                    resumedSession = await copilotService.ResumeSessionAsync(resumeSessionId, resumeConfig, ct).ConfigureAwait(false);
+                    using var resumeSub = resumedSession.On(evt =>
+                    {
+                        switch (evt)
+                        {
+                            case ToolExecutionStartEvent:
+                                Interlocked.Increment(ref resumeToolStarted);
+                                break;
+                            case ToolExecutionCompleteEvent:
+                                Interlocked.Increment(ref resumeToolCompleted);
+                                break;
+                        }
+                    });
+
+                    var resumeResult = await resumedSession.SendAndWaitAsync(
+                        new MessageOptions
+                        {
+                            Prompt = """
+                                Run the native MCP resume validation now. Use emit_marker with {"value":"SDK_RESUME"}.
+                                Final answer must include LUMI_MCP_NATIVE_RESUME_OK and MCP_MARKER:NATIVE_GLOBAL:SDK_RESUME.
+                                """
+                        },
+                        TimeSpan.FromMinutes(3),
+                        ct).ConfigureAwait(false);
+                    resumeFinalContent = resumeResult?.Data?.Content;
+                }
+                finally
+                {
+                    if (seedSession is not null)
+                        await seedSession.DisposeAsync().ConfigureAwait(false);
+
+                    await copilotService.DisposeAndDeleteSessionAsync(resumedSession).ConfigureAwait(false);
+
+                    if (resumedSession is null && !string.IsNullOrWhiteSpace(resumeSessionId))
+                        await copilotService.DeleteSessionAsync(resumeSessionId, ct).ConfigureAwait(false);
+                }
+
+                var startsAfterResume = File.Exists(logPath)
+                    ? await File.ReadAllLinesAsync(logPath, ct).ConfigureAwait(false)
+                    : [];
+                var totalStartsAfterResume = startsAfterResume.Count(line => line.StartsWith("NATIVE_GLOBAL|", StringComparison.Ordinal));
+                resumeServerStarts = Math.Max(0, totalStartsAfterResume - serverStarts);
+                var hasResumeExpectedOutput = resumeFinalContent?.Contains("MCP_MARKER:NATIVE_GLOBAL:SDK_RESUME", StringComparison.Ordinal) == true;
+                var hasResumeContract = resumeFinalContent?.Contains(ExpectedNativeMcpResumeOutput, StringComparison.Ordinal) == true;
+                var hasResumeToolLifecycle = resumeToolStarted > 0 && resumeToolCompleted > 0;
+                resumePassed = hasResumeExpectedOutput && hasResumeContract && hasResumeToolLifecycle && resumeServerStarts > 0;
+            }
+
+            Console.WriteLine($"Resume tool started: {resumeToolStarted}");
+            Console.WriteLine($"Resume tool completed: {resumeToolCompleted}");
+            Console.WriteLine($"Resume MCP starts: {resumeServerStarts}");
+            Console.WriteLine($"Resume final content: {resumeFinalContent}");
+
+            if (createPassed && resumePassed)
+            {
+                Console.WriteLine("PASS: native Copilot SDK MCP stress check completed.");
+                return 0;
+            }
+
+            Console.Error.WriteLine("FAIL: native MCP stress check did not satisfy the contract.");
+            if (!hasToolLifecycle)
+                Console.Error.WriteLine("- native MCP tool lifecycle events were not observed.");
+            if (!startedServer)
+                Console.Error.WriteLine("- fake MCP server did not start.");
+            if (!hasExpectedOutput)
+                Console.Error.WriteLine("- final response did not include MCP_MARKER:NATIVE_GLOBAL:SDK_NATIVE.");
+            if (!hasContract)
+                Console.Error.WriteLine($"- final response did not include {ExpectedNativeMcpOutput}.");
+            if (!resumePassed)
+                Console.Error.WriteLine("- native MCP resume validation did not satisfy the contract.");
+            return 1;
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
     }
 
     private static string EnsureFixtureDirectory()
