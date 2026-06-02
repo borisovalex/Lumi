@@ -172,6 +172,87 @@ public sealed class McpProxyRuntimeTests
     }
 
     [SkippableFact]
+    public async Task Proxy_ReturnsRawStartupOutputWhenServerWritesNonJson()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");
+
+        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-proxy-diagnostics-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var scriptPath = Path.Combine(root, "bad-mcp.ps1");
+            await File.WriteAllTextAsync(scriptPath, """
+                [Console]::Error.WriteLine('The argument ''${workspaceFolder}/run-mcp.ps1'' is not recognized as the name of a script file.')
+                [Console]::Error.WriteLine('Authorization: Bearer super-secret-token')
+                [Console]::Error.Flush()
+                Start-Sleep -Milliseconds 200
+                [Console]::Out.WriteLine('Usage: pwsh[.exe] [-File] ${workspaceFolder}/run-mcp.ps1 token=super-secret-token')
+                [Console]::Out.Flush()
+                exit 64
+                """);
+
+            await using var runtime = new McpProxyRuntime();
+            var remote = runtime.Register(new McpProxyServerDefinition(
+                "test:diagnostics",
+                "diagnostics-test",
+                new McpStdioServerConfig
+                {
+                    Command = GetPowerShellPath(),
+                    Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                    Cwd = root,
+                    Tools = ["*"]
+                }));
+
+            using var http = new HttpClient();
+            using var initialize = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}
+                """);
+
+            var error = initialize.RootElement.GetProperty("error");
+            Assert.Equal(-32000, error.GetProperty("code").GetInt32());
+            var message = error.GetProperty("message").GetString();
+            Assert.Contains("non-JSON output", message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Usage: pwsh", message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("${workspaceFolder}/run-mcp.ps1", message, StringComparison.Ordinal);
+            Assert.Contains("token=[redacted]", message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Authorization: [redacted]", message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("super-secret-token", message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
+    }
+
+    [SkippableFact]
+    public async Task Proxy_ReturnsActionableMessageWhenCommandIsMissing()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Windows command-not-found message is Windows-specific.");
+
+        await using var runtime = new McpProxyRuntime();
+        var remote = runtime.Register(new McpProxyServerDefinition(
+            "test:missing-command",
+            "missing-command-test",
+            new McpStdioServerConfig
+            {
+                Command = "lumi-missing-mcp-command-" + Guid.NewGuid().ToString("N"),
+                Cwd = Path.GetTempPath(),
+                Tools = ["*"]
+            }));
+
+        using var http = new HttpClient();
+        using var initialize = await PostJsonAsync(http, remote.Url, """
+            {"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}
+            """);
+
+        var message = initialize.RootElement.GetProperty("error").GetProperty("message").GetString();
+        Assert.Contains("Command 'lumi-missing-mcp-command-", message, StringComparison.Ordinal);
+        Assert.Contains("was not found", message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("add it to the PATH used by Lumi", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [SkippableFact]
     public async Task Proxy_RestartsStdioServerAfterUnexpectedExit()
     {
         Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");

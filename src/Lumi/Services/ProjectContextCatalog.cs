@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using GitHub.Copilot.SDK;
 using Lumi.Models;
@@ -88,6 +89,7 @@ public sealed record ProjectContextCatalogDiagnostic(string SourcePath, string M
 public static class ProjectContextCatalog
 {
     private static readonly StringComparer NameComparer = StringComparer.OrdinalIgnoreCase;
+    private static readonly Regex VariablePattern = new(@"\$\{([^}]+)\}", RegexOptions.Compiled);
 
     public static ProjectContextCatalogSnapshot Discover(
         string effectiveWorkingDirectory,
@@ -120,9 +122,15 @@ public static class ProjectContextCatalog
             {
                 using var stream = File.OpenRead(mcpJsonPath);
                 using var doc = JsonDocument.Parse(stream);
-                if (!doc.RootElement.TryGetProperty("servers", out var serverEntries)
-                    || serverEntries.ValueKind != JsonValueKind.Object)
+                if (!TryGetMcpServerEntries(doc.RootElement, out var serverEntries, out var rootWarning))
                     continue;
+
+                if (!string.IsNullOrWhiteSpace(rootWarning))
+                {
+                    diagnostics.Add(new ProjectContextCatalogDiagnostic(
+                        mcpJsonPath,
+                        rootWarning));
+                }
 
                 foreach (var serverEntry in serverEntries.EnumerateObject())
                 {
@@ -167,9 +175,9 @@ public static class ProjectContextCatalog
         config = null!;
         var type = GetOptionalStringProperty(server, "type")?.Trim().ToLowerInvariant() ?? "stdio";
 
-        if (type is "sse" or "http")
+        if (type is "sse" or "http" or "streamable-http")
         {
-            var url = GetOptionalStringProperty(server, "url");
+            var url = ExpandMcpVariables(GetOptionalStringProperty(server, "url"), contextDirectory)?.Trim();
             if (!IsValidRemoteMcpUrl(url))
             {
                 error = "remote MCP server requires an absolute http/https URL";
@@ -182,7 +190,7 @@ public static class ProjectContextCatalog
                 Tools = ["*"]
             };
 
-            if (!TryReadStringMap(server, "headers", out var headers, out error))
+            if (!TryReadStringMap(server, "headers", contextDirectory, out var headers, out error))
                 return false;
 
             if (headers.Count > 0)
@@ -199,14 +207,14 @@ public static class ProjectContextCatalog
             return false;
         }
 
-        var command = GetOptionalStringProperty(server, "command");
+        var command = ExpandMcpVariables(GetOptionalStringProperty(server, "command"), contextDirectory)?.Trim();
         if (string.IsNullOrWhiteSpace(command))
         {
             error = "stdio MCP server requires a non-empty command";
             return false;
         }
 
-        if (!TryReadStringArray(server, "args", out var args, out error))
+        if (!TryReadStringArray(server, "args", contextDirectory, out var args, out error))
             return false;
 
         var local = new McpStdioServerConfig
@@ -217,7 +225,7 @@ public static class ProjectContextCatalog
             Tools = ["*"]
         };
 
-        if (!TryReadStringMap(server, "env", out var env, out error))
+        if (!TryReadStringMap(server, "env", contextDirectory, out var env, out error))
             return false;
 
         if (env.Count > 0)
@@ -226,6 +234,32 @@ public static class ProjectContextCatalog
         config = local;
         error = null;
         return true;
+    }
+
+    private static bool TryGetMcpServerEntries(JsonElement root, out JsonElement serverEntries, out string? warning)
+    {
+        warning = null;
+        var hasServers = root.TryGetProperty("servers", out var servers)
+            && servers.ValueKind == JsonValueKind.Object;
+        var hasMcpServers = root.TryGetProperty("mcpServers", out var mcpServers)
+            && mcpServers.ValueKind == JsonValueKind.Object;
+
+        if (hasServers)
+        {
+            serverEntries = servers;
+            if (hasMcpServers)
+                warning = "Both 'servers' and 'mcpServers' are defined in MCP config; using 'servers'.";
+            return true;
+        }
+
+        if (hasMcpServers)
+        {
+            serverEntries = mcpServers;
+            return true;
+        }
+
+        serverEntries = default;
+        return false;
     }
 
     private static string? GetOptionalStringProperty(JsonElement element, string propertyName)
@@ -246,6 +280,7 @@ public static class ProjectContextCatalog
     private static bool TryReadStringArray(
         JsonElement element,
         string propertyName,
+        string contextDirectory,
         out List<string> values,
         out string? error)
     {
@@ -270,7 +305,7 @@ public static class ProjectContextCatalog
                 return false;
             }
 
-            values.Add(item.GetString() ?? "");
+            values.Add(ExpandMcpVariables(item.GetString() ?? "", contextDirectory) ?? "");
         }
 
         return true;
@@ -279,6 +314,7 @@ public static class ProjectContextCatalog
     private static bool TryReadStringMap(
         JsonElement element,
         string propertyName,
+        string contextDirectory,
         out Dictionary<string, string> values,
         out string? error)
     {
@@ -303,9 +339,50 @@ public static class ProjectContextCatalog
                 return false;
             }
 
-            values[entry.Name] = entry.Value.GetString() ?? "";
+            values[entry.Name] = ExpandMcpVariables(entry.Value.GetString() ?? "", contextDirectory) ?? "";
         }
 
         return true;
+    }
+
+    private static string? ExpandMcpVariables(string? value, string contextDirectory)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        return VariablePattern.Replace(value, match =>
+        {
+            var variable = match.Groups[1].Value;
+            if (variable.Equals("workspaceFolder", StringComparison.OrdinalIgnoreCase)
+                || variable.Equals("cwd", StringComparison.OrdinalIgnoreCase))
+            {
+                return contextDirectory;
+            }
+
+            if (variable.Equals("workspaceFolderBasename", StringComparison.OrdinalIgnoreCase))
+                return GetDirectoryName(contextDirectory);
+
+            if (variable.Equals("userHome", StringComparison.OrdinalIgnoreCase))
+                return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            if (variable.Equals("pathSeparator", StringComparison.OrdinalIgnoreCase))
+                return Path.PathSeparator.ToString();
+
+            const string envPrefix = "env:";
+            if (variable.StartsWith(envPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var name = variable[envPrefix.Length..];
+                return Environment.GetEnvironmentVariable(name) ?? "";
+            }
+
+            return match.Value;
+        });
+    }
+
+    private static string GetDirectoryName(string directory)
+    {
+        var trimmed = directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var name = Path.GetFileName(trimmed);
+        return string.IsNullOrEmpty(name) ? directory : name;
     }
 }

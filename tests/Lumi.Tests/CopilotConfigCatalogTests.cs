@@ -361,6 +361,112 @@ public sealed class CopilotConfigCatalogTests
     }
 
     [Fact]
+    public void ProjectContextCatalog_ExpandsVsCodeMcpVariables()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-project-context-mcp-variables-test-{Guid.NewGuid():N}");
+        var workDir = Path.Combine(tempRoot, "sherlock-diagnostics");
+        var envName = "LUMI_MCP_TEST_TOKEN_" + Guid.NewGuid().ToString("N");
+
+        try
+        {
+            Environment.SetEnvironmentVariable(envName, "test-token");
+            Directory.CreateDirectory(Path.Combine(workDir, ".vscode"));
+            File.WriteAllText(
+                Path.Combine(workDir, ".vscode", "mcp.json"),
+                $$"""
+                {
+                  "mcpServers": {
+                    "agentic-investigation-runner": {
+                      "type": "stdio",
+                      "command": "pwsh",
+                      "args": [
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-File",
+                        "${workspaceFolder}/src/Tools/AgenticInvestigationRunner/run-mcp.ps1",
+                        "${workspaceFolderBasename}"
+                      ],
+                      "env": {
+                        "RUNNER_TOKEN": "${env:{{envName}}}"
+                      }
+                    },
+                    "icm": {
+                      "type": "http",
+                      "url": "https://example.com/${workspaceFolderBasename}/mcp",
+                      "headers": {
+                        "Authorization": "Bearer ${env:{{envName}}}"
+                      }
+                    }
+                  }
+                }
+                """);
+
+            var catalog = ProjectContextCatalog.Discover(workDir, project: null, copilotRootOverride: Path.Combine(tempRoot, "missing-copilot"));
+
+            var local = Assert.IsType<McpStdioServerConfig>(
+                Assert.Single(catalog.McpServers, server => server.Name == "agentic-investigation-runner").Config);
+            Assert.Equal("pwsh", local.Command);
+            Assert.Equal($"{workDir}/src/Tools/AgenticInvestigationRunner/run-mcp.ps1", local.Args[3]);
+            Assert.Equal("sherlock-diagnostics", local.Args[4]);
+            Assert.NotNull(local.Env);
+            Assert.Equal("test-token", local.Env!["RUNNER_TOKEN"]);
+
+            var remote = Assert.IsType<McpHttpServerConfig>(
+                Assert.Single(catalog.McpServers, server => server.Name == "icm").Config);
+            Assert.Equal("https://example.com/sherlock-diagnostics/mcp", remote.Url);
+            Assert.NotNull(remote.Headers);
+            Assert.Equal("Bearer test-token", remote.Headers!["Authorization"]);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(envName, null);
+            if (Directory.Exists(tempRoot))
+                Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ProjectContextCatalog_WarnsWhenBothMcpRootsArePresent()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-project-context-mcp-roots-test-{Guid.NewGuid():N}");
+        var workDir = Path.Combine(tempRoot, "project");
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(workDir, ".vscode"));
+            File.WriteAllText(
+                Path.Combine(workDir, ".vscode", "mcp.json"),
+                """
+                {
+                  "servers": {
+                    "preferred": {
+                      "command": "preferred-command"
+                    }
+                  },
+                  "mcpServers": {
+                    "ignored": {
+                      "command": "ignored-command"
+                    }
+                  }
+                }
+                """);
+
+            var catalog = ProjectContextCatalog.Discover(workDir, project: null, copilotRootOverride: Path.Combine(tempRoot, "missing-copilot"));
+
+            var server = Assert.Single(catalog.McpServers);
+            Assert.Equal("preferred", server.Name);
+            Assert.Equal("preferred-command", Assert.IsType<McpStdioServerConfig>(server.Config).Command);
+            var diagnostic = Assert.Single(catalog.Diagnostics);
+            Assert.Contains("Both 'servers' and 'mcpServers'", diagnostic.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+                Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ProjectContextCatalogSnapshot_CopiesInputsAndUsesFirstDefinitionForLookup()
     {
         var skills = new List<CopilotSkillDefinition>

@@ -5,6 +5,8 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -28,6 +30,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private const int SuggestionHistoryScanLimit = 1000;
     private const int SuggestionHistorySummaryMaxItems = 24;
     private const int SuggestionHistoryDisplayMaxLength = 160;
+    private static readonly HttpClient McpDiagnosticsHttp = new()
+    {
+        Timeout = TimeSpan.FromSeconds(5)
+    };
+    private static readonly Regex SensitiveHttpDiagnosticPattern = new(
+        @"(?i)(authorization|token|api[_-]?key|secret|password)(\s*[=:]\s*)([^\s,;]+)",
+        RegexOptions.Compiled);
 
     private static readonly bool TranscriptDiagnosticsEnabled = Debugger.IsAttached
         || string.Equals(Environment.GetEnvironmentVariable("LUMI_TRANSCRIPT_DEBUG"), "1", StringComparison.Ordinal);
@@ -36,7 +45,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// Checks MCP server status after session creation and marks failed server chips with an error.
     /// Runs in the background so it doesn't block message sending.
     /// </summary>
-    private async Task CheckMcpServerStatusAsync(CopilotSession session, Guid chatId, CancellationToken ct)
+    private async Task CheckMcpServerStatusAsync(
+        CopilotSession session,
+        Guid chatId,
+        IReadOnlyDictionary<string, McpServerConfig> configuredServers,
+        CancellationToken ct)
     {
         try
         {
@@ -45,46 +58,215 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var mcpList = await session.Rpc.Mcp.ListAsync(ct);
             if (mcpList?.Servers is not { Count: > 0 }) return;
 
-            var failed = mcpList.Servers
-                .Where(s => s.Status == GitHub.Copilot.SDK.Rpc.McpServerStatus.Failed)
+            var unavailable = mcpList.Servers
+                .Where(s => s.Status is GitHub.Copilot.SDK.Rpc.McpServerStatus.Failed
+                    or GitHub.Copilot.SDK.Rpc.McpServerStatus.NeedsAuth)
                 .ToList();
 
-            if (failed.Count == 0) return;
+            if (unavailable.Count == 0) return;
+
+            var messages = new List<(string Name, string ErrorMessage)>();
+            foreach (var server in unavailable)
+            {
+                configuredServers.TryGetValue(server.Name, out var config);
+                var errorMessage = await BuildMcpStatusErrorMessageAsync(
+                    server.Name,
+                    server.Status,
+                    server.Error ?? "",
+                    config,
+                    ct).ConfigureAwait(false);
+                messages.Add((server.Name, errorMessage));
+            }
 
             Dispatcher.UIThread.Post(() =>
             {
                 if (CurrentChat?.Id != chatId)
                     return;
 
-                foreach (var server in failed)
+                foreach (var (name, errorMessage) in messages)
                 {
-                    var rawError = server.Error ?? "";
-
-                    // Build a user-friendly error message
-                    var errorMsg = rawError switch
-                    {
-                        _ when rawError.Contains("Connection closed", StringComparison.OrdinalIgnoreCase)
-                            => $"Server process exited immediately. Verify the command is installed and runnable.",
-                        _ when rawError.Contains("ENOENT", StringComparison.OrdinalIgnoreCase)
-                            => $"Command not found. Check that the MCP server is installed.",
-                        _ when string.IsNullOrWhiteSpace(rawError)
-                            => "Failed to connect to MCP server.",
-                        _ => rawError
-                    };
-
                     // Replace the active chip with an error-state chip
                     var existingChip = ActiveMcpChips.OfType<StrataComposerChip>()
-                        .FirstOrDefault(c => c.Name == server.Name);
+                        .FirstOrDefault(c => c.Name == name);
                     if (existingChip is not null)
                     {
                         var index = ActiveMcpChips.IndexOf(existingChip);
                         ActiveMcpChips[index] = new StrataComposerChip(
-                            server.Name, existingChip.Glyph, ErrorMessage: errorMsg);
+                            name, existingChip.Glyph, ErrorMessage: errorMessage);
                     }
                 }
             });
         }
         catch { /* best effort — don't let MCP status checks break the chat flow */ }
+    }
+
+    internal static async Task<string> BuildMcpStatusErrorMessageAsync(
+        string serverName,
+        GitHub.Copilot.SDK.Rpc.McpServerStatus status,
+        string rawError,
+        McpServerConfig? config,
+        CancellationToken ct)
+    {
+        if (status == GitHub.Copilot.SDK.Rpc.McpServerStatus.NeedsAuth)
+        {
+            return config is McpHttpServerConfig authRemote
+                ? $"Authentication required for MCP server '{serverName}' at {SanitizeMcpDiagnosticUrl(authRemote.Url)}. Configure the required headers or complete MCP OAuth login if this server supports it."
+                : $"Authentication required for MCP server '{serverName}'.";
+        }
+
+        if (config is McpHttpServerConfig remote)
+            return await BuildHttpMcpStatusErrorMessageAsync(serverName, rawError, remote, ct).ConfigureAwait(false);
+
+        if (config is McpStdioServerConfig local)
+            return BuildStdioMcpStatusErrorMessage(serverName, rawError, local);
+
+        return BuildGenericMcpStatusErrorMessage(rawError);
+    }
+
+    private static async Task<string> BuildHttpMcpStatusErrorMessageAsync(
+        string serverName,
+        string rawError,
+        McpHttpServerConfig remote,
+        CancellationToken ct)
+    {
+        if (ShouldProbeHttpMcpEndpoint(remote.Url))
+        {
+            var diagnostic = await ProbeHttpMcpEndpointAsync(remote, ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(diagnostic))
+                return $"HTTP MCP server '{serverName}' failed. {diagnostic}";
+        }
+
+        var safeUrl = SanitizeMcpDiagnosticUrl(remote.Url);
+        return string.IsNullOrWhiteSpace(rawError)
+            ? $"HTTP MCP server '{serverName}' failed to connect to {safeUrl}."
+            : $"HTTP MCP server '{serverName}' failed for {safeUrl}: {rawError}";
+    }
+
+    private static string BuildStdioMcpStatusErrorMessage(
+        string serverName,
+        string rawError,
+        McpStdioServerConfig local)
+    {
+        if (rawError.Contains("system cannot find the file specified", StringComparison.OrdinalIgnoreCase)
+            || rawError.Contains("command not found", StringComparison.OrdinalIgnoreCase)
+            || rawError.Contains("ENOENT", StringComparison.OrdinalIgnoreCase))
+        {
+            var cwd = string.IsNullOrWhiteSpace(local.Cwd) ? Environment.CurrentDirectory : local.Cwd;
+            return $"Command not found for MCP server '{serverName}': '{local.Command}'. Working directory: '{cwd}'. Install '{local.Command}' or add it to the PATH used by Lumi.";
+        }
+
+        return BuildGenericMcpStatusErrorMessage(rawError);
+    }
+
+    private static string BuildGenericMcpStatusErrorMessage(string rawError)
+    {
+        return rawError switch
+        {
+            _ when rawError.Contains("Connection closed", StringComparison.OrdinalIgnoreCase)
+                => "Server process exited immediately. Verify the command is installed and runnable.",
+            _ when string.IsNullOrWhiteSpace(rawError)
+                => "Failed to connect to MCP server.",
+            _ => rawError
+        };
+    }
+
+    private static async Task<string?> ProbeHttpMcpEndpointAsync(McpHttpServerConfig remote, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(remote.Url, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, uri)
+            {
+                Content = new StringContent(
+                    """
+                    {"jsonrpc":"2.0","id":"lumi-diagnostic","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lumi-diagnostic","version":"1"}}}
+                    """,
+                    Encoding.UTF8,
+                    "application/json")
+            };
+
+            // Diagnostic probes intentionally omit configured auth headers. The SDK
+            // already made the real MCP connection attempt; this probe is only for
+            // safe loopback endpoint/status discovery.
+
+            using var response = await McpDiagnosticsHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var body = await ReadHttpDiagnosticBodyAsync(response, ct).ConfigureAwait(false);
+            var status = $"{(int)response.StatusCode} {response.ReasonPhrase}".Trim();
+            var hint = response.StatusCode switch
+            {
+                HttpStatusCode.Unauthorized => " Authentication is required; configure headers/token for this MCP server.",
+                HttpStatusCode.Forbidden => " Authentication or permission is required for this MCP server.",
+                HttpStatusCode.NotFound => " Endpoint was not found; check the MCP URL and protocol for this server.",
+                HttpStatusCode.MethodNotAllowed => " Endpoint rejected POST; check whether this server uses a different MCP transport or URL.",
+                _ => ""
+            };
+            var summary = string.IsNullOrWhiteSpace(body) ? "" : $" Response: {body}";
+            return $"POST {SanitizeMcpDiagnosticUrl(remote.Url)} returned {status}.{hint}{summary}";
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested
+            && ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            return $"POST {SanitizeMcpDiagnosticUrl(remote.Url)} failed: {ex.Message}";
+        }
+    }
+
+    private static string SanitizeMcpDiagnosticUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return url;
+
+        try
+        {
+            var builder = new UriBuilder(uri)
+            {
+                UserName = "",
+                Password = "",
+                Query = "",
+                Fragment = ""
+            };
+
+            return builder.Uri.GetLeftPart(UriPartial.Path);
+        }
+        catch (UriFormatException)
+        {
+            return uri.GetLeftPart(UriPartial.Path);
+        }
+    }
+
+    private static bool ShouldProbeHttpMcpEndpoint(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            && uri.IsLoopback;
+    }
+
+    private static async Task<string> ReadHttpDiagnosticBodyAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var mediaType = response.Content.Headers.ContentType?.MediaType;
+            if (!string.IsNullOrWhiteSpace(mediaType)
+                && !mediaType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)
+                && !mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+                && !mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase))
+            {
+                return "";
+            }
+
+            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            body = body.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            body = SensitiveHttpDiagnosticPattern.Replace(body, "$1$2[redacted]");
+            return body.Length <= 300 ? body : body[..300] + "...";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     private void SetSessionSetupStatus(Chat chat, string statusText)
@@ -863,7 +1045,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 // Check MCP server status after session creation and surface errors
                 if (mcpServers is { Count: > 0 })
                 {
-                    _ = CheckMcpServerStatusAsync(createdSession, chat.Id, ct);
+                    _ = CheckMcpServerStatusAsync(createdSession, chat.Id, mcpServers, ct);
                 }
 
                 return true;
@@ -890,6 +1072,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     chat.CopilotSessionId, resumeConfig, sessionCt);
                 _activeSession = session;
                 SubscribeToSession(session, chat, workDir);
+                if (mcpServers is { Count: > 0 })
+                    _ = CheckMcpServerStatusAsync(session, chat.Id, mcpServers, ct);
 
                 // The SDK does not automatically change the session model on resume —
                 // ResumeSessionConfig.Model only sets a preference for the CLI process,
@@ -936,6 +1120,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             chat.CopilotSessionId = createdSession.SessionId;
             _activeSession = createdSession;
             SubscribeToSession(createdSession, chat, workDir);
+            if (mcpServers is { Count: > 0 })
+                _ = CheckMcpServerStatusAsync(createdSession, chat.Id, mcpServers, ct);
             _dataStore.MarkChatChanged(chat);
             await SaveChatAsync(chat, saveIndex: true);
             return true;
