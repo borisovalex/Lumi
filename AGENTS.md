@@ -129,6 +129,15 @@ cd src/Lumi && dotnet run
 
 No test project exists yet. StrataTheme is referenced via the `Strata/` git submodule.
 
+### Lumi MCP and UI Testing
+
+Lumi has two repo-configured MCP servers in `.vscode/mcp.json`:
+
+- `lumi-mcp` — Lumi-specific Debug/E2E control surface. Prefer this first for app workflows: launch isolated Debug Lumi, open/create chats, send messages, wait for idle, read transcript/activity, navigate pages, list/configure features, and run harnesses.
+- `avalonia-mcp` — generic Avalonia UI diagnostics. Use this for visual/layout checks, control trees, bindings, focus, styles, screenshots, and interaction validation.
+
+For efficient agent validation, use `lumi-mcp` for stateful Lumi actions and structured assertions, then cross-check visible UI and binding health with `avalonia-mcp`.
+
 ### UI Testing with Avalonia MCP
 
 Lumi has an Avalonia MCP server configured in `.vscode/mcp.json`. This gives you live access to the running app — you can see the UI, click buttons, type text, inspect controls, check bindings, and take screenshots. **Use it.**

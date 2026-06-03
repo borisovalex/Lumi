@@ -71,6 +71,7 @@
   <ItemGroup Condition="'$(Configuration)' != 'Debug'">
     <Compile Remove="OnboardingAgentTest.cs" />
     <Compile Remove="DebugAgentHarness.cs" />
+    <Compile Remove="Services\LumiDebugBridge.cs" />
     <Compile Remove="ViewModels\ChatViewModel.Debug.cs" />
   </ItemGroup>
 
