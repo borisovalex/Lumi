@@ -1654,6 +1654,35 @@ public partial class ChatViewModel
                     // Server-side history rewind (e.g., from message editing) — no UI action needed
                     break;
 
+                case McpOauthRequiredEvent oauthRequired:
+                    _ = StartMcpOauthLoginAndUpdateChipAsync(
+                        session,
+                        chat.Id,
+                        oauthRequired.Data.ServerName,
+                        BuildMcpOauthRequiredMessage(
+                            oauthRequired.Data.ServerName,
+                            oauthRequired.Data.ServerUrl),
+                        CancellationToken.None);
+                    break;
+
+                case SessionMcpServerStatusChangedEvent mcpStatusChanged:
+                    switch (mcpStatusChanged.Data.Status)
+                    {
+                        case McpServerStatusChangedStatus.Connected:
+                            ClearMcpOauthLoginAttempt(session, mcpStatusChanged.Data.ServerName);
+                            SetMcpChipError(chat.Id, mcpStatusChanged.Data.ServerName, null);
+                            break;
+                        case McpServerStatusChangedStatus.NeedsAuth:
+                            _ = StartMcpOauthLoginAndUpdateChipAsync(
+                                session,
+                                chat.Id,
+                                mcpStatusChanged.Data.ServerName,
+                                BuildMcpOauthRequiredMessage(mcpStatusChanged.Data.ServerName, null),
+                                CancellationToken.None);
+                            break;
+                    }
+                    break;
+
                 case SessionContextChangedEvent:
                 case PendingMessagesModifiedEvent:
                 case SessionHandoffEvent:
@@ -1762,6 +1791,7 @@ public partial class ChatViewModel
             sessionSubscription,
             assistantStream,
             reasoningStream,
+            new ActionDisposable(() => ClearMcpOauthLoginAttempts(session)),
             new ActionDisposable(() => _copilotService.CliProcessExited -= OnCliProcessExited));
     }
 

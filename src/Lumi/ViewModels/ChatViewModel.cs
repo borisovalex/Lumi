@@ -25,6 +25,22 @@ using ChatMessage = Lumi.Models.ChatMessage;
 
 namespace Lumi.ViewModels;
 
+internal enum McpOauthLoginAttemptStatus
+{
+    BrowserOpened,
+    ReusedCachedCredentials,
+    AlreadyStarted,
+    Failed
+}
+
+internal sealed record McpOauthLoginAttempt(McpOauthLoginAttemptStatus Status, string? ErrorMessage = null)
+{
+    public static McpOauthLoginAttempt BrowserOpened() => new(McpOauthLoginAttemptStatus.BrowserOpened);
+    public static McpOauthLoginAttempt ReusedCachedCredentials() => new(McpOauthLoginAttemptStatus.ReusedCachedCredentials);
+    public static McpOauthLoginAttempt AlreadyStarted() => new(McpOauthLoginAttemptStatus.AlreadyStarted);
+    public static McpOauthLoginAttempt Failed(string errorMessage) => new(McpOauthLoginAttemptStatus.Failed, errorMessage);
+}
+
 public partial class ChatViewModel : ObservableObject, IDisposable
 {
     private const int SuggestionHistoryScanLimit = 1000;
@@ -37,6 +53,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private static readonly Regex SensitiveHttpDiagnosticPattern = new(
         @"(?i)(authorization|token|api[_-]?key|secret|password)(\s*[=:]\s*)([^\s,;]+)",
         RegexOptions.Compiled);
+    private readonly object _mcpOauthLoginGate = new();
+    private readonly HashSet<string> _mcpOauthLoginAttempts = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly bool TranscriptDiagnosticsEnabled = Debugger.IsAttached
         || string.Equals(Environment.GetEnvironmentVariable("LUMI_TRANSCRIPT_DEBUG"), "1", StringComparison.Ordinal);
@@ -69,35 +87,154 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             foreach (var server in unavailable)
             {
                 configuredServers.TryGetValue(server.Name, out var config);
+                var oauthAttempt = server.Status == GitHub.Copilot.SDK.Rpc.McpServerStatus.NeedsAuth
+                    && config is McpHttpServerConfig
+                    ? await TryStartMcpOauthLoginAsync(session, server.Name, ct).ConfigureAwait(false)
+                    : null;
                 var errorMessage = await BuildMcpStatusErrorMessageAsync(
                     server.Name,
                     server.Status,
                     server.Error ?? "",
                     config,
                     ct).ConfigureAwait(false);
+                errorMessage = AppendMcpOauthLoginAttemptMessage(errorMessage, oauthAttempt);
                 messages.Add((server.Name, errorMessage));
             }
 
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (CurrentChat?.Id != chatId)
-                    return;
-
-                foreach (var (name, errorMessage) in messages)
-                {
-                    // Replace the active chip with an error-state chip
-                    var existingChip = ActiveMcpChips.OfType<StrataComposerChip>()
-                        .FirstOrDefault(c => c.Name == name);
-                    if (existingChip is not null)
-                    {
-                        var index = ActiveMcpChips.IndexOf(existingChip);
-                        ActiveMcpChips[index] = new StrataComposerChip(
-                            name, existingChip.Glyph, ErrorMessage: errorMessage);
-                    }
-                }
-            });
+            foreach (var (name, errorMessage) in messages)
+                SetMcpChipError(chatId, name, errorMessage);
         }
         catch { /* best effort — don't let MCP status checks break the chat flow */ }
+    }
+
+    private async Task<McpOauthLoginAttempt> TryStartMcpOauthLoginAsync(
+        CopilotSession session,
+        string serverName,
+        CancellationToken ct)
+    {
+        if (!TryMarkMcpOauthLoginAttempt(session, serverName))
+            return McpOauthLoginAttempt.AlreadyStarted();
+
+        try
+        {
+            var result = await session.Rpc.Mcp.Oauth.LoginAsync(
+                serverName,
+                forceReauth: null,
+                clientName: "Lumi",
+                callbackSuccessMessage: "You're signed in to the MCP server. You can close this tab and return to Lumi.",
+                cancellationToken: ct).ConfigureAwait(false);
+
+            if (!string.IsNullOrWhiteSpace(result.AuthorizationUrl))
+            {
+                Process.Start(new ProcessStartInfo(result.AuthorizationUrl)
+                {
+                    UseShellExecute = true
+                });
+                return McpOauthLoginAttempt.BrowserOpened();
+            }
+
+            return McpOauthLoginAttempt.ReusedCachedCredentials();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            ClearMcpOauthLoginAttempt(session, serverName);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            ClearMcpOauthLoginAttempt(session, serverName);
+            return McpOauthLoginAttempt.Failed(RedactSensitiveMcpDiagnosticText(FlattenExceptionMessages(ex)));
+        }
+    }
+
+    private Task StartMcpOauthLoginAndUpdateChipAsync(
+        CopilotSession session,
+        Guid chatId,
+        string serverName,
+        string baseErrorMessage,
+        CancellationToken ct)
+    {
+        return Task.Run(async () =>
+        {
+            var attempt = await TryStartMcpOauthLoginAsync(session, serverName, ct).ConfigureAwait(false);
+            SetMcpChipError(chatId, serverName, AppendMcpOauthLoginAttemptMessage(baseErrorMessage, attempt));
+        }, CancellationToken.None);
+    }
+
+    private bool TryMarkMcpOauthLoginAttempt(CopilotSession session, string serverName)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+            return false;
+
+        var key = BuildMcpOauthLoginAttemptKey(session, serverName);
+        lock (_mcpOauthLoginGate)
+            return _mcpOauthLoginAttempts.Add(key);
+    }
+
+    private void ClearMcpOauthLoginAttempt(CopilotSession session, string serverName)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+            return;
+
+        var key = BuildMcpOauthLoginAttemptKey(session, serverName);
+        lock (_mcpOauthLoginGate)
+            _mcpOauthLoginAttempts.Remove(key);
+    }
+
+    private void ClearMcpOauthLoginAttempts(CopilotSession session)
+    {
+        var sessionPrefix = session.SessionId + "\n";
+        lock (_mcpOauthLoginGate)
+            _mcpOauthLoginAttempts.RemoveWhere(key => key.StartsWith(sessionPrefix, StringComparison.Ordinal));
+    }
+
+    private static string BuildMcpOauthLoginAttemptKey(CopilotSession session, string serverName)
+        => session.SessionId + "\n" + serverName;
+
+    private void SetMcpChipError(Guid chatId, string serverName, string? errorMessage)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (CurrentChat?.Id != chatId)
+                return;
+
+            var existingChip = ActiveMcpChips.OfType<StrataComposerChip>()
+                .FirstOrDefault(c => c.Name == serverName);
+            if (existingChip is null)
+                return;
+
+            var index = ActiveMcpChips.IndexOf(existingChip);
+            ActiveMcpChips[index] = string.IsNullOrWhiteSpace(errorMessage)
+                ? new StrataComposerChip(serverName, existingChip.Glyph)
+                : new StrataComposerChip(serverName, existingChip.Glyph, ErrorMessage: errorMessage);
+        });
+    }
+
+    internal static string AppendMcpOauthLoginAttemptMessage(string message, McpOauthLoginAttempt? attempt)
+    {
+        if (attempt is null)
+            return message;
+
+        return attempt.Status switch
+        {
+            McpOauthLoginAttemptStatus.BrowserOpened =>
+                message + " Opened the MCP sign-in page in your browser; return to Lumi after completing it.",
+            McpOauthLoginAttemptStatus.ReusedCachedCredentials =>
+                message + " Reused existing MCP OAuth credentials; waiting for the server to reconnect.",
+            McpOauthLoginAttemptStatus.AlreadyStarted =>
+                message + " MCP sign-in is already in progress.",
+            McpOauthLoginAttemptStatus.Failed =>
+                message + " Failed to start MCP OAuth login: " + attempt.ErrorMessage,
+            _ => message
+        };
+    }
+
+    internal static string BuildMcpOauthRequiredMessage(string serverName, string? serverUrl)
+    {
+        var safeServerName = string.IsNullOrWhiteSpace(serverName) ? "unknown" : serverName;
+        return string.IsNullOrWhiteSpace(serverUrl)
+            ? $"Authentication required for MCP server '{safeServerName}'."
+            : $"Authentication required for MCP server '{safeServerName}' at {SanitizeMcpDiagnosticUrl(serverUrl)}.";
     }
 
     internal static async Task<string> BuildMcpStatusErrorMessageAsync(
@@ -260,7 +397,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
             var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             body = body.Replace('\r', ' ').Replace('\n', ' ').Trim();
-            body = SensitiveHttpDiagnosticPattern.Replace(body, "$1$2[redacted]");
+            body = RedactSensitiveMcpDiagnosticText(body);
             return body.Length <= 300 ? body : body[..300] + "...";
         }
         catch
@@ -268,6 +405,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             return "";
         }
     }
+
+    private static string RedactSensitiveMcpDiagnosticText(string text)
+        => SensitiveHttpDiagnosticPattern.Replace(text, "$1$2[redacted]");
 
     private void SetSessionSetupStatus(Chat chat, string statusText)
     {

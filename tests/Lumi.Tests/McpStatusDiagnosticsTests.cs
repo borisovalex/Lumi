@@ -63,6 +63,29 @@ public sealed class McpStatusDiagnosticsTests
         Assert.DoesNotContain("user:password", message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void AppendMcpOauthLoginAttemptMessage_ReportsOpenedBrowser()
+    {
+        var message = ChatViewModel.AppendMcpOauthLoginAttemptMessage(
+            "Authentication required.",
+            McpOauthLoginAttempt.BrowserOpened());
+
+        Assert.Contains("Opened the MCP sign-in page", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildMcpOauthRequiredMessage_SanitizesServerUrl()
+    {
+        var message = ChatViewModel.BuildMcpOauthRequiredMessage(
+            "fabric",
+            "https://user:password@example.com/mcp?token=super-secret-token");
+
+        Assert.Contains("Authentication required", message, StringComparison.Ordinal);
+        Assert.Contains("https://example.com/mcp", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("super-secret-token", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("user:password", message, StringComparison.Ordinal);
+    }
+
     private static int GetFreeLoopbackPort()
     {
         var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
