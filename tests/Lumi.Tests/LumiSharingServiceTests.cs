@@ -272,6 +272,109 @@ public sealed class LumiSharingServiceTests
         }
     }
 
+    [Fact]
+    public async Task SyncRepository_ClonesRemoteRepositoryWithSparseCheckout()
+    {
+        var tempRoot = CreateTempDirectory();
+        try
+        {
+            var remoteUrl = CreateRemoteSharingRepository(tempRoot);
+            var repository = new LumiSharedRepository
+            {
+                Name = "Remote",
+                Repository = remoteUrl,
+                LocalPath = Path.Combine(tempRoot, "clone")
+            };
+            var data = new AppData { SharedRepositories = [repository] };
+            var service = new LumiSharingService(new DataStore(data));
+
+            var result = await service.SyncRepositoryAsync(repository);
+
+            Assert.Equal(1, result.SkillCount);
+            Assert.Equal(SharedRepositorySyncStatuses.Synced, repository.LastSyncStatus);
+            Assert.True(GitService.IsGitRepo(repository.LocalPath));
+            Assert.Equal("true", RunGit(repository.LocalPath, "rev-parse --is-shallow-repository").Trim());
+            var sparsePaths = RunGit(repository.LocalPath, "sparse-checkout list");
+            Assert.Contains(".github", sparsePaths);
+            Assert.Contains(".vscode", sparsePaths);
+            Assert.Contains(".lumi", sparsePaths);
+        }
+        finally
+        {
+            DeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
+    public async Task SyncRepository_ReplacesEmptyInvalidRemoteCache()
+    {
+        var tempRoot = CreateTempDirectory();
+        try
+        {
+            var remoteUrl = CreateRemoteSharingRepository(tempRoot);
+            var clonePath = Path.Combine(tempRoot, "clone");
+            Directory.CreateDirectory(clonePath);
+            var repository = new LumiSharedRepository
+            {
+                Name = "Remote",
+                Repository = remoteUrl,
+                LocalPath = clonePath
+            };
+            var data = new AppData { SharedRepositories = [repository] };
+            var service = new LumiSharingService(new DataStore(data));
+
+            var result = await service.SyncRepositoryAsync(repository);
+
+            Assert.Equal(1, result.SkillCount);
+            Assert.Equal(SharedRepositorySyncStatuses.Synced, repository.LastSyncStatus);
+            Assert.True(File.Exists(Path.Combine(clonePath, ".github", "skills", "team-skill-source", "SKILL.md")));
+        }
+        finally
+        {
+            DeleteDirectory(tempRoot);
+        }
+    }
+
+    [Fact]
+    public async Task SyncDueRepositories_ConsolidatesDuplicateRepositoryConfigurations()
+    {
+        var tempRoot = CreateTempDirectory();
+        try
+        {
+            var remoteUrl = CreateRemoteSharingRepository(tempRoot);
+            var first = new LumiSharedRepository
+            {
+                Name = "Remote",
+                Repository = remoteUrl,
+                LocalPath = Path.Combine(tempRoot, "clone-a")
+            };
+            var duplicate = new LumiSharedRepository
+            {
+                Name = "Remote copy",
+                Repository = remoteUrl,
+                LocalPath = Path.Combine(tempRoot, "clone-b"),
+                LastSyncStatus = SharedRepositorySyncStatuses.Error,
+                LastSyncMessage = "Old failed clone"
+            };
+            var data = new AppData { SharedRepositories = [first, duplicate] };
+            var service = new LumiSharingService(new DataStore(data));
+
+            var result = await service.SyncDueRepositoriesAsync(force: true);
+
+            Assert.Equal(1, result.RepositoryCount);
+            Assert.Equal(1, result.SkillCount);
+            var repository = Assert.Single(data.SharedRepositories);
+            Assert.Equal(first.Id, repository.Id);
+            Assert.Single(data.Skills);
+            Assert.Single(data.Agents);
+            Assert.Single(data.McpServers);
+        }
+        finally
+        {
+            DeleteDirectory(tempRoot);
+        }
+    }
+
     [SkippableFact]
     public async Task SyncRepository_ImportsFromRealGitHubRepository()
     {
@@ -307,6 +410,22 @@ public sealed class LumiSharingServiceTests
         {
             DeleteDirectory(tempRoot);
         }
+    }
+
+    private static string CreateRemoteSharingRepository(string tempRoot)
+    {
+        var remotePath = Path.Combine(tempRoot, "remote.git");
+        var workPath = Path.Combine(tempRoot, "work");
+        RunGit(tempRoot, $"init --bare \"{remotePath}\"");
+        CreateSharedRepositoryFixture(workPath);
+        RunGit(workPath, "init");
+        RunGit(workPath, "checkout -b main");
+        RunGit(workPath, "add .");
+        RunGit(workPath, "-c user.name=\"Test\" -c user.email=\"test@example.com\" commit -m \"Initial\"");
+        RunGit(workPath, $"remote add origin \"{remotePath}\"");
+        RunGit(workPath, "push -u origin main");
+        RunGit(remotePath, "symbolic-ref HEAD refs/heads/main");
+        return new Uri(remotePath).AbsoluteUri;
     }
 
     private static void CreateSharedRepositoryFixture(string repoPath)

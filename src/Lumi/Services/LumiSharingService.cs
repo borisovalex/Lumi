@@ -30,6 +30,7 @@ public sealed class LumiSharingService : IDisposable
 {
     private static readonly StringComparer KeyComparer = StringComparer.OrdinalIgnoreCase;
     private static readonly TimeSpan GitCommandTimeout = TimeSpan.FromSeconds(90);
+    private static readonly string[] SharingSparseCheckoutPaths = [".github", ".vscode", ".lumi"];
     private readonly DataStore _dataStore;
     private readonly Func<DateTimeOffset> _nowProvider;
     private readonly SemaphoreSlim _syncLock = new(1, 1);
@@ -60,6 +61,7 @@ public sealed class LumiSharingService : IDisposable
         await _syncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var removedDuplicateCount = ConsolidateDuplicateRepositoryConfigurations();
             var now = _nowProvider();
             var repositories = _dataStore.Data.SharedRepositories
                 .Where(repository => repository.IsEnabled
@@ -76,7 +78,7 @@ public sealed class LumiSharingService : IDisposable
                 aggregate.Add(result);
             }
 
-            if (repositories.Count > 0)
+            if (repositories.Count > 0 || removedDuplicateCount > 0)
             {
                 await _dataStore.SaveAsync(cancellationToken).ConfigureAwait(false);
                 _dataStore.SyncSkillFiles();
@@ -101,6 +103,26 @@ public sealed class LumiSharingService : IDisposable
         await _syncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            var removedDuplicateCount = ConsolidateDuplicateRepositoryConfigurations();
+            if (!_dataStore.Data.SharedRepositories.Contains(repository))
+            {
+                var replacement = FindRepositoryByIdentity(repository);
+                if (replacement is null)
+                {
+                    if (removedDuplicateCount > 0)
+                    {
+                        await _dataStore.SaveAsync(cancellationToken).ConfigureAwait(false);
+                        _dataStore.SyncSkillFiles();
+                        CapabilitiesChanged?.Invoke();
+                        RepositoriesChanged?.Invoke();
+                    }
+
+                    return new LumiSharingSyncResult(0, 0, 0, 0, 0);
+                }
+
+                repository = replacement;
+            }
+
             var result = await SyncRepositoryCoreAsync(repository, cancellationToken).ConfigureAwait(false);
             await _dataStore.SaveAsync(cancellationToken).ConfigureAwait(false);
             _dataStore.SyncSkillFiles();
@@ -312,6 +334,50 @@ public sealed class LumiSharingService : IDisposable
         }
     }
 
+    private int ConsolidateDuplicateRepositoryConfigurations()
+    {
+        var removedCount = 0;
+        var duplicateGroups = _dataStore.Data.SharedRepositories
+            .Select(repository => new { Repository = repository, Key = GetRepositoryIdentityKey(repository) })
+            .Where(static item => !string.IsNullOrWhiteSpace(item.Key))
+            .GroupBy(static item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .Where(static group => group.Count() > 1)
+            .ToList();
+
+        foreach (var group in duplicateGroups)
+        {
+            var repositories = group.Select(static item => item.Repository).ToList();
+            var keep = repositories
+                .OrderByDescending(GetRepositoryKeepScore)
+                .ThenByDescending(static repository => repository.LastSyncAt ?? DateTimeOffset.MinValue)
+                .ThenBy(static repository => repository.CreatedAt)
+                .First();
+
+            foreach (var duplicate in repositories.Where(repository => repository != keep).ToList())
+            {
+                RemoveStaleSkills(duplicate.Id, []);
+                RemoveStaleAgents(duplicate.Id, []);
+                RemoveStaleMcpServers(duplicate.Id, []);
+                RemoveStaleMemories(duplicate.Id, []);
+                _dataStore.Data.SharedRepositories.Remove(duplicate);
+                DeleteDuplicateRepositoryCacheIfSafe(duplicate, keep);
+                removedCount++;
+            }
+        }
+
+        return removedCount;
+    }
+
+    private LumiSharedRepository? FindRepositoryByIdentity(LumiSharedRepository repository)
+    {
+        var key = GetRepositoryIdentityKey(repository);
+        if (string.IsNullOrWhiteSpace(key))
+            return null;
+
+        return _dataStore.Data.SharedRepositories.FirstOrDefault(candidate =>
+            string.Equals(GetRepositoryIdentityKey(candidate), key, StringComparison.OrdinalIgnoreCase));
+    }
+
     private async Task<MutableSyncCounts> SyncRepositoryCoreAsync(
         LumiSharedRepository repository,
         CancellationToken cancellationToken)
@@ -365,44 +431,142 @@ public sealed class LumiSharingService : IDisposable
         LumiSharedRepository repository,
         CancellationToken cancellationToken)
     {
+        var repositoryLocation = repository.Repository.Trim();
+        var repositoryIsRemote = LooksLikeRemoteGitReference(repositoryLocation);
         var source = ExpandLocalPath(repository.Repository);
-        if (!string.IsNullOrWhiteSpace(source) && Directory.Exists(source))
+        if (!repositoryIsRemote && !string.IsNullOrWhiteSpace(source) && Directory.Exists(source))
         {
             repository.LocalPath = source;
             return source;
         }
 
         var configuredLocalPath = ExpandLocalPath(repository.LocalPath);
-        if (!string.IsNullOrWhiteSpace(configuredLocalPath) && Directory.Exists(configuredLocalPath))
+        if (!repositoryIsRemote && !string.IsNullOrWhiteSpace(configuredLocalPath) && Directory.Exists(configuredLocalPath))
         {
             repository.LocalPath = configuredLocalPath;
             return configuredLocalPath;
         }
 
-        if (string.IsNullOrWhiteSpace(repository.Repository))
+        if (string.IsNullOrWhiteSpace(repositoryLocation))
             throw new InvalidOperationException("Repository path or URL is required.");
 
-        var clonePath = string.IsNullOrWhiteSpace(configuredLocalPath)
+        var usesDefaultClonePath = string.IsNullOrWhiteSpace(configuredLocalPath);
+        var clonePath = usesDefaultClonePath
             ? Path.Combine(DataStore.SharedRepositoriesDir, repository.Id.ToString("N"))
             : configuredLocalPath;
+
+        if (Directory.Exists(clonePath) && !IsGitRepositoryRoot(clonePath))
+        {
+            if (usesDefaultClonePath || IsDirectoryEmpty(clonePath))
+                DeleteDirectoryIfExists(clonePath);
+            else
+                throw new InvalidOperationException($"The sharing repository local path \"{clonePath}\" exists but is not a Git repository. Choose an empty folder or delete the folder before syncing.");
+        }
+        else if (repositoryIsRemote && usesDefaultClonePath && Directory.Exists(clonePath))
+        {
+            var existingClone = await PrepareExistingSharingCloneAsync(clonePath, cancellationToken).ConfigureAwait(false);
+            if (!existingClone.Success)
+                DeleteDirectoryIfExists(clonePath);
+        }
 
         if (!Directory.Exists(clonePath))
         {
             Directory.CreateDirectory(DataStore.SharedRepositoriesDir);
             Directory.CreateDirectory(Path.GetDirectoryName(clonePath)!);
-            var branchArgs = string.IsNullOrWhiteSpace(repository.Branch)
-                ? ""
-                : $" --branch {QuoteArgument(repository.Branch)}";
-            var result = await RunGitAsync(
-                DataStore.SharedRepositoriesDir,
-                $"clone{branchArgs} {QuoteArgument(repository.Repository)} {QuoteArgument(clonePath)}",
-                cancellationToken).ConfigureAwait(false);
+            var result = await CloneRepositoryAsync(repository, repositoryLocation, clonePath, cancellationToken).ConfigureAwait(false);
             if (!result.Success)
+            {
+                if (usesDefaultClonePath || IsDirectoryEmpty(clonePath) || !IsGitRepositoryRoot(clonePath))
+                    DeleteDirectoryIfExists(clonePath);
                 throw new InvalidOperationException($"Failed to clone repository: {result.Output}");
+            }
         }
 
         repository.LocalPath = clonePath;
         return clonePath;
+    }
+
+    private static async Task<GitCommandResult> PrepareExistingSharingCloneAsync(
+        string clonePath,
+        CancellationToken cancellationToken)
+    {
+        var workTree = await RunGitAsync(
+            clonePath,
+            "rev-parse --is-inside-work-tree",
+            cancellationToken).ConfigureAwait(false);
+        if (!workTree.Success || !string.Equals(workTree.Output.Trim(), "true", StringComparison.OrdinalIgnoreCase))
+            return new GitCommandResult(false, $"Cached sharing repository at \"{clonePath}\" is not a usable Git work tree: {workTree.Output}");
+
+        return await ConfigureSharingSparseCheckoutAsync(clonePath, workTree, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<GitCommandResult> CloneRepositoryAsync(
+        LumiSharedRepository repository,
+        string repositoryLocation,
+        string clonePath,
+        CancellationToken cancellationToken)
+    {
+        var branchArgs = string.IsNullOrWhiteSpace(repository.Branch)
+            ? ""
+            : $" --branch {QuoteArgument(repository.Branch)}";
+
+        if (!LooksLikeRemoteGitReference(repositoryLocation))
+        {
+            return await RunGitAsync(
+                DataStore.SharedRepositoriesDir,
+                $"clone{branchArgs} {QuoteArgument(repositoryLocation)} {QuoteArgument(clonePath)}",
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var optimizedArgs = $"clone --depth 1 --single-branch --no-tags --filter=blob:none --sparse{branchArgs} {QuoteArgument(repositoryLocation)} {QuoteArgument(clonePath)}";
+        var optimized = await RunGitAsync(DataStore.SharedRepositoriesDir, optimizedArgs, cancellationToken).ConfigureAwait(false);
+        if (optimized.Success)
+            return await ConfigureSharingSparseCheckoutAsync(clonePath, optimized, cancellationToken).ConfigureAwait(false);
+
+        if (!ShouldRetryCloneWithoutPartialClone(optimized.Output))
+            return optimized;
+
+        DeleteDirectoryIfExists(clonePath);
+        var sparseArgs = $"clone --depth 1 --single-branch --no-tags --sparse{branchArgs} {QuoteArgument(repositoryLocation)} {QuoteArgument(clonePath)}";
+        var sparse = await RunGitAsync(DataStore.SharedRepositoriesDir, sparseArgs, cancellationToken).ConfigureAwait(false);
+        if (sparse.Success)
+            return await ConfigureSharingSparseCheckoutAsync(clonePath, sparse, cancellationToken).ConfigureAwait(false);
+
+        if (!ShouldRetryCloneWithoutPartialClone(sparse.Output))
+            return sparse;
+
+        DeleteDirectoryIfExists(clonePath);
+        return await RunGitAsync(
+            DataStore.SharedRepositoriesDir,
+            $"clone --depth 1 --single-branch --no-tags{branchArgs} {QuoteArgument(repositoryLocation)} {QuoteArgument(clonePath)}",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<GitCommandResult> ConfigureSharingSparseCheckoutAsync(
+        string repositoryPath,
+        GitCommandResult cloneResult,
+        CancellationToken cancellationToken)
+    {
+        var paths = string.Join(' ', SharingSparseCheckoutPaths.Select(QuoteArgument));
+        var sparse = await RunGitAsync(
+            repositoryPath,
+            $"sparse-checkout set --skip-checks -- {paths}",
+            cancellationToken).ConfigureAwait(false);
+        if (sparse.Success)
+            return cloneResult;
+
+        if (sparse.Output.Contains("unknown option", StringComparison.OrdinalIgnoreCase)
+            || sparse.Output.Contains("usage:", StringComparison.OrdinalIgnoreCase))
+        {
+            sparse = await RunGitAsync(
+                repositoryPath,
+                $"sparse-checkout set -- {paths}",
+                cancellationToken).ConfigureAwait(false);
+            if (sparse.Success)
+                return cloneResult;
+        }
+
+        return new GitCommandResult(false, $"Cloned repository but could not configure sparse checkout for Lumi sharing paths: {sparse.Output}");
     }
 
     private static async Task<string?> PullIfGitRepositoryAsync(string repositoryPath, CancellationToken cancellationToken)
@@ -1104,6 +1268,119 @@ public sealed class LumiSharingService : IDisposable
     private static string ToLocalPath(string path)
         => path.Replace('/', Path.DirectorySeparatorChar).Replace('\\', Path.DirectorySeparatorChar);
 
+    private static string GetRepositoryIdentityKey(LumiSharedRepository repository)
+    {
+        var location = NormalizeRepositoryLocation(repository.Repository);
+        if (string.IsNullOrWhiteSpace(location))
+            location = NormalizeRepositoryLocation(repository.LocalPath);
+        if (string.IsNullOrWhiteSpace(location))
+            return "";
+
+        return $"{location}\n{NormalizeBranchName(repository.Branch)}";
+    }
+
+    private static string NormalizeRepositoryLocation(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var trimmed = value.Trim().TrimEnd('/', '\\');
+        if (LooksLikeRemoteGitReference(trimmed))
+        {
+            return trimmed.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                ? trimmed[..^4]
+                : trimmed;
+        }
+
+        var expanded = ExpandLocalPath(trimmed);
+        return string.IsNullOrWhiteSpace(expanded)
+            ? trimmed
+            : expanded.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    private static string NormalizeBranchName(string? value)
+    {
+        var branch = value?.Trim() ?? "";
+        const string headsPrefix = "refs/heads/";
+        return branch.StartsWith(headsPrefix, StringComparison.OrdinalIgnoreCase)
+            ? branch[headsPrefix.Length..]
+            : branch;
+    }
+
+    private static int GetRepositoryKeepScore(LumiSharedRepository repository)
+    {
+        var score = repository.IsEnabled ? 100 : 0;
+        if (string.Equals(repository.LastSyncStatus, SharedRepositorySyncStatuses.Synced, StringComparison.OrdinalIgnoreCase))
+            score += 100_000;
+        else if (string.Equals(repository.LastSyncStatus, SharedRepositorySyncStatuses.Syncing, StringComparison.OrdinalIgnoreCase))
+            score += 50_000;
+        else if (string.Equals(repository.LastSyncStatus, SharedRepositorySyncStatuses.Error, StringComparison.OrdinalIgnoreCase))
+            score -= 1_000;
+
+        if (!string.IsNullOrWhiteSpace(repository.LocalPath))
+            score += IsGitRepositoryRoot(repository.LocalPath) ? 5_000 : 500;
+
+        score += (repository.LastSkillCount + repository.LastAgentCount + repository.LastMcpServerCount + repository.LastMemoryCount) * 10;
+        return score;
+    }
+
+    private static void DeleteDuplicateRepositoryCacheIfSafe(LumiSharedRepository duplicate, LumiSharedRepository keep)
+    {
+        if (!IsAppManagedSharingRepositoryPath(duplicate.LocalPath))
+            return;
+
+        if (PathsEqual(duplicate.LocalPath, keep.LocalPath))
+            return;
+
+        try
+        {
+            DeleteDirectoryIfExists(duplicate.LocalPath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Trace.TraceWarning($"[Sharing] Could not delete duplicate repository cache '{duplicate.LocalPath}': {ex.Message}");
+        }
+    }
+
+    private static bool IsAppManagedSharingRepositoryPath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetFullPath(DataStore.SharedRepositoriesDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool PathsEqual(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            return false;
+
+        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsGitRepositoryRoot(string path)
+        => !string.IsNullOrWhiteSpace(path)
+           && Directory.Exists(path)
+           && (Directory.Exists(Path.Combine(path, ".git")) || File.Exists(Path.Combine(path, ".git")));
+
+    private static bool IsDirectoryEmpty(string path)
+        => !Directory.Exists(path) || !Directory.EnumerateFileSystemEntries(path).Any();
+
+    private static void DeleteDirectoryIfExists(string path)
+    {
+        if (Directory.Exists(path))
+            Directory.Delete(path, recursive: true);
+    }
+
+    private static bool ShouldRetryCloneWithoutPartialClone(string output)
+        => output.Contains("unknown option", StringComparison.OrdinalIgnoreCase)
+           || output.Contains("filter", StringComparison.OrdinalIgnoreCase)
+           || output.Contains("sparse", StringComparison.OrdinalIgnoreCase)
+           || output.Contains("server does not support", StringComparison.OrdinalIgnoreCase);
+
     private static string GetPublishPath(
         SharedCapabilitySource? source,
         LumiSharedRepository repository,
@@ -1139,6 +1416,7 @@ public sealed class LumiSharingService : IDisposable
     private static bool LooksLikeRemoteGitReference(string value)
         => value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
            || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
            || value.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase)
            || value.Contains('@') && value.Contains(':');
 
@@ -1195,6 +1473,7 @@ public sealed class LumiSharingService : IDisposable
         try
         {
             process.Start();
+            process.StandardInput.Close();
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
         {

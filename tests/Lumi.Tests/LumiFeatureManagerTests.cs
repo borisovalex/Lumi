@@ -227,6 +227,29 @@ public sealed class LumiFeatureManagerTests
     }
 
     [Fact]
+    public void ManageSharing_CreateRejectsDuplicateRepositoryAndBranch()
+    {
+        var repository = new LumiSharedRepository
+        {
+            Name = "Team",
+            Repository = "https://msazure.visualstudio.com/DefaultCollection/One/_git/sherlock-diagnostics",
+            Branch = "data-sharing"
+        };
+        var data = new AppData { SharedRepositories = [repository] };
+        var manager = new LumiFeatureManager(new DataStore(data));
+
+        var result = manager.ManageSharing(
+            "create",
+            name: "Team Copy",
+            repository: "https://msazure.visualstudio.com/DefaultCollection/One/_git/sherlock-diagnostics.git",
+            branch: "refs/heads/data-sharing");
+
+        Assert.False(result.DataChanged);
+        Assert.Contains("already configured", result.Message);
+        Assert.Single(data.SharedRepositories);
+    }
+
+    [Fact]
     public void ManageSharing_PublishSkillWritesToRepository()
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-feature-sharing-{Guid.NewGuid():N}");

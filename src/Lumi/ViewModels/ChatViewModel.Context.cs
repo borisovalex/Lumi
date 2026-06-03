@@ -265,7 +265,10 @@ public partial class ChatViewModel
         {
             ActiveMcpServerNames.Clear();
             ActiveMcpChips.Clear();
-            foreach (var server in _dataStore.Data.McpServers.Where(s => s.IsEnabled))
+            foreach (var server in _dataStore.Data.McpServers
+                         .Where(s => s.IsEnabled)
+                         .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+                         .Select(static group => group.First()))
             {
                 ActiveMcpServerNames.Add(server.Name);
                 ActiveMcpChips.Add(new StrataTheme.Controls.StrataComposerChip(server.Name));

@@ -264,6 +264,12 @@ public class LumiSharedRepository : INotifyPropertyChanged
     [JsonIgnore]
     public string CountsDisplay => $"{LastSkillCount} skills · {LastAgentCount} Lumis · {LastMcpServerCount} MCPs · {LastMemoryCount} memories";
 
+    [JsonIgnore]
+    public string BranchDisplay => string.IsNullOrWhiteSpace(Branch) ? "Default branch" : Branch;
+
+    [JsonIgnore]
+    public string LocalPathDisplay => string.IsNullOrWhiteSpace(LocalPath) ? "Not cloned yet" : LocalPath;
+
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 

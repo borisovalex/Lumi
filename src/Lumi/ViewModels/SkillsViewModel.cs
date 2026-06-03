@@ -115,7 +115,7 @@ public partial class SkillsViewModel : ObservableObject
      }
 
     [RelayCommand]
-    private void SaveSkill()
+    private async Task SaveSkill()
     {
         if (string.IsNullOrWhiteSpace(EditName)) return;
 
@@ -138,8 +138,8 @@ public partial class SkillsViewModel : ObservableObject
             _dataStore.Data.Skills.Add(skill);
         }
 
-        _ = _dataStore.SaveAsync();
-        _dataStore.SyncSkillFiles();
+        await _dataStore.SaveAsync();
+        await _dataStore.SyncSkillFilesAsync();
         IsEditing = false;
         RefreshList();
         SkillsChanged?.Invoke();
@@ -152,14 +152,14 @@ public partial class SkillsViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void DeleteSkill(Skill skill)
+    private async Task DeleteSkill(Skill skill)
     {
         var result = new LumiFeatureManager(_dataStore).ManageSkills("delete", identifier: skill.Id.ToString());
         if (!result.DataChanged)
             return;
 
-        _ = _dataStore.SaveAsync();
-        _dataStore.SyncSkillFiles();
+        await _dataStore.SaveAsync();
+        await _dataStore.SyncSkillFilesAsync();
         if (SelectedSkill == skill)
         {
             SelectedSkill = null;

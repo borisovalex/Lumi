@@ -453,8 +453,8 @@
   "Settings_AIModelsDesc": "הגדרת מודל והתנהגות הבינה המלאכותית",
   "Settings_PrivacyData": "פרטיות ונתונים",
   "Settings_PrivacyDataDesc": "ניהול הנתונים והעדפות הפרטיות שלך",
-  "Settings_Sharing": "שיתוף",
-  "Settings_SharingDesc": "טעינה ופרסום של יכולות צוות ממאגרי git",
+  "Settings_Sharing": "יכולות משותפות",
+  "Settings_SharingDesc": "חיבור מאגרי Git שמשתפים יכולות Lumi עם אנשים אחרים",
   "Settings_About": "אודות",
   "Settings_AboutDesc": "גרסה, מצב עדכונים ופרטים על לומי",
 

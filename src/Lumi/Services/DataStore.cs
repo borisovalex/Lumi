@@ -675,35 +675,48 @@ public class DataStore
     /// Writes all skills as markdown files in the skills directory for the Copilot SDK.
     /// </summary>
     public void SyncSkillFiles()
+        => SyncSkillFilesAsync().GetAwaiter().GetResult();
+
+    public async Task SyncSkillFilesAsync(CancellationToken cancellationToken = default)
     {
         Directory.CreateDirectory(SkillsDir);
 
-        // Remove old files that no longer correspond to a skill
-        var existingFiles = Directory.GetFiles(SkillsDir, "*.md");
-        var validFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var skill in _data.Skills)
+        await _skillSyncLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            var safeName = SanitizeFileName(skill.Name);
-            var fileName = $"{safeName}.md";
-            validFileNames.Add(fileName);
+            // Remove old files that no longer correspond to a skill
+            var existingFiles = Directory.GetFiles(SkillsDir, "*.md");
+            var validFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            var filePath = Path.Combine(SkillsDir, fileName);
-            var content = $"""
-                ---
-                name: {skill.Name}
-                description: {skill.Description}
-                ---
+            foreach (var skill in _data.Skills)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var safeName = SanitizeFileName(skill.Name);
+                var fileName = $"{safeName}.md";
+                validFileNames.Add(fileName);
 
-                {skill.Content}
-                """;
-            File.WriteAllText(filePath, content);
+                var filePath = Path.Combine(SkillsDir, fileName);
+                var content = $"""
+                    ---
+                    name: {skill.Name}
+                    description: {skill.Description}
+                    ---
+
+                    {skill.Content}
+                    """;
+                await File.WriteAllTextAsync(filePath, content, cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (var file in existingFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!validFileNames.Contains(Path.GetFileName(file)))
+                    File.Delete(file);
+            }
         }
-
-        foreach (var file in existingFiles)
+        finally
         {
-            if (!validFileNames.Contains(Path.GetFileName(file)))
-                File.Delete(file);
+            _skillSyncLock.Release();
         }
     }
 

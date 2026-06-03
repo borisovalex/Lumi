@@ -694,10 +694,10 @@ public partial class ChatViewModel
                 [Description("Automatic sync interval in minutes. Minimum is 5.")] int? updateIntervalMinutes = null,
                 [Description("Whether the sharing repository should be enabled for periodic sync.")] bool? isEnabled = null,
                 [Description("For publish action: skill, lumi, or memory. Not needed for publish_skill/publish_lumi/publish_memory.")] string? itemType = null,
-                [Description("For publish actions: skill name/ID, Lumi name/ID, or memory key/ID to share.")] string? itemIdentifier = null,
-                [Description("Optional text query for list filtering.")] string? query = null) =>
+                 [Description("For publish actions: skill name/ID, Lumi name/ID, or memory key/ID to share.")] string? itemIdentifier = null,
+                 [Description("Optional text query for list filtering.")] string? query = null) =>
             {
-                var result = FeatureManager.ManageSharing(
+                var result = await FeatureManager.ManageSharingAsync(
                     action,
                     repositoryIdentifier,
                     name,
@@ -708,7 +708,8 @@ public partial class ChatViewModel
                     isEnabled,
                     itemType,
                     itemIdentifier,
-                    query);
+                    query,
+                    GetCurrentCancellationToken());
                 return await ApplyFeatureChangeAsync(result);
             },
             "manage_sharing",
@@ -722,7 +723,7 @@ public partial class ChatViewModel
             return result.Message;
 
         if (result.SyncSkillFiles)
-            _dataStore.SyncSkillFiles();
+            await _dataStore.SyncSkillFilesAsync(GetCurrentCancellationToken());
 
         await SaveIndexAsync();
 
@@ -776,7 +777,8 @@ public partial class ChatViewModel
         var skillsById = _dataStore.Data.Skills.ToDictionary(skill => skill.Id);
         var projectContextCatalog = GetProjectContextCatalog();
         var externalSkillsByName = projectContextCatalog.Skills
-            .ToDictionary(skill => skill.Name, StringComparer.OrdinalIgnoreCase);
+            .GroupBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
         var filteredIds = new List<Guid>();
         var filteredExternalNames = new List<string>();
         var chips = new List<StrataTheme.Controls.StrataComposerChip>();
@@ -848,7 +850,8 @@ public partial class ChatViewModel
 
         var availableGlyphs = AvailableMcpChips
             .OfType<StrataTheme.Controls.StrataComposerChip>()
-            .ToDictionary(chip => chip.Name, chip => chip.Glyph, StringComparer.OrdinalIgnoreCase);
+            .GroupBy(chip => chip.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().Glyph, StringComparer.OrdinalIgnoreCase);
 
         activeNames = activeNames
             .Distinct(StringComparer.OrdinalIgnoreCase)

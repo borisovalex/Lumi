@@ -1418,7 +1418,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // Restore active MCP servers from chat (default to all enabled for older chats with no saved selection)
             ActiveMcpServerNames.Clear();
             ActiveMcpChips.Clear();
-            var enabledServersByName = new Dictionary<string, McpServer>(StringComparer.Ordinal);
+            var enabledServersByName = new Dictionary<string, McpServer>(StringComparer.OrdinalIgnoreCase);
             foreach (var server in _dataStore.Data.McpServers)
             {
                 if (server.IsEnabled && !enabledServersByName.ContainsKey(server.Name))

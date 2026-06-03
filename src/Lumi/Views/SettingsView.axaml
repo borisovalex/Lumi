@@ -342,7 +342,7 @@
         </sc:StrataSettingGroup>
       </StackPanel>
 
-    <!-- ═══ Page 6: Sharing ═══ -->
+    <!-- ═══ Page 6: Shared Capabilities ═══ -->
       <views:SharingView x:Name="PageSharing"
                          Classes="motion-surface"
                          IsVisible="False"

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Avalonia.Threading;
@@ -7,7 +8,6 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Lumi.Models;
 using Lumi.Services;
-using StrataSearch;
 
 namespace Lumi.ViewModels;
 
@@ -20,18 +20,29 @@ public partial class SharingViewModel : ObservableObject, IDisposable
 
     [ObservableProperty] private LumiSharedRepository? _selectedRepository;
     [ObservableProperty] private bool _isEditing;
+    [ObservableProperty] private bool _isRepositoryDialogOpen;
     [ObservableProperty] private bool _isBusy;
     [ObservableProperty] private string _editName = "";
     [ObservableProperty] private string _editRepository = "";
     [ObservableProperty] private string _editBranch = "";
     [ObservableProperty] private int _editUpdateIntervalMinutes = 60;
     [ObservableProperty] private bool _editIsEnabled = true;
-    [ObservableProperty] private string _statusMessage = "Add a team repository to sync shared Lumi capabilities.";
-    [ObservableProperty] private string _capabilitySearchQuery = "";
-    [ObservableProperty] private ShareableCapabilityItem? _selectedCapability;
+    [ObservableProperty] private string _statusMessage = "Connect Git repositories that share Lumi capabilities with other people.";
 
     public ObservableCollection<LumiSharedRepository> Repositories { get; } = [];
-    public ObservableCollection<ShareableCapabilityItem> ShareableCapabilities { get; } = [];
+    public bool HasRepositories => Repositories.Count > 0;
+    public bool HasNoRepositories => !HasRepositories;
+    public bool HasSelectedRepository => SelectedRepository is not null;
+    public bool CanSyncSelectedRepository => SelectedRepository is not null && !IsBusy;
+    public bool CanEditSelectedRepository => SelectedRepository is not null && !IsBusy;
+    public bool CanDeleteSelectedRepository => SelectedRepository is not null && !IsBusy;
+    public string RepositorySummary => Repositories.Count == 1
+        ? "1 repository connected"
+        : $"{Repositories.Count} repositories connected";
+    public string RepositoryDialogTitle => SelectedRepository is null
+        ? "Add capability repository"
+        : "Edit capability repository";
+    public string RepositoryDialogDescription => "Paste a Git URL or choose a local folder. Lumi imports shared skills, Lumis, MCP servers, and memories from this repo.";
 
     public SharingViewModel(DataStore dataStore)
         : this(dataStore, new LumiSharingService(dataStore))
@@ -52,7 +63,6 @@ public partial class SharingViewModel : ObservableObject, IDisposable
     public void RefreshFromStore()
     {
         RefreshRepositories();
-        RefreshShareableCapabilities();
     }
 
     [RelayCommand]
@@ -65,7 +75,32 @@ public partial class SharingViewModel : ObservableObject, IDisposable
         EditUpdateIntervalMinutes = 60;
         EditIsEnabled = true;
         IsEditing = true;
-        StatusMessage = "Paste a git URL or local repository path that contains shared Lumi capabilities.";
+        IsRepositoryDialogOpen = true;
+        StatusMessage = "Add a Git repository that contains shared Lumi capabilities.";
+        NotifyRepositoryStateChanged();
+    }
+
+    [RelayCommand]
+    private void EditSelectedRepository()
+    {
+        if (SelectedRepository is null)
+            return;
+
+        OpenRepositoryDialog(SelectedRepository);
+    }
+
+    [RelayCommand]
+    private void OpenRepositoryDialog(LumiSharedRepository? repository)
+    {
+        if (repository is null)
+            return;
+
+        SelectedRepository = repository;
+        SyncEditorFromRepository(repository);
+        IsEditing = true;
+        IsRepositoryDialogOpen = true;
+        StatusMessage = $"Editing {repository.DisplayName}.";
+        NotifyRepositoryStateChanged();
     }
 
     [RelayCommand]
@@ -83,7 +118,17 @@ public partial class SharingViewModel : ObservableObject, IDisposable
             ? BuildDefaultRepositoryName(repositoryLocation)
             : EditName.Trim();
 
+        var branch = EditBranch.Trim();
         var repository = SelectedRepository;
+        var duplicate = FindDuplicateRepository(repositoryLocation, branch, repository?.Id);
+        if (duplicate is not null)
+        {
+            SelectedRepository = duplicate;
+            StatusMessage = $"That repo and branch are already connected as {duplicate.DisplayName}.";
+            NotifyRepositoryStateChanged();
+            return;
+        }
+
         if (repository is null)
         {
             repository = new LumiSharedRepository();
@@ -92,13 +137,14 @@ public partial class SharingViewModel : ObservableObject, IDisposable
 
         repository.Name = name;
         repository.Repository = repositoryLocation;
-        repository.Branch = EditBranch.Trim();
+        repository.Branch = branch;
         repository.UpdateIntervalMinutes = interval;
         repository.IsEnabled = EditIsEnabled;
         repository.NextSyncAt = repository.IsEnabled ? null : repository.NextSyncAt;
 
         await _dataStore.SaveAsync();
         IsEditing = false;
+        IsRepositoryDialogOpen = false;
         SelectedRepository = repository;
         RefreshRepositories();
         StatusMessage = $"Saved {repository.DisplayName}. Syncing now...";
@@ -109,8 +155,10 @@ public partial class SharingViewModel : ObservableObject, IDisposable
     private void CancelEdit()
     {
         IsEditing = false;
+        IsRepositoryDialogOpen = false;
         if (SelectedRepository is not null)
             SyncEditorFromRepository(SelectedRepository);
+        NotifyRepositoryStateChanged();
     }
 
     [RelayCommand]
@@ -147,13 +195,19 @@ public partial class SharingViewModel : ObservableObject, IDisposable
     private async Task SyncAllRepositoriesAsync()
     {
         IsBusy = true;
-        StatusMessage = "Syncing all enabled sharing repositories...";
+        StatusMessage = "Syncing connected repositories...";
         try
         {
             var result = await _sharingService.SyncDueRepositoriesAsync(force: true);
             RefreshFromStore();
-            StatusMessage = $"Synced {result.RepositoryCount} repositories: {result.SkillCount} skills, {result.AgentCount} Lumis, {result.McpServerCount} MCPs, {result.MemoryCount} memories.";
+            StatusMessage = result.RepositoryCount == 1
+                ? "Synced 1 repository."
+                : $"Synced {result.RepositoryCount} repositories.";
             CapabilitiesChanged?.Invoke();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            StatusMessage = ex.Message;
         }
         finally
         {
@@ -162,56 +216,23 @@ public partial class SharingViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
-    private async Task PublishSelectedCapabilityAsync()
+    private async Task SyncRepositoryItemAsync(LumiSharedRepository? repository)
     {
-        if (SelectedRepository is null)
-        {
-            StatusMessage = "Choose a sharing repository first.";
+        if (repository is null)
             return;
-        }
 
-        if (SelectedCapability is null)
-        {
-            StatusMessage = "Choose a skill, Lumi, or memory to publish.";
+        SelectedRepository = repository;
+        await SyncRepositoryAsync(repository);
+    }
+
+    [RelayCommand]
+    private async Task DeleteRepositoryItemAsync(LumiSharedRepository? repository)
+    {
+        if (repository is null)
             return;
-        }
 
-        IsBusy = true;
-        try
-        {
-            LumiSharingPublishResult result;
-            switch (SelectedCapability.Item)
-            {
-                case Skill skill:
-                    result = await _sharingService.PublishSkillAsync(SelectedRepository, skill);
-                    break;
-                case LumiAgent agent:
-                    result = await _sharingService.PublishAgentAsync(SelectedRepository, agent);
-                    break;
-                case Memory memory:
-                    result = await _sharingService.PublishMemoryAsync(SelectedRepository, memory);
-                    break;
-                default:
-                    StatusMessage = "This capability type cannot be published yet.";
-                    return;
-            }
-
-            await _dataStore.SaveAsync();
-            _dataStore.SyncSkillFiles();
-            RefreshShareableCapabilities();
-            StatusMessage = result.RelativePath is { Length: > 0 }
-                ? $"{result.Message} Updated {result.RelativePath} and staged it in git when available."
-                : result.Message;
-            CapabilitiesChanged?.Invoke();
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.IO.IOException or UnauthorizedAccessException)
-        {
-            StatusMessage = ex.Message;
-        }
-        finally
-        {
-            IsBusy = false;
-        }
+        SelectedRepository = repository;
+        await DeleteSelectedRepositoryAsync();
     }
 
     private async Task SyncRepositoryAsync(LumiSharedRepository repository)
@@ -222,9 +243,13 @@ public partial class SharingViewModel : ObservableObject, IDisposable
             var result = await _sharingService.SyncRepositoryAsync(repository);
             RefreshFromStore();
             StatusMessage = result.RepositoryCount == 0
-                ? $"No repositories synced."
-                : $"Synced {repository.DisplayName}: {result.SkillCount} skills, {result.AgentCount} Lumis, {result.McpServerCount} MCPs, {result.MemoryCount} memories.";
+                ? "No repositories synced."
+                : $"Synced {repository.DisplayName}.";
             CapabilitiesChanged?.Invoke();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            StatusMessage = ex.Message;
         }
         finally
         {
@@ -239,52 +264,29 @@ public partial class SharingViewModel : ObservableObject, IDisposable
         foreach (var repository in _dataStore.Data.SharedRepositories.OrderBy(static repository => repository.DisplayName))
             Repositories.Add(repository);
 
+        LumiSharedRepository? selected = null;
         if (selectedId is not null)
-            SelectedRepository = _dataStore.Data.SharedRepositories.FirstOrDefault(repository => repository.Id == selectedId);
-    }
-
-    private void RefreshShareableCapabilities()
-    {
-        var query = CapabilitySearchQuery;
-        var items = _dataStore.Data.Skills
-            .Select(skill => ShareableCapabilityItem.FromSkill(skill))
-            .Concat(_dataStore.Data.Agents.Select(agent => ShareableCapabilityItem.FromAgent(agent)))
-            .Concat(_dataStore.Data.Memories
-                .Where(static memory => string.Equals(memory.Status, MemoryStatuses.Active, StringComparison.OrdinalIgnoreCase))
-                .Select(memory => ShareableCapabilityItem.FromMemory(memory)))
-            .ToList();
-
-        var ranked = string.IsNullOrWhiteSpace(query)
-            ? items.OrderBy(static item => item.TypeSort).ThenBy(static item => item.Name).ToArray()
-            : SearchPipeline.Rank(
-                items,
-                query,
-                static item =>
-                [
-                    SearchField.Primary(item.Name, 3.2),
-                    new SearchField(item.TypeLabel, 1.6),
-                    new SearchField(item.Description, 1.2),
-                    new SearchField(item.SourceLabel, 0.8)
-                ],
-                static item => new SearchSortMetadata(Text: item.Name));
-
-        var selectedKey = SelectedCapability?.StableKey;
-        ShareableCapabilities.Clear();
-        foreach (var item in ranked)
-            ShareableCapabilities.Add(item);
-        SelectedCapability = ShareableCapabilities.FirstOrDefault(item => item.StableKey == selectedKey);
+            selected = _dataStore.Data.SharedRepositories.FirstOrDefault(repository => repository.Id == selectedId);
+        selected ??= Repositories.FirstOrDefault();
+        SelectedRepository = selected;
+        NotifyRepositoryStateChanged();
     }
 
     partial void OnSelectedRepositoryChanged(LumiSharedRepository? value)
     {
         if (value is null)
+        {
+            NotifyRepositoryStateChanged();
             return;
+        }
 
         SyncEditorFromRepository(value);
-        IsEditing = true;
+        NotifyRepositoryStateChanged();
     }
 
-    partial void OnCapabilitySearchQueryChanged(string value) => RefreshShareableCapabilities();
+    partial void OnIsBusyChanged(bool value) => NotifyRepositoryStateChanged();
+
+    partial void OnIsRepositoryDialogOpenChanged(bool value) => NotifyRepositoryStateChanged();
 
     private void SyncEditorFromRepository(LumiSharedRepository repository)
     {
@@ -326,53 +328,74 @@ public partial class SharingViewModel : ObservableObject, IDisposable
         return string.IsNullOrWhiteSpace(name) ? "Shared repository" : name;
     }
 
+    private LumiSharedRepository? FindDuplicateRepository(string repositoryLocation, string branch, Guid? excludedId)
+    {
+        var key = BuildRepositoryIdentityKey(repositoryLocation, branch);
+        return _dataStore.Data.SharedRepositories.FirstOrDefault(repository =>
+            repository.Id != excludedId
+            && string.Equals(BuildRepositoryIdentityKey(repository.Repository, repository.Branch), key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string BuildRepositoryIdentityKey(string repositoryLocation, string branch)
+        => $"{NormalizeRepositoryLocation(repositoryLocation)}\n{NormalizeBranchName(branch)}";
+
+    private static string NormalizeRepositoryLocation(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var trimmed = value.Trim().TrimEnd('/', '\\');
+        if (LooksLikeRemoteGitReference(trimmed))
+        {
+            return trimmed.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                ? trimmed[..^4]
+                : trimmed;
+        }
+
+        try
+        {
+            return Path.GetFullPath(Environment.ExpandEnvironmentVariables(trimmed))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return trimmed;
+        }
+    }
+
+    private static string NormalizeBranchName(string? value)
+    {
+        var branch = value?.Trim() ?? "";
+        const string headsPrefix = "refs/heads/";
+        return branch.StartsWith(headsPrefix, StringComparison.OrdinalIgnoreCase)
+            ? branch[headsPrefix.Length..]
+            : branch;
+    }
+
+    private static bool LooksLikeRemoteGitReference(string value)
+        => value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase)
+           || value.Contains('@') && value.Contains(':');
+
+    private void NotifyRepositoryStateChanged()
+    {
+        OnPropertyChanged(nameof(HasRepositories));
+        OnPropertyChanged(nameof(HasNoRepositories));
+        OnPropertyChanged(nameof(HasSelectedRepository));
+        OnPropertyChanged(nameof(CanSyncSelectedRepository));
+        OnPropertyChanged(nameof(CanEditSelectedRepository));
+        OnPropertyChanged(nameof(CanDeleteSelectedRepository));
+        OnPropertyChanged(nameof(RepositorySummary));
+        OnPropertyChanged(nameof(RepositoryDialogTitle));
+        OnPropertyChanged(nameof(RepositoryDialogDescription));
+    }
+
     public void Dispose()
     {
         _sharingService.RepositoriesChanged -= OnSharingServiceRepositoriesChanged;
         _sharingService.CapabilitiesChanged -= OnSharingServiceCapabilitiesChanged;
         _sharingService.Dispose();
     }
-}
-
-public sealed class ShareableCapabilityItem
-{
-    private ShareableCapabilityItem(
-        string typeLabel,
-        int typeSort,
-        string name,
-        string description,
-        string sourceLabel,
-        string stableKey,
-        object item)
-    {
-        TypeLabel = typeLabel;
-        TypeSort = typeSort;
-        Name = name;
-        Description = description;
-        SourceLabel = sourceLabel;
-        StableKey = stableKey;
-        Item = item;
-    }
-
-    public string TypeLabel { get; }
-    public int TypeSort { get; }
-    public string Name { get; }
-    public string Description { get; }
-    public string SourceLabel { get; }
-    public string StableKey { get; }
-    public object Item { get; }
-
-    public static ShareableCapabilityItem FromSkill(Skill skill)
-        => new("Skill", 0, skill.Name, skill.Description, GetSourceLabel(skill.SharedSource), $"skill:{skill.Id:N}", skill);
-
-    public static ShareableCapabilityItem FromAgent(LumiAgent agent)
-        => new("Lumi", 1, agent.Name, agent.Description, GetSourceLabel(agent.SharedSource), $"lumi:{agent.Id:N}", agent);
-
-    public static ShareableCapabilityItem FromMemory(Memory memory)
-        => new("Memory", 2, memory.Key, memory.Content, GetSourceLabel(memory.SharedSource), $"memory:{memory.Id:N}", memory);
-
-    private static string GetSourceLabel(SharedCapabilitySource? source)
-        => source is null || string.IsNullOrWhiteSpace(source.RepositoryName)
-            ? "Personal"
-            : $"Shared · {source.RepositoryName}";
 }

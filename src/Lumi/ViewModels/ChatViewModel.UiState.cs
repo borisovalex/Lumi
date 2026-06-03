@@ -363,6 +363,8 @@ public partial class ChatViewModel
         // Build MCP chips: Lumi-configured MCPs + project-scoped MCPs from .vscode/mcp.json
         var mcpChips = _dataStore.Data.McpServers
             .Where(s => s.IsEnabled)
+            .GroupBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(static group => group.First())
             .OrderBy(s => s.Name)
             .Select(s => new StrataComposerChip(s.Name))
             .ToList();

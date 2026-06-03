@@ -452,8 +452,8 @@
   "Settings_AIModelsDesc": "Configure AI model and behavior",
   "Settings_PrivacyData": "Privacy & Data",
   "Settings_PrivacyDataDesc": "Manage your data and privacy preferences",
-  "Settings_Sharing": "Sharing",
-  "Settings_SharingDesc": "Load and publish team capabilities from git repositories",
+  "Settings_Sharing": "Shared Capabilities",
+  "Settings_SharingDesc": "Connect Git repos that share Lumi capabilities with other people",
   "Settings_About": "About",
   "Settings_AboutDesc": "Version, update status, and Lumi details",
 

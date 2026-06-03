@@ -142,22 +142,57 @@ public sealed class LumiFeatureManager
         string? itemType = null,
         string? itemIdentifier = null,
         string? query = null)
+        => ManageSharingAsync(
+                action,
+                repositoryIdentifier,
+                name,
+                repository,
+                branch,
+                localPath,
+                updateIntervalMinutes,
+                isEnabled,
+                itemType,
+                itemIdentifier,
+                query)
+            .GetAwaiter()
+            .GetResult();
+
+    public async Task<FeatureChangeResult> ManageSharingAsync(
+        string action,
+        string? repositoryIdentifier = null,
+        string? name = null,
+        string? repository = null,
+        string? branch = null,
+        string? localPath = null,
+        int? updateIntervalMinutes = null,
+        bool? isEnabled = null,
+        string? itemType = null,
+        string? itemIdentifier = null,
+        string? query = null,
+        CancellationToken cancellationToken = default)
     {
         var normalizedAction = NormalizeOrNull(action)?.ToLowerInvariant() ?? "";
-        return normalizedAction switch
+        try
         {
-            "list" or "show" or "search" => new FeatureChangeResult(ListSharingRepositories(query ?? repositoryIdentifier)),
-            "create" or "add" or "new" => CreateSharingRepository(name, repository, branch, localPath, updateIntervalMinutes, isEnabled),
-            "update" or "edit" or "rename" or "modify" => UpdateSharingRepository(repositoryIdentifier, name, repository, branch, localPath, updateIntervalMinutes, isEnabled),
-            "delete" or "remove" => DeleteSharingRepository(repositoryIdentifier),
-            "sync" or "sync_repository" or "sync-repository" => SyncSharingRepository(repositoryIdentifier),
-            "sync_all" or "sync-all" => SyncSharingRepository(null),
-            "publish" or "share" => PublishSharedCapability(repositoryIdentifier, itemType, itemIdentifier),
-            "publish_skill" or "share_skill" or "publish-skill" or "share-skill" => PublishSharedCapability(repositoryIdentifier, SharedCapabilityTypes.Skill, itemIdentifier),
-            "publish_lumi" or "share_lumi" or "publish-lumi" or "share-lumi" => PublishSharedCapability(repositoryIdentifier, SharedCapabilityTypes.Lumi, itemIdentifier),
-            "publish_memory" or "share_memory" or "publish-memory" or "share-memory" => PublishSharedCapability(repositoryIdentifier, SharedCapabilityTypes.Memory, itemIdentifier),
-            _ => Failure($"Unsupported sharing action: {action ?? "(null)"}. Use list, create, update, delete, sync, sync_all, publish_skill, publish_lumi, or publish_memory.")
-        };
+            return normalizedAction switch
+            {
+                "list" or "show" or "search" => new FeatureChangeResult(ListSharingRepositories(query ?? repositoryIdentifier)),
+                "create" or "add" or "new" => CreateSharingRepository(name, repository, branch, localPath, updateIntervalMinutes, isEnabled),
+                "update" or "edit" or "rename" or "modify" => UpdateSharingRepository(repositoryIdentifier, name, repository, branch, localPath, updateIntervalMinutes, isEnabled),
+                "delete" or "remove" => await DeleteSharingRepositoryAsync(repositoryIdentifier, cancellationToken).ConfigureAwait(false),
+                "sync" or "sync_repository" or "sync-repository" => await SyncSharingRepositoryAsync(repositoryIdentifier, cancellationToken).ConfigureAwait(false),
+                "sync_all" or "sync-all" => await SyncSharingRepositoryAsync(null, cancellationToken).ConfigureAwait(false),
+                "publish" or "share" => await PublishSharedCapabilityAsync(repositoryIdentifier, itemType, itemIdentifier, cancellationToken).ConfigureAwait(false),
+                "publish_skill" or "share_skill" or "publish-skill" or "share-skill" => await PublishSharedCapabilityAsync(repositoryIdentifier, SharedCapabilityTypes.Skill, itemIdentifier, cancellationToken).ConfigureAwait(false),
+                "publish_lumi" or "share_lumi" or "publish-lumi" or "share-lumi" => await PublishSharedCapabilityAsync(repositoryIdentifier, SharedCapabilityTypes.Lumi, itemIdentifier, cancellationToken).ConfigureAwait(false),
+                "publish_memory" or "share_memory" or "publish-memory" or "share-memory" => await PublishSharedCapabilityAsync(repositoryIdentifier, SharedCapabilityTypes.Memory, itemIdentifier, cancellationToken).ConfigureAwait(false),
+                _ => Failure($"Unsupported sharing action: {action ?? "(null)"}. Use list, create, update, delete, sync, sync_all, publish_skill, publish_lumi, or publish_memory.")
+            };
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            return Failure(ex.Message);
+        }
     }
 
     public FeatureChangeResult ManageJobs(
@@ -1244,6 +1279,11 @@ public sealed class LumiFeatureManager
         if (normalizedRepository is null && normalizedLocalPath is null)
             return Failure("A sharing repository URL/path or localPath is required.");
 
+        var normalizedBranch = NormalizeOrNull(branch) ?? "";
+        var duplicate = FindDuplicateSharingRepository(normalizedRepository ?? normalizedLocalPath!, normalizedBranch, excludedId: null);
+        if (duplicate is not null)
+            return Failure($"That repository and branch are already configured as \"{duplicate.DisplayName}\" ({duplicate.Id}). Use update or sync for the existing sharing repository instead of creating another copy.");
+
         var displayName = NormalizeOrNull(name) ?? BuildDefaultSharingRepositoryName(normalizedRepository ?? normalizedLocalPath!);
         if (HasConflictingLabel(_dataStore.Data.SharedRepositories, displayName, static item => item.DisplayName, static item => item.Id))
             return Failure($"A sharing repository named \"{displayName}\" already exists.");
@@ -1253,7 +1293,7 @@ public sealed class LumiFeatureManager
             Name = displayName,
             Repository = normalizedRepository ?? normalizedLocalPath!,
             LocalPath = normalizedLocalPath ?? "",
-            Branch = NormalizeOrNull(branch) ?? "",
+            Branch = normalizedBranch,
             UpdateIntervalMinutes = Math.Max(5, updateIntervalMinutes ?? 60),
             IsEnabled = isEnabled ?? true
         };
@@ -1296,6 +1336,14 @@ public sealed class LumiFeatureManager
             sharedRepository.Branch = NormalizeOrNull(branch) ?? "";
         if (localPath is not null)
             sharedRepository.LocalPath = NormalizeOrNull(localPath) ?? "";
+
+        var duplicate = FindDuplicateSharingRepository(
+            string.IsNullOrWhiteSpace(sharedRepository.Repository) ? sharedRepository.LocalPath : sharedRepository.Repository,
+            sharedRepository.Branch,
+            sharedRepository.Id);
+        if (duplicate is not null)
+            return Failure($"That repository and branch are already configured as \"{duplicate.DisplayName}\" ({duplicate.Id}).");
+
         if (updateIntervalMinutes is not null)
             sharedRepository.UpdateIntervalMinutes = Math.Max(5, updateIntervalMinutes.Value);
         if (isEnabled is not null)
@@ -1308,30 +1356,42 @@ public sealed class LumiFeatureManager
     }
 
     private FeatureChangeResult DeleteSharingRepository(string? repositoryIdentifier)
+        => DeleteSharingRepositoryAsync(repositoryIdentifier).GetAwaiter().GetResult();
+
+    private async Task<FeatureChangeResult> DeleteSharingRepositoryAsync(
+        string? repositoryIdentifier,
+        CancellationToken cancellationToken = default)
     {
         var lookup = ResolveSharingRepository(repositoryIdentifier);
         if (!lookup.Success)
             return Failure(lookup.Error!);
 
         var sharedRepository = lookup.Item!;
-        new LumiSharingService(_dataStore).RemoveRepositoryAsync(sharedRepository).GetAwaiter().GetResult();
+        await new LumiSharingService(_dataStore)
+            .RemoveRepositoryAsync(sharedRepository, cancellationToken)
+            .ConfigureAwait(false);
         return Success($"Sharing repository deleted: {sharedRepository.DisplayName}.");
     }
 
     private FeatureChangeResult SyncSharingRepository(string? repositoryIdentifier)
+        => SyncSharingRepositoryAsync(repositoryIdentifier).GetAwaiter().GetResult();
+
+    private async Task<FeatureChangeResult> SyncSharingRepositoryAsync(
+        string? repositoryIdentifier,
+        CancellationToken cancellationToken = default)
     {
         var sharingService = new LumiSharingService(_dataStore);
         LumiSharingSyncResult result;
         if (NormalizeOrNull(repositoryIdentifier) is null)
         {
-            result = sharingService.SyncDueRepositoriesAsync(force: true).GetAwaiter().GetResult();
+            result = await sharingService.SyncDueRepositoriesAsync(force: true, cancellationToken).ConfigureAwait(false);
         }
         else
         {
             var lookup = ResolveSharingRepository(repositoryIdentifier);
             if (!lookup.Success)
                 return Failure(lookup.Error!);
-            result = sharingService.SyncRepositoryAsync(lookup.Item!).GetAwaiter().GetResult();
+            result = await sharingService.SyncRepositoryAsync(lookup.Item!, cancellationToken).ConfigureAwait(false);
         }
 
         return Success($"Sharing sync complete: {result.RepositoryCount} repo(s), {result.SkillCount} skill(s), {result.AgentCount} Lumi(s), {result.McpServerCount} MCP server(s), {result.MemoryCount} memor(y/ies).", syncSkillFiles: true);
@@ -1341,6 +1401,13 @@ public sealed class LumiFeatureManager
         string? repositoryIdentifier,
         string? itemType,
         string? itemIdentifier)
+        => PublishSharedCapabilityAsync(repositoryIdentifier, itemType, itemIdentifier).GetAwaiter().GetResult();
+
+    private async Task<FeatureChangeResult> PublishSharedCapabilityAsync(
+        string? repositoryIdentifier,
+        string? itemType,
+        string? itemIdentifier,
+        CancellationToken cancellationToken = default)
     {
         var repositoryLookup = ResolveSharingRepository(repositoryIdentifier);
         if (!repositoryLookup.Success)
@@ -1363,7 +1430,7 @@ public sealed class LumiFeatureManager
                 var lookup = ResolveByIdOrLabel(_dataStore.Data.Skills, itemIdentifier, static skill => skill.Id, static skill => skill.Name, "skill");
                 if (!lookup.Success)
                     return Failure(lookup.Error!);
-                publishResult = sharingService.PublishSkillAsync(repository, lookup.Item!).GetAwaiter().GetResult();
+                publishResult = await sharingService.PublishSkillAsync(repository, lookup.Item!, cancellationToken).ConfigureAwait(false);
                 break;
             }
             case SharedCapabilityTypes.Lumi:
@@ -1371,7 +1438,7 @@ public sealed class LumiFeatureManager
                 var lookup = ResolveByIdOrLabel(_dataStore.Data.Agents, itemIdentifier, static agent => agent.Id, static agent => agent.Name, "Lumi");
                 if (!lookup.Success)
                     return Failure(lookup.Error!);
-                publishResult = sharingService.PublishAgentAsync(repository, lookup.Item!).GetAwaiter().GetResult();
+                publishResult = await sharingService.PublishAgentAsync(repository, lookup.Item!, cancellationToken).ConfigureAwait(false);
                 break;
             }
             case SharedCapabilityTypes.Memory:
@@ -1379,7 +1446,7 @@ public sealed class LumiFeatureManager
                 var lookup = ResolveByIdOrLabel(_dataStore.Data.Memories, itemIdentifier, static memory => memory.Id, static memory => memory.Key, "memory");
                 if (!lookup.Success)
                     return Failure(lookup.Error!);
-                publishResult = sharingService.PublishMemoryAsync(repository, lookup.Item!).GetAwaiter().GetResult();
+                publishResult = await sharingService.PublishMemoryAsync(repository, lookup.Item!, cancellationToken).ConfigureAwait(false);
                 break;
             }
             default:
@@ -1515,6 +1582,65 @@ public sealed class LumiFeatureManager
             name = name[..^4];
         return string.IsNullOrWhiteSpace(name) ? "Shared repository" : name;
     }
+
+    private LumiSharedRepository? FindDuplicateSharingRepository(
+        string repositoryLocation,
+        string branch,
+        Guid? excludedId)
+    {
+        var key = BuildSharingRepositoryIdentityKey(repositoryLocation, branch);
+        return _dataStore.Data.SharedRepositories.FirstOrDefault(repository =>
+            repository.Id != excludedId
+            && string.Equals(
+                BuildSharingRepositoryIdentityKey(
+                    string.IsNullOrWhiteSpace(repository.Repository) ? repository.LocalPath : repository.Repository,
+                    repository.Branch),
+                key,
+                StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string BuildSharingRepositoryIdentityKey(string repositoryLocation, string branch)
+        => $"{NormalizeSharingRepositoryLocation(repositoryLocation)}\n{NormalizeSharingBranch(branch)}";
+
+    private static string NormalizeSharingRepositoryLocation(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "";
+
+        var trimmed = value.Trim().TrimEnd('/', '\\');
+        if (LooksLikeRemoteGitReference(trimmed))
+        {
+            return trimmed.EndsWith(".git", StringComparison.OrdinalIgnoreCase)
+                ? trimmed[..^4]
+                : trimmed;
+        }
+
+        try
+        {
+            return Path.GetFullPath(Environment.ExpandEnvironmentVariables(trimmed))
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return trimmed;
+        }
+    }
+
+    private static string NormalizeSharingBranch(string? value)
+    {
+        var branch = value?.Trim() ?? "";
+        const string headsPrefix = "refs/heads/";
+        return branch.StartsWith(headsPrefix, StringComparison.OrdinalIgnoreCase)
+            ? branch[headsPrefix.Length..]
+            : branch;
+    }
+
+    private static bool LooksLikeRemoteGitReference(string value)
+        => value.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("file://", StringComparison.OrdinalIgnoreCase)
+           || value.StartsWith("ssh://", StringComparison.OrdinalIgnoreCase)
+           || value.Contains('@') && value.Contains(':');
 
     private static string? NormalizeSharedCapabilityType(string? itemType)
     {
