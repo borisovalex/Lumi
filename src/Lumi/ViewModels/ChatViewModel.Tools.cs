@@ -410,7 +410,26 @@ public partial class ChatViewModel
                 var skill = _dataStore.Data.Skills
                     .FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
                 if (skill is not null)
-                    return $"# {skill.Name}\n\n{skill.Content}";
+                {
+                    var content = $"# {skill.Name}\n\n{skill.Content}";
+                    if (HasSharingRepositories
+                        && skill.Name.Equals("Lumi Feature Manager", StringComparison.OrdinalIgnoreCase))
+                    {
+                        content += """
+
+
+                            ## Sharing Tools
+
+                            A sharing repository is configured. When the user explicitly asks to share, publish, or sync team capabilities, use `manage_sharing`.
+
+                            - `manage_sharing` can list/sync configured sharing repositories and publish explicit skills, Lumis, or memories.
+                            - Publishing writes to a git repository, so confirm the exact item and repository before publishing private or personal content.
+                            - Do not suggest or use sharing for normal local management unless the user clearly asks to share with a team/repository.
+                            """;
+                    }
+
+                    return content;
+                }
 
                 var externalSkill = projectContextCatalog.FindSkill(name);
                 if (externalSkill is not null)
@@ -513,8 +532,8 @@ public partial class ChatViewModel
 
     private List<AIFunction> BuildLumiManagementTools(Guid chatId)
     {
-        return
-        [
+        var tools = new List<AIFunction>
+        {
             AIFunctionFactory.Create(
                 async (
                     [Description("Action: list, create, update, or delete")] string action,
@@ -652,7 +671,49 @@ public partial class ChatViewModel
                 "manage_memories",
                 "List, create, update, or delete Lumi memories. Use this only when the user explicitly asks to manage memories directly.",
                 Lumi.Models.AppDataJsonContext.Default.Options),
-        ];
+        };
+
+        if (HasSharingRepositories)
+            tools.Add(BuildManageSharingTool());
+
+        return tools;
+    }
+
+    private bool HasSharingRepositories => _dataStore.Data.SharedRepositories.Count > 0;
+
+    private AIFunction BuildManageSharingTool()
+    {
+        return AIFunctionFactory.Create(
+            async (
+                [Description("Action: list, sync, sync_all, publish_skill, publish_lumi, publish_memory, create, update, or delete. Publishing changes files in the selected sharing repo.")] string action,
+                [Description("Sharing repository ID or exact name. Omit only when exactly one repo exists, or for sync_all/list.")] string? repositoryIdentifier = null,
+                [Description("Repository display name for create/update.")] string? name = null,
+                [Description("Git URL or local repository path for create/update.")] string? repository = null,
+                [Description("Optional branch name for create/update, e.g. main.")] string? branch = null,
+                [Description("Optional local clone/cache path for create/update.")] string? localPath = null,
+                [Description("Automatic sync interval in minutes. Minimum is 5.")] int? updateIntervalMinutes = null,
+                [Description("Whether the sharing repository should be enabled for periodic sync.")] bool? isEnabled = null,
+                [Description("For publish action: skill, lumi, or memory. Not needed for publish_skill/publish_lumi/publish_memory.")] string? itemType = null,
+                [Description("For publish actions: skill name/ID, Lumi name/ID, or memory key/ID to share.")] string? itemIdentifier = null,
+                [Description("Optional text query for list filtering.")] string? query = null) =>
+            {
+                var result = FeatureManager.ManageSharing(
+                    action,
+                    repositoryIdentifier,
+                    name,
+                    repository,
+                    branch,
+                    localPath,
+                    updateIntervalMinutes,
+                    isEnabled,
+                    itemType,
+                    itemIdentifier,
+                    query);
+                return await ApplyFeatureChangeAsync(result);
+            },
+            "manage_sharing",
+            "List/sync configured Lumi sharing repositories and publish explicit skills, Lumis, or memories to them. This tool is available only after the user configures at least one sharing repository in Settings → Sharing. Use only when the user explicitly asks to share/publish/sync team capabilities.",
+            Lumi.Models.AppDataJsonContext.Default.Options);
     }
 
     private async Task<string> ApplyFeatureChangeAsync(FeatureChangeResult result)

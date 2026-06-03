@@ -96,6 +96,37 @@ public sealed class ChatViewModelAgentRoutingTests
     }
 
     [Fact]
+    public void BuildLumiManagementTools_DoesNotExposeSharingWithoutRepository()
+    {
+        using var harness = CreateHarness(new AppData());
+
+        var toolNames = GetLumiManagementToolNames(harness.ViewModel);
+
+        Assert.Contains("manage_skills", toolNames);
+        Assert.DoesNotContain("manage_sharing", toolNames);
+    }
+
+    [Fact]
+    public void BuildLumiManagementTools_ExposesSharingWhenRepositoryConfigured()
+    {
+        using var harness = CreateHarness(new AppData
+        {
+            SharedRepositories =
+            [
+                new LumiSharedRepository
+                {
+                    Name = "Team",
+                    Repository = @"C:\Team\LumiCapabilities"
+                }
+            ]
+        });
+
+        var toolNames = GetLumiManagementToolNames(harness.ViewModel);
+
+        Assert.Contains("manage_sharing", toolNames);
+    }
+
+    [Fact]
     public void ResolveSelectedModelForChat_DoesNotUseVisibleChatSelectionForHiddenChat()
     {
         var targetChat = new Chat { Id = Guid.NewGuid(), Title = "Job chat" };
@@ -363,6 +394,37 @@ public sealed class ChatViewModelAgentRoutingTests
     {
         var store = new DataStore(data);
         return new TestHarness(new ChatViewModel(store, new CopilotService()));
+    }
+
+    private static IReadOnlyList<string> GetLumiManagementToolNames(ChatViewModel viewModel)
+    {
+        var method = typeof(ChatViewModel).GetMethod(
+            "BuildLumiManagementTools",
+            BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("BuildLumiManagementTools method was not found.");
+
+        var tools = (System.Collections.IEnumerable)(method.Invoke(viewModel, [Guid.NewGuid()])
+            ?? throw new InvalidOperationException("BuildLumiManagementTools returned null."));
+        return tools
+            .Cast<object>()
+            .Select(GetToolName)
+            .ToList();
+    }
+
+    private static string GetToolName(object tool)
+    {
+        var nameProperty = tool.GetType().GetProperty("Name");
+        if (nameProperty?.GetValue(tool) is string name)
+            return name;
+
+        var metadata = tool.GetType().GetProperty("Metadata")?.GetValue(tool);
+        if (metadata is not null
+            && metadata.GetType().GetProperty("Name")?.GetValue(metadata) is string metadataName)
+        {
+            return metadataName;
+        }
+
+        throw new InvalidOperationException($"Could not read tool name from {tool.GetType().FullName}.");
     }
 
     private static Chat CreateChatWithMessage(string title)

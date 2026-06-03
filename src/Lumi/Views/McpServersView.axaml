@@ -62,7 +62,13 @@
                           Foreground="{DynamicResource Brush.TextTertiary}" />
               </Button>
             </StackPanel>
-            <TextBlock Text="{loc:Str Editor_McpServer}" Classes="subtitle" VerticalAlignment="Center" />
+            <StackPanel Spacing="2" VerticalAlignment="Center">
+              <TextBlock Text="{loc:Str Editor_McpServer}" Classes="subtitle" />
+              <TextBlock Text="{Binding SelectedServerSharedSourceDisplay}"
+                         FontSize="11"
+                         Foreground="{DynamicResource Brush.AccentDefault}"
+                         IsVisible="{Binding SelectedServerSharedSourceDisplay, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
           </DockPanel>
 
           <!-- Name -->

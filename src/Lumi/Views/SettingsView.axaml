@@ -4,6 +4,7 @@
              xmlns:conv="using:Lumi.Converters"
              xmlns:sc="using:StrataTheme.Controls"
              xmlns:ctrl="using:Lumi.Views.Controls"
+             xmlns:views="using:Lumi.Views"
              xmlns:loc="using:Lumi.Localization"
              x:Class="Lumi.Views.SettingsView"
              x:DataType="vm:SettingsViewModel"
@@ -341,7 +342,13 @@
         </sc:StrataSettingGroup>
       </StackPanel>
 
-    <!-- ═══ Page 6: About ═══ -->
+    <!-- ═══ Page 6: Sharing ═══ -->
+      <views:SharingView x:Name="PageSharing"
+                         Classes="motion-surface"
+                         IsVisible="False"
+                         DataContext="{Binding SharingVM}" />
+
+    <!-- ═══ Page 7: About ═══ -->
       <StackPanel x:Name="PageAbout" Classes="motion-surface" IsVisible="False" Spacing="20" Margin="36,24,36,36" MaxWidth="560">
         <StackPanel Spacing="4">
           <TextBlock Text="{loc:Str Settings_About}" FontSize="{DynamicResource Font.SizeTitle}" FontWeight="SemiBold" />

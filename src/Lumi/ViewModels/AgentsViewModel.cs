@@ -37,6 +37,8 @@ public partial class AgentsViewModel : ObservableObject
     /// <summary>All tools available for assignment to agents.</summary>
     public ObservableCollection<ToolToggle> AvailableTools { get; } = [];
 
+    public string SelectedAgentSharedSourceDisplay => SelectedAgent?.SharedSourceDisplay ?? "";
+
      public AgentsViewModel(DataStore dataStore)
      {
          _dataStore = dataStore;
@@ -144,6 +146,7 @@ public partial class AgentsViewModel : ObservableObject
         ("manage_mcps", "Manage MCPs", "Utility", "List, create, update, or delete Lumi MCP servers on explicit request."),
         ("manage_jobs", "Manage Jobs", "Utility", "Create, pause, resume, or delete Lumi background jobs on explicit request."),
         ("manage_memories", "Manage Memories", "Utility", "List, create, update, or delete Lumi memories on explicit request."),
+        ("manage_sharing", "Manage Sharing", "Utility", "List/sync configured sharing repositories and publish explicit skills, Lumis, or memories."),
         ("code_review", "Code Review", "Coding", "Expert code review for bugs, security, performance, and best practices."),
         ("generate_tests", "Generate Tests", "Coding", "Generate comprehensive unit tests for source code."),
         ("explain_code", "Explain Code", "Coding", "Deep code explanation with call flow and pattern identification."),
@@ -183,10 +186,11 @@ public partial class AgentsViewModel : ObservableObject
         SelectedAgent = agent;
     }
 
-     partial void OnSelectedAgentChanged(LumiAgent? value)
-     {
-         if (value is null) return;
-         SyncEditorFromAgent(value);
+      partial void OnSelectedAgentChanged(LumiAgent? value)
+      {
+          OnPropertyChanged(nameof(SelectedAgentSharedSourceDisplay));
+          if (value is null) return;
+          SyncEditorFromAgent(value);
          RefreshAvailableSkills(value);
          RefreshAvailableMcpServers(value);
          RefreshAvailableTools(value);

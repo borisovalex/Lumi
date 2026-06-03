@@ -905,7 +905,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             ? _dataStore.Data.Agents.FirstOrDefault(agent => agent.Id == chat.AgentId.Value)
             : null;
         var systemPrompt = SystemPromptBuilder.Build(
-            _dataStore.Data.Settings, activeAgent, project, allSkills, activeSkills, memories, _dataStore.SnapshotBackgroundJobs());
+            _dataStore.Data.Settings,
+            activeAgent,
+            project,
+            allSkills,
+            activeSkills,
+            memories,
+            _dataStore.SnapshotBackgroundJobs(),
+            hasSharingRepositories: _dataStore.Data.SharedRepositories.Count > 0);
         systemPrompt = AppendAvailableExternalSkillsToPrompt(systemPrompt, externalSkills, chat.ActiveExternalSkillNames);
 
         var sdkAgentName = GetSessionSdkAgentName(chat, CurrentChat, SelectedSdkAgentName);

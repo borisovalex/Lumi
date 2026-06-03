@@ -102,7 +102,13 @@
                           Foreground="{DynamicResource Brush.TextTertiary}" />
               </Button>
             </StackPanel>
-            <TextBlock Text="{loc:Str Editor_Lumi}" Classes="subtitle" VerticalAlignment="Center" />
+            <StackPanel Spacing="2" VerticalAlignment="Center">
+              <TextBlock Text="{loc:Str Editor_Lumi}" Classes="subtitle" />
+              <TextBlock Text="{Binding SelectedAgentSharedSourceDisplay}"
+                         FontSize="11"
+                         Foreground="{DynamicResource Brush.AccentDefault}"
+                         IsVisible="{Binding SelectedAgentSharedSourceDisplay, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
           </DockPanel>
 
           <!-- Icon + Name row -->

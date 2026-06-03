@@ -27,6 +27,8 @@ public sealed record DetachedChatWindowRequest(
 
 public partial class MainViewModel : ObservableObject, IDisposable
 {
+    public const int SettingsNavIndex = 7;
+
     private readonly DataStore _dataStore;
     private readonly CopilotService _copilotService;
     /// <summary>A dedicated BrowserService for Settings cookie import/clear (not tied to any chat).</summary>
@@ -63,7 +65,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isAgentDebugMapDismissed;
 
     public bool IsGlobalUpdateBannerVisible => SettingsVM.ShouldShowUpdateBanner
-        && (SelectedNavIndex != 7 || SettingsVM.SelectedPageIndex != SettingsViewModel.AboutPageIndex);
+        && (SelectedNavIndex != SettingsNavIndex || SettingsVM.SelectedPageIndex != SettingsViewModel.AboutPageIndex);
 
     public bool IsAgentDebugMapVisible
     {
@@ -130,6 +132,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public ProjectsViewModel ProjectsVM { get; }
     public MemoriesViewModel MemoriesVM { get; }
     public McpServersViewModel McpServersVM { get; }
+    public SharingViewModel SharingVM { get; }
     public SettingsViewModel SettingsVM { get; }
     public OnboardingViewModel OnboardingVM { get; }
     public SearchOverlayViewModel SearchOverlayVM { get; }
@@ -215,7 +218,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         ProjectsVM = new ProjectsViewModel(dataStore);
         MemoriesVM = new MemoriesViewModel(dataStore);
         McpServersVM = new McpServersViewModel(dataStore);
+        SharingVM = new SharingViewModel(dataStore);
         SettingsVM = new SettingsViewModel(dataStore, copilotService, _settingsBrowserService, updateService);
+        SettingsVM.SharingVM = SharingVM;
         SettingsVM.LoginVM = LoginVM;
         SearchOverlayVM = new SearchOverlayViewModel(
             new GlobalSearchService(() => _dataStore.Data, _dataStore.GetChatSearchSnapshot),
@@ -302,16 +307,11 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         McpServersVM.McpConfigChanged += () =>
         {
-            McpProxyRuntime.Shared.RetireUserRegistrationsExcept(_dataStore.Data.McpServers
-                .Where(server => server.IsEnabled && !string.Equals(server.ServerType, "remote", StringComparison.OrdinalIgnoreCase))
-                .Select(server => server.Id));
-            _chatSessionStore.ApplyToSurfaces(surface =>
-            {
-                surface.InvalidateMcpSession();
-                surface.PopulateDefaultMcps();
-                surface.RefreshComposerCatalogs();
-            });
-            RefreshFeatureManagementUi();
+            RefreshAfterMcpConfigChanged();
+        };
+        SharingVM.CapabilitiesChanged += () =>
+        {
+            RefreshAfterMcpConfigChanged();
         };
         LoadProjects();
         SubscribeChatRunningState();
@@ -319,6 +319,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         ChatVM.RefreshComposerCatalogs();
         if (_ownsBackgroundJobService && startBackgroundJobs)
             _backgroundJobService.Start();
+        if (startBackgroundJobs)
+            SharingVM.StartPeriodicSync();
 
 #if DEBUG
         if (openAgentDebugHarness)
@@ -327,6 +329,20 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         _chatNavigationHistory.Record(ChatVM.CurrentChat?.Id, SelectedProjectFilter);
         _ = InitializeAsync();
+    }
+
+    private void RefreshAfterMcpConfigChanged()
+    {
+        McpProxyRuntime.Shared.RetireUserRegistrationsExcept(_dataStore.Data.McpServers
+            .Where(server => server.IsEnabled && !string.Equals(server.ServerType, "remote", StringComparison.OrdinalIgnoreCase))
+            .Select(server => server.Id));
+        _chatSessionStore.ApplyToSurfaces(surface =>
+        {
+            surface.InvalidateMcpSession();
+            surface.PopulateDefaultMcps();
+            surface.RefreshComposerCatalogs();
+        });
+        RefreshFeatureManagementUi();
     }
 
     private void PrepareChatSurface(ChatViewModel surface)
@@ -459,6 +475,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         UnsubscribeChatRunningState();
         if (_ownsChatSurfaceRegistry)
             _chatSurfaceRegistry.Dispose();
+        SharingVM.Dispose();
         SettingsVM.Dispose();
         _ = _settingsBrowserService.DisposeAsync();
     }
@@ -541,6 +558,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         AgentsVM.RefreshFromStore();
         MemoriesVM.RefreshFromStore();
         McpServersVM.RefreshFromStore();
+        SharingVM.RefreshFromStore();
 
         if (SelectedProjectFilter.HasValue
             && !_dataStore.Data.Projects.Any(project => project.Id == SelectedProjectFilter.Value))
@@ -945,7 +963,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (int.TryParse(indexStr, out var idx))
         {
-            if (idx == 7 && SettingsVM.ShouldAutoNavigateToUpdateCenter)
+            if (idx == SettingsNavIndex && SettingsVM.ShouldAutoNavigateToUpdateCenter)
                 SettingsVM.OpenUpdateCenter();
 
             SelectedNavIndex = idx;
@@ -956,7 +974,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private void OpenUpdateCenter()
     {
         SettingsVM.OpenUpdateCenter();
-        SelectedNavIndex = 7;
+        SelectedNavIndex = SettingsNavIndex;
     }
 
     [RelayCommand]

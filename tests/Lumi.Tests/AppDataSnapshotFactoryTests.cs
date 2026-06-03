@@ -111,6 +111,52 @@ public class AppDataSnapshotFactoryTests
     }
 
     [Fact]
+    public void AppDataJsonContext_SerializesSharedRepositoriesAndCapabilitySources()
+    {
+        var repositoryId = Guid.NewGuid();
+        var data = new AppData
+        {
+            SharedRepositories =
+            [
+                new LumiSharedRepository
+                {
+                    Id = repositoryId,
+                    Name = "Team",
+                    Repository = "https://github.com/org/lumi-capabilities.git",
+                    LocalPath = @"C:\Lumi\shared\team",
+                    LastSkillCount = 2
+                }
+            ],
+            Skills =
+            [
+                new Skill
+                {
+                    Name = "Shared Skill",
+                    Content = "Shared instructions",
+                    SharedSource = new SharedCapabilitySource
+                    {
+                        RepositoryId = repositoryId,
+                        RepositoryName = "Team",
+                        SourceType = SharedCapabilityTypes.Skill,
+                        SourceKey = ".github/skills/shared/SKILL.md",
+                        SourcePath = ".github/skills/shared/SKILL.md"
+                    }
+                }
+            ]
+        };
+
+        var json = JsonSerializer.Serialize(data, AppDataJsonContext.Default.AppData);
+        using var document = JsonDocument.Parse(json);
+
+        var repository = document.RootElement.GetProperty("sharedRepositories")[0];
+        Assert.Equal("Team", repository.GetProperty("name").GetString());
+        Assert.Equal(2, repository.GetProperty("lastSkillCount").GetInt32());
+        var source = document.RootElement.GetProperty("skills")[0].GetProperty("sharedSource");
+        Assert.Equal(repositoryId, source.GetProperty("repositoryId").GetGuid());
+        Assert.Equal(SharedCapabilityTypes.Skill, source.GetProperty("sourceType").GetString());
+    }
+
+    [Fact]
     public void CreateIndexSnapshot_PreservesProjectAdditionalContextDirectories()
     {
         var source = new AppData
@@ -131,6 +177,51 @@ public class AppDataSnapshotFactoryTests
         var project = Assert.Single(snapshot.Projects);
         Assert.Equal([@"C:\SharedSkills", @"D:\McpConfigs"], project.AdditionalContextDirectories);
         Assert.NotSame(source.Projects[0].AdditionalContextDirectories, project.AdditionalContextDirectories);
+    }
+
+    [Fact]
+    public void CreateIndexSnapshot_PreservesSharingMetadata()
+    {
+        var repositoryId = Guid.NewGuid();
+        var source = new AppData
+        {
+            SharedRepositories =
+            [
+                new LumiSharedRepository
+                {
+                    Id = repositoryId,
+                    Name = "Team",
+                    Repository = @"C:\Team\LumiCapabilities",
+                    LastMemoryCount = 3
+                }
+            ],
+            Memories =
+            [
+                new Memory
+                {
+                    Key = "Team/process",
+                    Content = "Use the shared flow.",
+                    SharedSource = new SharedCapabilitySource
+                    {
+                        RepositoryId = repositoryId,
+                        RepositoryName = "Team",
+                        SourceType = SharedCapabilityTypes.Memory,
+                        SourceKey = ".lumi/memories.json#Team/process",
+                        SourcePath = ".lumi/memories.json"
+                    }
+                }
+            ]
+        };
+
+        var snapshot = InvokeCreateIndexSnapshot(source);
+
+        var repository = Assert.Single(snapshot.SharedRepositories);
+        Assert.Equal(repositoryId, repository.Id);
+        Assert.Equal(3, repository.LastMemoryCount);
+        var memory = Assert.Single(snapshot.Memories);
+        Assert.NotSame(source.Memories[0].SharedSource, memory.SharedSource);
+        Assert.Equal(repositoryId, memory.SharedSource?.RepositoryId);
+        Assert.Equal(SharedCapabilityTypes.Memory, memory.SharedSource?.SourceType);
     }
 
     [Fact]

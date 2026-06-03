@@ -54,8 +54,13 @@
                           Foreground="{DynamicResource Brush.TextTertiary}" />
               </Button>
             </StackPanel>
-            <TextBlock Text="{loc:Str Editor_Memory}" FontSize="{DynamicResource Font.SizeSubtitle}" FontWeight="SemiBold"
-                       VerticalAlignment="Center" />
+            <StackPanel Spacing="2" VerticalAlignment="Center">
+              <TextBlock Text="{loc:Str Editor_Memory}" FontSize="{DynamicResource Font.SizeSubtitle}" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding SelectedMemorySharedSourceDisplay}"
+                         FontSize="11"
+                         Foreground="{DynamicResource Brush.AccentDefault}"
+                         IsVisible="{Binding SelectedMemorySharedSourceDisplay, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
           </DockPanel>
 
           <Grid ColumnDefinitions="*,20,160">

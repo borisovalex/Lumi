@@ -74,6 +74,7 @@ public partial class SettingsView : UserControl
             this.FindControl<Control>("PageChat"),
             this.FindControl<Control>("PageAI"),
             this.FindControl<Control>("PagePrivacy"),
+            this.FindControl<Control>("PageSharing"),
             this.FindControl<Control>("PageAbout"),
         ];
 

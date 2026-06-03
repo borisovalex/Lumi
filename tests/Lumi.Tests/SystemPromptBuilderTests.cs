@@ -46,6 +46,33 @@ public sealed class SystemPromptBuilderTests
         Assert.Contains("fetch the `Lumi Feature Manager` skill first", prompt);
         Assert.Contains("manage_skills", prompt);
         Assert.Contains("Lumi Feature Manager", prompt);
+        Assert.DoesNotContain("manage_sharing", prompt);
+    }
+
+    [Fact]
+    public void Build_IncludesSharingManagementOnlyWhenRepositoryConfigured()
+    {
+        var withoutSharing = SystemPromptBuilder.Build(
+            new UserSettings { Language = "en" },
+            agent: null,
+            project: null,
+            allSkills: [],
+            activeSkills: [],
+            memories: [],
+            hasSharingRepositories: false);
+
+        var withSharing = SystemPromptBuilder.Build(
+            new UserSettings { Language = "en" },
+            agent: null,
+            project: null,
+            allSkills: [],
+            activeSkills: [],
+            memories: [],
+            hasSharingRepositories: true);
+
+        Assert.DoesNotContain("manage_sharing", withoutSharing);
+        Assert.Contains("manage_sharing", withSharing);
+        Assert.Contains("publish explicit skills, Lumis, or memories", withSharing);
     }
 
     [Fact]

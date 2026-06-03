@@ -71,6 +71,7 @@ internal static class AppDataSnapshotFactory
                     Content = s.Content,
                     IconGlyph = s.IconGlyph,
                     IsBuiltIn = s.IsBuiltIn,
+                    SharedSource = CloneSharedSource(s.SharedSource),
                     CreatedAt = s.CreatedAt
                 })
                 .ToList(),
@@ -87,6 +88,7 @@ internal static class AppDataSnapshotFactory
                     SkillIds = [..a.SkillIds],
                     ToolNames = [..a.ToolNames],
                     McpServerIds = [..a.McpServerIds],
+                    SharedSource = CloneSharedSource(a.SharedSource),
                     CreatedAt = a.CreatedAt
                 })
                 .ToList(),
@@ -105,7 +107,29 @@ internal static class AppDataSnapshotFactory
                     Tools = [..s.Tools],
                     Timeout = s.Timeout,
                     IsEnabled = s.IsEnabled,
+                    SharedSource = CloneSharedSource(s.SharedSource),
                     CreatedAt = s.CreatedAt
+                })
+                .ToList(),
+            SharedRepositories = source.SharedRepositories
+                .Select(static repository => new LumiSharedRepository
+                {
+                    Id = repository.Id,
+                    Name = repository.Name,
+                    Repository = repository.Repository,
+                    LocalPath = repository.LocalPath,
+                    Branch = repository.Branch,
+                    IsEnabled = repository.IsEnabled,
+                    UpdateIntervalMinutes = repository.UpdateIntervalMinutes,
+                    CreatedAt = repository.CreatedAt,
+                    LastSyncAt = repository.LastSyncAt,
+                    NextSyncAt = repository.NextSyncAt,
+                    LastSyncStatus = repository.LastSyncStatus,
+                    LastSyncMessage = repository.LastSyncMessage,
+                    LastSkillCount = repository.LastSkillCount,
+                    LastAgentCount = repository.LastAgentCount,
+                    LastMcpServerCount = repository.LastMcpServerCount,
+                    LastMemoryCount = repository.LastMemoryCount
                 })
                 .ToList(),
             BackgroundJobs = source.BackgroundJobs
@@ -123,6 +147,7 @@ internal static class AppDataSnapshotFactory
                     Status = m.Status,
                     Source = m.Source,
                     SourceChatId = m.SourceChatId,
+                    SharedSource = CloneSharedSource(m.SharedSource),
                     CreatedAt = m.CreatedAt,
                     UpdatedAt = m.UpdatedAt,
                     LastReviewedAt = m.LastReviewedAt,
@@ -131,6 +156,22 @@ internal static class AppDataSnapshotFactory
                     MaintenanceNote = m.MaintenanceNote
                 })
                 .ToList(),
+        };
+    }
+
+    private static SharedCapabilitySource? CloneSharedSource(SharedCapabilitySource? source)
+    {
+        if (source is null)
+            return null;
+
+        return new SharedCapabilitySource
+        {
+            RepositoryId = source.RepositoryId,
+            RepositoryName = source.RepositoryName,
+            SourceType = source.SourceType,
+            SourceKey = source.SourceKey,
+            SourcePath = source.SourcePath,
+            LastSyncedAt = source.LastSyncedAt
         };
     }
 

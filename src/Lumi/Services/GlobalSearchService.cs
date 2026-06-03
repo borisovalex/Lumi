@@ -19,6 +19,7 @@ public enum GlobalSearchCategory
     Lumis,
     Memories,
     McpServers,
+    Sharing,
     Settings
 }
 
@@ -63,6 +64,9 @@ public sealed class GlobalSearchService
     private readonly object _chatFieldCacheSync = new();
     private readonly Dictionary<Guid, CachedChatFields> _chatFieldCache = [];
     private const int InteractiveColdChatContentLimit = 16;
+    private const int SettingsNavIndex = 7;
+    private const int SharingSettingsPageIndex = 6;
+    private const int AboutSettingsPageIndex = 7;
 
     private static readonly SearchSettingEntry[] SettingsIndex =
     [
@@ -91,7 +95,10 @@ public sealed class GlobalSearchService
         new("Clear All Chats", "Privacy & Data", 5),
         new("Clear All Memories", "Privacy & Data", 5),
         new("Reset All Settings", "Privacy & Data", 5),
-        new("Version", "About", 6)
+        new("Lumi Sharing", "Sharing", SharingSettingsPageIndex),
+        new("Shared Repositories", "Sharing", SharingSettingsPageIndex),
+        new("Team Capabilities", "Sharing", SharingSettingsPageIndex),
+        new("Version", "About", AboutSettingsPageIndex)
     ];
 
     public GlobalSearchService(
@@ -152,6 +159,7 @@ public sealed class GlobalSearchService
         SearchAgents(snapshot, query, executionMode, results, cancellationToken);
         SearchMemories(snapshot, query, executionMode, results, cancellationToken);
         SearchMcpServers(snapshot, query, executionMode, results, cancellationToken);
+        SearchSharedRepositories(snapshot, query, results, cancellationToken);
         SearchSettings(query, results, cancellationToken);
 
         results.Sort(static (left, right) =>
@@ -537,9 +545,47 @@ public sealed class GlobalSearchService
                 Category = GlobalSearchCategory.Settings,
                 Title = setting.Name,
                 Subtitle = setting.Page,
-                NavIndex = 7,
+                NavIndex = SettingsNavIndex,
                 Score = evaluation.Score + GetTitleBonus(setting.Name, query),
                 SettingsPageIndex = setting.PageIndex
+            });
+        }
+    }
+
+    private void SearchSharedRepositories(
+        SearchSnapshot snapshot,
+        SearchQuery query,
+        ICollection<GlobalSearchMatch> results,
+        CancellationToken cancellationToken)
+    {
+        foreach (var repository in snapshot.SharedRepositories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var evaluation = SearchEngine.Evaluate(query,
+            [
+                SearchField.Primary(repository.DisplayName, 3.2),
+                new SearchField(repository.Repository, 1.8),
+                new SearchField(repository.LocalPath, 1.2),
+                new SearchField(repository.LastSyncMessage, 0.9)
+            ]);
+
+            if (!evaluation.IsMatch)
+                continue;
+
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Sharing,
+                Title = repository.DisplayName,
+                Subtitle = $"{repository.LastSyncStatus} · {repository.CountsDisplay}",
+                NavIndex = SettingsNavIndex,
+                Item = repository,
+                SettingsPageIndex = SharingSettingsPageIndex,
+                Score = evaluation.Score
+                        + GetTitleBonus(repository.DisplayName, query)
+                        + GetRecencyBoost(repository.LastSyncAt ?? repository.CreatedAt, multiplier: 0.35),
+                IsContentMatch = evaluation.IsContentMatch,
+                SortTimestamp = repository.LastSyncAt ?? repository.CreatedAt
             });
         }
     }
@@ -657,6 +703,22 @@ public sealed class GlobalSearchService
                 Item = server,
                 Score = 740 + GetRecencyBoost(server.CreatedAt, multiplier: 0.4),
                 SortTimestamp = server.CreatedAt
+            });
+        }
+
+        foreach (var repository in snapshot.SharedRepositories.OrderByDescending(static repository => repository.LastSyncAt ?? repository.CreatedAt).Take(4))
+        {
+            var sortTimestamp = repository.LastSyncAt ?? repository.CreatedAt;
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Sharing,
+                Title = repository.DisplayName,
+                Subtitle = $"{repository.LastSyncStatus} · {repository.CountsDisplay}",
+                NavIndex = SettingsNavIndex,
+                Item = repository,
+                SettingsPageIndex = SharingSettingsPageIndex,
+                Score = 720 + GetRecencyBoost(sortTimestamp, multiplier: 0.35),
+                SortTimestamp = sortTimestamp
             });
         }
 
@@ -939,6 +1001,7 @@ public sealed class GlobalSearchService
         var agents = data.Agents.ToArray();
         var memories = data.Memories.ToArray();
         var servers = data.McpServers.ToArray();
+        var sharedRepositories = data.SharedRepositories.ToArray();
         var backgroundJobs = data.BackgroundJobs.ToArray();
 
         var projectNames = projects.ToDictionary(static project => project.Id, static project => project.Name);
@@ -960,6 +1023,7 @@ public sealed class GlobalSearchService
             backgroundJobs,
             memories,
             servers,
+            sharedRepositories,
             projectNames,
             projectChatCounts,
             projectLastActivity);
@@ -973,6 +1037,7 @@ public sealed class GlobalSearchService
         BackgroundJob[] backgroundJobs,
         Memory[] memories,
         McpServer[] mcpServers,
+        LumiSharedRepository[] sharedRepositories,
         IReadOnlyDictionary<Guid, string> projectNames,
         IReadOnlyDictionary<Guid, int> projectChatCounts,
         IReadOnlyDictionary<Guid, DateTimeOffset> projectLastActivity)
@@ -984,6 +1049,7 @@ public sealed class GlobalSearchService
         public BackgroundJob[] BackgroundJobs { get; } = backgroundJobs;
         public Memory[] Memories { get; } = memories;
         public McpServer[] McpServers { get; } = mcpServers;
+        public LumiSharedRepository[] SharedRepositories { get; } = sharedRepositories;
         public IReadOnlyDictionary<Guid, string> ProjectNames { get; } = projectNames;
         public IReadOnlyDictionary<Guid, int> ProjectChatCounts { get; } = projectChatCounts;
         public IReadOnlyDictionary<Guid, DateTimeOffset> ProjectLastActivity { get; } = projectLastActivity;

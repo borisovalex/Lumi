@@ -173,7 +173,11 @@ public class Skill
     public string Content { get; set; } = ""; // Markdown instructions
     public string IconGlyph { get; set; } = "⚡";
     public bool IsBuiltIn { get; set; }
+    public SharedCapabilitySource? SharedSource { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
+
+    [JsonIgnore]
+    public string SharedSourceDisplay => SharedSource?.DisplayName ?? "";
 }
 
 public class LumiAgent
@@ -188,7 +192,11 @@ public class LumiAgent
     public List<Guid> SkillIds { get; set; } = [];
     public List<string> ToolNames { get; set; } = [];
     public List<Guid> McpServerIds { get; set; } = [];
+    public SharedCapabilitySource? SharedSource { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
+
+    [JsonIgnore]
+    public string SharedSourceDisplay => SharedSource?.DisplayName ?? "";
 }
 
 public class McpServer
@@ -210,7 +218,84 @@ public class McpServer
     public List<string> Tools { get; set; } = [];
     public int? Timeout { get; set; }
     public bool IsEnabled { get; set; } = true;
+    public SharedCapabilitySource? SharedSource { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
+
+    [JsonIgnore]
+    public string SharedSourceDisplay => SharedSource?.DisplayName ?? "";
+}
+
+public class LumiSharedRepository : INotifyPropertyChanged
+{
+    private bool _isSyncing;
+
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Name { get; set; } = "";
+    public string Repository { get; set; } = "";
+    public string LocalPath { get; set; } = "";
+    public string Branch { get; set; } = "";
+    public bool IsEnabled { get; set; } = true;
+    public int UpdateIntervalMinutes { get; set; } = 60;
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
+    public DateTimeOffset? LastSyncAt { get; set; }
+    public DateTimeOffset? NextSyncAt { get; set; }
+    public string LastSyncStatus { get; set; } = SharedRepositorySyncStatuses.NotSynced;
+    public string LastSyncMessage { get; set; } = "";
+    public int LastSkillCount { get; set; }
+    public int LastAgentCount { get; set; }
+    public int LastMcpServerCount { get; set; }
+    public int LastMemoryCount { get; set; }
+
+    [JsonIgnore]
+    public bool IsSyncing
+    {
+        get => _isSyncing;
+        set { if (_isSyncing == value) return; _isSyncing = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSyncing))); }
+    }
+
+    [JsonIgnore]
+    public string DisplayName => string.IsNullOrWhiteSpace(Name)
+        ? string.IsNullOrWhiteSpace(Repository) ? "Shared repository" : Repository
+        : Name;
+
+    [JsonIgnore]
+    public string DisplayLocation => string.IsNullOrWhiteSpace(Repository) ? LocalPath : Repository;
+
+    [JsonIgnore]
+    public string CountsDisplay => $"{LastSkillCount} skills · {LastAgentCount} Lumis · {LastMcpServerCount} MCPs · {LastMemoryCount} memories";
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
+
+public static class SharedRepositorySyncStatuses
+{
+    public const string NotSynced = "Not synced";
+    public const string Syncing = "Syncing";
+    public const string Synced = "Synced";
+    public const string Error = "Error";
+}
+
+public static class SharedCapabilityTypes
+{
+    public const string Skill = "skill";
+    public const string Lumi = "lumi";
+    public const string McpServer = "mcp";
+    public const string Memory = "memory";
+}
+
+public class SharedCapabilitySource
+{
+    public Guid RepositoryId { get; set; }
+    public string RepositoryName { get; set; } = "";
+    public string SourceType { get; set; } = "";
+    public string SourceKey { get; set; } = "";
+    public string SourcePath { get; set; } = "";
+    public DateTimeOffset LastSyncedAt { get; set; } = DateTimeOffset.Now;
+
+    [JsonIgnore]
+    public string DisplayName => string.IsNullOrWhiteSpace(RepositoryName)
+        ? "Shared"
+        : $"Shared · {RepositoryName}";
 }
 
 public static class BackgroundJobTriggerTypes
@@ -310,12 +395,16 @@ public class Memory
     public string Status { get; set; } = MemoryStatuses.Active;
     public string? SourceChatId { get; set; }
     public string Source { get; set; } = "chat";
+    public SharedCapabilitySource? SharedSource { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.Now;
     public DateTimeOffset? LastReviewedAt { get; set; }
     public DateTimeOffset? LastUsedAt { get; set; }
     public int? Confidence { get; set; }
     public string? MaintenanceNote { get; set; }
+
+    [JsonIgnore]
+    public string SharedSourceDisplay => SharedSource?.DisplayName ?? "";
 }
 
 public static class MemoryScopes
@@ -395,6 +484,7 @@ public class AppData
     public List<Skill> Skills { get; set; } = [];
     public List<LumiAgent> Agents { get; set; } = [];
     public List<McpServer> McpServers { get; set; } = [];
+    public List<LumiSharedRepository> SharedRepositories { get; set; } = [];
     public List<BackgroundJob> BackgroundJobs { get; set; } = [];
     public List<Memory> Memories { get; set; } = [];
 }

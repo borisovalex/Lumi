@@ -68,6 +68,7 @@
   "Nav_Lumis": "לומים (Ctrl+5)",
   "Nav_Memories": "זיכרונות (Ctrl+6)",
   "Nav_McpServers": "שרתי MCP (Ctrl+7)",
+  "Nav_Sharing": "שיתוף (Ctrl+8)",
   "Nav_Settings": "הגדרות (Ctrl+,)",
 
   "NavLabel_Chats": "צ׳אטים",
@@ -77,6 +78,7 @@
   "NavLabel_Lumis": "לומים",
   "NavLabel_Memories": "זיכרונות",
   "NavLabel_McpServers": "MCP",
+  "NavLabel_Sharing": "שיתוף",
   "NavLabel_Settings": "הגדרות",
 
   "Sidebar_NewChat": "צ׳אט חדש",
@@ -95,6 +97,8 @@
   "Sidebar_NewLumiTooltip": "לומי חדש",
   "Sidebar_Memories": "זיכרונות",
   "Sidebar_NewMemoryTooltip": "זיכרון חדש",
+  "Sidebar_Sharing": "שיתוף",
+  "Sidebar_NewSharingRepoTooltip": "מאגר שיתוף חדש",
   "Sidebar_Settings": "הגדרות",
   "Sidebar_SearchSettings": "חיפוש הגדרות\u2026",
   "Sidebar_All": "הכול",
@@ -449,6 +453,8 @@
   "Settings_AIModelsDesc": "הגדרת מודל והתנהגות הבינה המלאכותית",
   "Settings_PrivacyData": "פרטיות ונתונים",
   "Settings_PrivacyDataDesc": "ניהול הנתונים והעדפות הפרטיות שלך",
+  "Settings_Sharing": "שיתוף",
+  "Settings_SharingDesc": "טעינה ופרסום של יכולות צוות ממאגרי git",
   "Settings_About": "אודות",
   "Settings_AboutDesc": "גרסה, מצב עדכונים ופרטים על לומי",
 

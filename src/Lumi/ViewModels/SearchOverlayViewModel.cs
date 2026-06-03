@@ -62,6 +62,7 @@ public partial class SearchOverlayViewModel : ObservableObject
     private const string IconSparkle = "M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z M20 2v4 M22 4h-4 M4 20a2 2 0 1 0 0-4 2 2 0 0 0 0 4z";
     private const string IconMemory = "M9.5 2A1.5 1.5 0 0 0 8 3.5V4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-4v-.5A1.5 1.5 0 0 0 14.5 2h-5zM10 4V3.5a.5.5 0 0 1 .5-.5h3a.5.5 0 0 1 .5.5V4h-4zm-2 5a1 1 0 1 1 2 0 1 1 0 0 1-2 0zm5 0a1 1 0 1 1 2 0 1 1 0 0 1-2 0zm-5 4a1 1 0 1 1 2 0 1 1 0 0 1-2 0zm5 0a1 1 0 1 1 2 0 1 1 0 0 1-2 0z";
     private const string IconPlug = "M17 6.1h3V8h-3v2.1a5 5 0 0 1-4 4.9V18h2v2H9v-2h2v-3a5 5 0 0 1-4-4.9V8H4V6.1h3V4h2v2.1h4V4h2v2.1zM9 8v2.1a3 3 0 0 0 6 0V8H9z";
+    private const string IconShare = "M18 16.1c-.76 0-1.44.3-1.96.77L8.91 12.7a3.3 3.3 0 0 0 0-1.39l7.05-4.12A2.99 2.99 0 1 0 15 5c0 .23.03.45.08.66L8.03 9.78a3 3 0 1 0 0 4.44l7.04 4.13c-.05.21-.07.43-.07.65a3 3 0 1 0 3-2.9z";
     private const string IconGear = "M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915z M12 12a3 3 0 1 0 0-6 3 3 0 0 0 0 6z";
 
     [ObservableProperty] private bool _isOpen;
@@ -428,6 +429,7 @@ public partial class SearchOverlayViewModel : ObservableObject
         GlobalSearchCategory.Lumis => "Lumis",
         GlobalSearchCategory.Memories => "Memories",
         GlobalSearchCategory.McpServers => "MCP Servers",
+        GlobalSearchCategory.Sharing => "Sharing",
         GlobalSearchCategory.Settings => "Settings",
         _ => "Results"
     };
@@ -441,6 +443,7 @@ public partial class SearchOverlayViewModel : ObservableObject
         GlobalSearchCategory.Lumis => IconSparkle,
         GlobalSearchCategory.Memories => IconMemory,
         GlobalSearchCategory.McpServers => IconPlug,
+        GlobalSearchCategory.Sharing => IconShare,
         GlobalSearchCategory.Settings => IconGear,
         _ => IconChat
     };

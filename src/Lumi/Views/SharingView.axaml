@@ -1,0 +1,222 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:Lumi.ViewModels"
+             x:Class="Lumi.Views.SharingView"
+             x:DataType="vm:SharingViewModel"
+             x:CompileBindings="True">
+
+  <UserControl.Styles>
+    <Style Selector="TextBlock.section-title">
+      <Setter Property="FontSize" Value="{DynamicResource Font.SizeTitle}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.TextPrimary}" />
+    </Style>
+    <Style Selector="TextBlock.field-label">
+      <Setter Property="FontSize" Value="{DynamicResource Font.SizeCaption}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.TextTertiary}" />
+      <Setter Property="Margin" Value="0,0,0,4" />
+    </Style>
+    <Style Selector="Border.card">
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface1}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderSubtle}" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="CornerRadius" Value="{DynamicResource Radius.Overlay}" />
+      <Setter Property="Padding" Value="18" />
+    </Style>
+  </UserControl.Styles>
+
+  <StackPanel x:Name="SharingContent" Spacing="18" Margin="36,24,36,36" MaxWidth="720">
+
+      <DockPanel>
+        <StackPanel Spacing="4">
+          <TextBlock Text="Sharing" Classes="section-title" />
+          <TextBlock Text="Connect a team GitHub repo once. Lumi will keep shared skills, Lumis, MCP servers, and memories up to date."
+                     FontSize="{DynamicResource Font.SizeCaption}"
+                     TextWrapping="Wrap"
+                     Foreground="{DynamicResource Brush.TextTertiary}" />
+        </StackPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+          <Button x:Name="SharingSyncAllButton"
+                  Classes="subtle motion-action"
+                  Content="Sync all"
+                  Padding="14,6"
+                  MinHeight="0"
+                  Command="{Binding SyncAllRepositoriesCommand}"
+                  IsEnabled="{Binding !IsBusy}" />
+          <Button x:Name="SharingNewRepositoryButton"
+                  Classes="accent motion-action"
+                  Content="Add repository"
+                  Padding="14,6"
+                  MinHeight="0"
+                  Command="{Binding NewRepositoryCommand}" />
+        </StackPanel>
+      </DockPanel>
+
+      <Border Classes="card" IsVisible="{Binding !Repositories.Count}">
+        <StackPanel Spacing="10">
+          <TextBlock Text="Start with a repository URL"
+                     FontSize="{DynamicResource Font.SizeSubtitle}"
+                     FontWeight="SemiBold" />
+          <TextBlock Text="Ask your team for the repo that stores Lumi capabilities, paste the GitHub URL below, and press Save. Lumi will pull it now and then keep it refreshed automatically."
+                     FontSize="{DynamicResource Font.SizeCaption}"
+                     Foreground="{DynamicResource Brush.TextTertiary}"
+                     TextWrapping="Wrap" />
+          <Grid ColumnDefinitions="Auto,12,Auto,12,Auto">
+            <Border Grid.Column="0" Background="{DynamicResource Brush.AccentSubtle}" CornerRadius="999" Padding="10,4">
+              <TextBlock Text="1. Paste repo" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource Brush.AccentDefault}" />
+            </Border>
+            <Border Grid.Column="2" Background="{DynamicResource Brush.AccentSubtle}" CornerRadius="999" Padding="10,4">
+              <TextBlock Text="2. Save &amp; sync" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource Brush.AccentDefault}" />
+            </Border>
+            <Border Grid.Column="4" Background="{DynamicResource Brush.AccentSubtle}" CornerRadius="999" Padding="10,4">
+              <TextBlock Text="3. Use shared items" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource Brush.AccentDefault}" />
+            </Border>
+          </Grid>
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <StackPanel Spacing="14">
+          <DockPanel>
+            <StackPanel Spacing="2">
+              <TextBlock Text="Team repository" FontSize="{DynamicResource Font.SizeSubtitle}" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding StatusMessage}"
+                         FontSize="{DynamicResource Font.SizeCaption}"
+                         Foreground="{DynamicResource Brush.TextTertiary}"
+                         TextWrapping="Wrap" />
+            </StackPanel>
+            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <Button Classes="subtle motion-action"
+                      Content="Sync now"
+                      Padding="14,6"
+                      MinHeight="0"
+                      Command="{Binding SyncSelectedRepositoryCommand}"
+                      IsEnabled="{Binding SelectedRepository, Converter={x:Static ObjectConverters.IsNotNull}}" />
+              <Button Classes="subtle motion-action"
+                      Content="Delete"
+                      Padding="14,6"
+                      MinHeight="0"
+                      Foreground="{DynamicResource Brush.DangerDefault}"
+                      Command="{Binding DeleteSelectedRepositoryCommand}"
+                      IsVisible="{Binding SelectedRepository, Converter={x:Static ObjectConverters.IsNotNull}}" />
+            </StackPanel>
+          </DockPanel>
+
+          <Grid ColumnDefinitions="*,16,*" RowDefinitions="Auto,Auto,Auto" RowSpacing="10">
+            <StackPanel Grid.Row="0" Grid.Column="0">
+              <TextBlock Text="Name" Classes="field-label" />
+              <TextBox x:Name="SharingRepositoryNameBox"
+                       Text="{Binding EditName}"
+                       PlaceholderText="Team capabilities" />
+            </StackPanel>
+            <StackPanel Grid.Row="0" Grid.Column="2">
+              <TextBlock Text="Branch (optional)" Classes="field-label" />
+              <TextBox Text="{Binding EditBranch}" PlaceholderText="main" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="1" Grid.ColumnSpan="3">
+              <TextBlock Text="Repository URL or folder" Classes="field-label" />
+              <TextBox x:Name="SharingRepositoryLocationBox"
+                       Text="{Binding EditRepository}"
+                       PlaceholderText="https://github.com/org/lumi-capabilities.git" />
+            </StackPanel>
+
+            <StackPanel Grid.Row="2" Grid.Column="0">
+              <TextBlock Text="Refresh every (minutes)" Classes="field-label" />
+              <TextBox Text="{Binding EditUpdateIntervalMinutes}" PlaceholderText="60" />
+            </StackPanel>
+            <StackPanel Grid.Row="2" Grid.Column="2" Orientation="Horizontal" Spacing="10" VerticalAlignment="Bottom">
+              <ToggleSwitch IsChecked="{Binding EditIsEnabled}" />
+              <TextBlock Text="Keep this repo synced"
+                         VerticalAlignment="Center"
+                         FontSize="{DynamicResource Font.SizeCaption}"
+                         Foreground="{DynamicResource Brush.TextSecondary}" />
+            </StackPanel>
+          </Grid>
+
+          <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Classes="accent motion-action"
+                    Content="Save and sync"
+                    Padding="16,7"
+                    MinHeight="0"
+                    Command="{Binding SaveRepositoryCommand}" />
+            <Button Classes="subtle motion-action"
+                    Content="Cancel"
+                    Padding="16,7"
+                    MinHeight="0"
+                    Command="{Binding CancelEditCommand}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+
+      <Border Classes="card">
+        <Grid RowDefinitions="Auto,12,Auto,12,*">
+          <DockPanel Grid.Row="0">
+            <StackPanel Spacing="2">
+              <TextBlock Text="Share something back" FontSize="{DynamicResource Font.SizeSubtitle}" FontWeight="SemiBold" />
+              <TextBlock Text="Pick a skill, Lumi, or memory and Lumi will write it to the selected repository."
+                         FontSize="{DynamicResource Font.SizeCaption}"
+                         Foreground="{DynamicResource Brush.TextTertiary}" />
+            </StackPanel>
+            <Button DockPanel.Dock="Right"
+                    x:Name="SharingPublishButton"
+                    Classes="accent motion-action"
+                    Content="Publish selected"
+                    Padding="14,6"
+                    MinHeight="0"
+                    VerticalAlignment="Center"
+                    Command="{Binding PublishSelectedCapabilityCommand}"
+                    IsEnabled="{Binding !IsBusy}" />
+          </DockPanel>
+
+          <TextBox Grid.Row="2"
+                   x:Name="SharingCapabilitySearchBox"
+                   Text="{Binding CapabilitySearchQuery}"
+                   PlaceholderText="Search what you want to share..." />
+
+          <ListBox Grid.Row="4"
+                   x:Name="SharingCapabilitiesList"
+                   ItemsSource="{Binding ShareableCapabilities}"
+                   SelectedItem="{Binding SelectedCapability}"
+                   MinHeight="220"
+                   MaxHeight="420">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:ShareableCapabilityItem">
+                <Border Padding="10" Background="Transparent">
+                  <Grid ColumnDefinitions="Auto,12,*,Auto">
+                    <Border Grid.Column="0"
+                            Background="{DynamicResource Brush.AccentSubtle}"
+                            CornerRadius="999"
+                            Padding="8,2"
+                            VerticalAlignment="Top">
+                      <TextBlock Text="{Binding TypeLabel}"
+                                 FontSize="10"
+                                 FontWeight="SemiBold"
+                                 Foreground="{DynamicResource Brush.AccentDefault}" />
+                    </Border>
+                    <StackPanel Grid.Column="2" Spacing="2">
+                      <TextBlock Text="{Binding Name}"
+                                 FontSize="{DynamicResource Font.SizeBody}"
+                                 FontWeight="SemiBold"
+                                 Foreground="{DynamicResource Brush.TextPrimary}" />
+                      <TextBlock Text="{Binding Description}"
+                                 FontSize="{DynamicResource Font.SizeCaption}"
+                                 Foreground="{DynamicResource Brush.TextTertiary}"
+                                 TextWrapping="Wrap"
+                                 MaxLines="2" />
+                    </StackPanel>
+                    <TextBlock Grid.Column="3"
+                               Text="{Binding SourceLabel}"
+                               FontSize="11"
+                               Foreground="{DynamicResource Brush.TextTertiary}"
+                               VerticalAlignment="Center" />
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+  </StackPanel>
+</UserControl>

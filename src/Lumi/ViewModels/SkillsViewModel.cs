@@ -28,6 +28,8 @@ public partial class SkillsViewModel : ObservableObject
 
     public ObservableCollection<Skill> Skills { get; } = [];
 
+    public string SelectedSkillSharedSourceDisplay => SelectedSkill?.SharedSourceDisplay ?? "";
+
      public SkillsViewModel(DataStore dataStore)
      {
          _dataStore = dataStore;
@@ -96,11 +98,12 @@ public partial class SkillsViewModel : ObservableObject
         SelectedSkill = skill;
     }
 
-     partial void OnSelectedSkillChanged(Skill? value)
-     {
-         if (value is null) return;
-         SyncEditorFromSkill(value);
-         IsEditing = true;
+      partial void OnSelectedSkillChanged(Skill? value)
+      {
+          OnPropertyChanged(nameof(SelectedSkillSharedSourceDisplay));
+          if (value is null) return;
+          SyncEditorFromSkill(value);
+          IsEditing = true;
      }
 
      private void SyncEditorFromSkill(Skill skill)

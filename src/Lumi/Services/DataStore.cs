@@ -26,6 +26,7 @@ public class DataStore
     public static string SkillsDir { get; } = Path.Combine(AppDir, "skills");
     public static string ChatsDir { get; } = Path.Combine(AppDir, "chats");
     public static string CopilotConfigDir { get; } = Path.Combine(AppDir, "copilot");
+    public static string SharedRepositoriesDir { get; } = Path.Combine(AppDir, "shared-repositories");
 
     private AppData _data;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -51,6 +52,7 @@ public class DataStore
         Directory.CreateDirectory(SkillsDir);
         Directory.CreateDirectory(ChatsDir);
         Directory.CreateDirectory(CopilotConfigDir);
+        Directory.CreateDirectory(SharedRepositoriesDir);
         _data = Load();
         CleanOrphanedChats();
         SeedDefaults();

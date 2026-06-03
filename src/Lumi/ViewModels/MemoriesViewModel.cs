@@ -25,6 +25,8 @@ public partial class MemoriesViewModel : ObservableObject
 
     public ObservableCollection<Memory> Memories { get; } = [];
 
+    public string SelectedMemorySharedSourceDisplay => SelectedMemory?.SharedSourceDisplay ?? "";
+
      public MemoriesViewModel(DataStore dataStore)
      {
          _dataStore = dataStore;
@@ -95,10 +97,11 @@ public partial class MemoriesViewModel : ObservableObject
         SelectedMemory = memory;
     }
 
-     partial void OnSelectedMemoryChanged(Memory? value)
-     {
-         if (value is null) return;
-         SyncEditorFromMemory(value);
+      partial void OnSelectedMemoryChanged(Memory? value)
+      {
+          OnPropertyChanged(nameof(SelectedMemorySharedSourceDisplay));
+          if (value is null) return;
+          SyncEditorFromMemory(value);
          IsEditing = true;
      }
 

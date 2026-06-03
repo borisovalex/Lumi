@@ -9,7 +9,7 @@ namespace Lumi.Tests;
 
 public sealed class UpdateExperienceViewModelTests
 {
-    private const int SettingsNavIndex = 7;
+    private const int SettingsNavIndex = MainViewModel.SettingsNavIndex;
 
     private static MainViewModel CreateMainViewModel()
     {

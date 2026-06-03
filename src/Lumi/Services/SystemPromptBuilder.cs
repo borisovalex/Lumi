@@ -13,7 +13,8 @@ public static class SystemPromptBuilder
 {
     public static string Build(UserSettings settings, LumiAgent? agent, Project? project,
         List<Skill> allSkills, List<Skill> activeSkills, List<Memory> memories,
-        List<BackgroundJob>? backgroundJobs = null)
+        List<BackgroundJob>? backgroundJobs = null,
+        bool hasSharingRepositories = false)
     {
         var userName = settings.UserName ?? "there";
         var timeOfDay = GetTimeOfDay();
@@ -21,6 +22,9 @@ public static class SystemPromptBuilder
         var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var os = RuntimeInformation.OSDescription;
         var machine = Environment.MachineName;
+        var sharingManagementPrompt = hasSharingRepositories
+            ? "\n            - `manage_sharing` — List/sync configured sharing repositories and publish explicit skills, Lumis, or memories to them. Use only when the user explicitly asks to share/publish/sync team capabilities."
+            : "";
 
         // Pronouns from user sex
         var pronounLine = settings.UserSex switch
@@ -317,7 +321,13 @@ public static class SystemPromptBuilder
             ## Managing Lumi Itself
             You also have dedicated management tools for Lumi's own data: projects, skills, Lumis, MCP servers, background jobs, and memories.
             These are only for explicit user requests about Lumi itself — for example: "create a skill from this conversation", "show my projects", "edit that Lumi", "add an MCP server", "monitor this every morning", or "delete this memory".
-            The relevant tools are `manage_projects`, `manage_skills`, `manage_lumis`, `manage_mcps`, `manage_jobs`, and `manage_memories`.
+            The relevant tools are:
+            - `manage_projects` — List, create, update, or delete Lumi projects.
+            - `manage_skills` — List, create, update, or delete Lumi skills.
+            - `manage_lumis` — List, create, update, or delete Lumi agents.
+            - `manage_mcps` — List, create, update, or delete Lumi MCP servers.
+            - `manage_jobs` — List, create, update, pause, resume, run, or delete Lumi background jobs.
+            - `manage_memories` — List, create, update, or delete memories.{sharingManagementPrompt}
             Do NOT use these tools for normal task work, vague requests, or automatic saving.
             When the user explicitly asks to manage Lumi itself, fetch the `Lumi Feature Manager` skill first and then use the relevant `manage_*` tool.
 

@@ -206,6 +206,67 @@ public sealed class LumiFeatureManagerTests
     }
 
     [Fact]
+    public void ManageSharing_ListReportsConfiguredRepositories()
+    {
+        var repository = new LumiSharedRepository
+        {
+            Name = "Team",
+            Repository = @"C:\Team\LumiCapabilities",
+            LastSkillCount = 2,
+            LastMemoryCount = 1
+        };
+        var data = new AppData { SharedRepositories = [repository] };
+        var manager = new LumiFeatureManager(new DataStore(data));
+
+        var result = manager.ManageSharing("list");
+
+        Assert.False(result.DataChanged);
+        Assert.Contains("Sharing repositories:", result.Message);
+        Assert.Contains("Team", result.Message);
+        Assert.Contains("2 skills", result.Message);
+    }
+
+    [Fact]
+    public void ManageSharing_PublishSkillWritesToRepository()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-feature-sharing-{Guid.NewGuid():N}");
+        try
+        {
+            Directory.CreateDirectory(tempRoot);
+            var repository = new LumiSharedRepository
+            {
+                Name = "Team",
+                Repository = tempRoot
+            };
+            var skill = new Skill
+            {
+                Name = "Shared Writing",
+                Description = "Shared writing helper",
+                Content = "Write clearly.",
+                IconGlyph = "✍"
+            };
+            var data = new AppData
+            {
+                SharedRepositories = [repository],
+                Skills = [skill]
+            };
+            var manager = new LumiFeatureManager(new DataStore(data));
+
+            var result = manager.ManageSharing("publish_skill", repositoryIdentifier: "Team", itemIdentifier: "Shared Writing");
+
+            Assert.True(result.DataChanged);
+            Assert.Contains("Published skill", result.Message);
+            Assert.True(File.Exists(Path.Combine(tempRoot, ".github", "skills", "shared-writing", "SKILL.md")));
+            Assert.Equal(repository.Id, skill.SharedSource?.RepositoryId);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+                Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void ManageMcps_Update_RenamesChatSelections()
     {
         var server = new McpServer

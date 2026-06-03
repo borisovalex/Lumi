@@ -56,6 +56,8 @@ public partial class McpServersViewModel : ObservableObject
     public ObservableCollection<McpServer> Servers { get; } = [];
     public ObservableCollection<McpCatalogEntry> CatalogEntries { get; } = [];
 
+    public string SelectedServerSharedSourceDisplay => SelectedServer?.SharedSourceDisplay ?? "";
+
      public McpServersViewModel(DataStore dataStore)
      {
          _dataStore = dataStore;
@@ -138,10 +140,11 @@ public partial class McpServersViewModel : ObservableObject
         SelectedServer = server;
     }
 
-     partial void OnSelectedServerChanged(McpServer? value)
-     {
-         if (value is null) return;
-         SyncEditorFromServer(value);
+      partial void OnSelectedServerChanged(McpServer? value)
+      {
+          OnPropertyChanged(nameof(SelectedServerSharedSourceDisplay));
+          if (value is null) return;
+          SyncEditorFromServer(value);
 
          IsBrowsing = false;
          IsEditing = true;

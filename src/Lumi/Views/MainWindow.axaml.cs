@@ -722,7 +722,7 @@ public partial class MainWindow : Window
         // ── Ctrl+, — Settings ──
         if (ctrl && !alt && !shift && e.Key == Key.OemComma)
         {
-            vm.SelectedNavIndex = 7;
+            vm.SelectedNavIndex = MainViewModel.SettingsNavIndex;
             e.Handled = true;
             return;
         }
@@ -1074,14 +1074,14 @@ public partial class MainWindow : Window
         }
 
         // When projects tab is shown, update chat counts and refresh selected project chats
-        if (index == 1 && DataContext is MainViewModel vm)
+        if (index == 2 && DataContext is MainViewModel vm)
         {
             vm.ProjectsVM.RefreshSelectedProjectChats();
             Dispatcher.UIThread.Post(() => ApplyProjectChatCounts(vm), DispatcherPriority.Loaded);
         }
 
         // When settings tab is shown, refresh stats
-        if (index == 6 && DataContext is MainViewModel svm)
+        if (index == MainViewModel.SettingsNavIndex && DataContext is MainViewModel svm)
         {
             if (svm.SettingsVM.SelectedPageIndex < 0)
                 svm.SettingsVM.SelectedPageIndex = 0;
@@ -1089,7 +1089,7 @@ public partial class MainWindow : Window
         }
 
         // When MCP tab is shown and no server is selected/editing, auto-open browse catalog
-        if (index == 5 && DataContext is MainViewModel mcpvm)
+        if (index == 6 && DataContext is MainViewModel mcpvm)
         {
             if (!mcpvm.McpServersVM.IsEditing && mcpvm.McpServersVM.SelectedServer is null)
                 mcpvm.McpServersVM.BrowseCatalogCommand.Execute(null);
@@ -2861,6 +2861,12 @@ public partial class MainWindow : Window
 
                 case McpServer server:
                     vm.McpServersVM.SelectedServer = server;
+                    break;
+
+                case LumiSharedRepository repository:
+                    vm.SettingsVM.SearchQuery = "";
+                    vm.SettingsVM.SelectedPageIndex = SettingsViewModel.SharingPageIndex;
+                    vm.SharingVM.SelectedRepository = repository;
                     break;
 
                 default:

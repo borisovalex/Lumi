@@ -11,6 +11,7 @@ A personal agentic desktop assistant powered by [GitHub Copilot SDK](https://git
 - **Skills** — Reusable capability definitions in markdown that teach the assistant new abilities
 - **Projects** — Organize chats with custom instructions that shape Lumi's behavior
 - **Memories** — Persistent facts extracted from conversations, remembered across all sessions
+- **Lumi sharing** — Sync shared skills, Lumis, MCP servers, and memories from team git repositories in Settings → Sharing
 - **Context awareness** — Lumi assembles context from the active project, agent, time of day, user name, skills, and memories into every interaction
 - **System tray** — Minimize to tray with global hotkey for instant access
 - **Charts** — Inline interactive charts (line, bar, donut, pie) rendered in chat
@@ -74,6 +75,17 @@ src/Lumi/
 ```
 
 Data is persisted as a single JSON file in `%AppData%/Lumi/data.json` — no database required.
+
+## Lumi sharing repository layout
+
+Lumi sharing lets teams keep reusable capabilities in git. Add a repository in **Settings → Sharing** and Lumi will periodically pull it, import shared capabilities, and let users publish selected local skills, Lumis, or memories back to the repository.
+
+Supported repository conventions:
+
+- `.github/skills/**.md` or `.github/skills/*/SKILL.md` — shared skills
+- `.github/agents/**.md` or `.github/agents/*/AGENT.md` — shared Lumis; optional front matter keys: `icon`, `skills`, `tools`, `mcpServers`
+- `.vscode/mcp.json` — shared MCP server definitions
+- `.lumi/memories.json` — shared memories as `{ "memories": [{ "key": "...", "content": "...", "category": "..." }] }`
 
 ## License
 

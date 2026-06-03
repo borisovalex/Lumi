@@ -12,7 +12,8 @@ namespace Lumi.ViewModels;
 
 public partial class SettingsViewModel : ObservableObject, IDisposable
 {
-    public const int AboutPageIndex = 6;
+    public const int SharingPageIndex = 6;
+    public const int AboutPageIndex = 7;
 
     private readonly DataStore _dataStore;
     private readonly CopilotService _copilotService;
@@ -21,6 +22,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
 
     // ── Page navigation ──
     [ObservableProperty] private int _selectedPageIndex;
+    [ObservableProperty] private SharingViewModel? _sharingVM;
 
     // ── Search ──
     [ObservableProperty] private string _searchQuery = "";
@@ -54,6 +56,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         Loc.Settings_Chat,
         Loc.Settings_AIModels,
         Loc.Settings_PrivacyData,
+        Loc.Settings_Sharing,
         Loc.Settings_About
     ];
 

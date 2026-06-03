@@ -62,7 +62,13 @@
                           Foreground="{DynamicResource Brush.TextTertiary}" />
               </Button>
             </StackPanel>
-            <TextBlock Text="{loc:Str Editor_Skill}" Classes="subtitle" VerticalAlignment="Center" />
+            <StackPanel Spacing="2" VerticalAlignment="Center">
+              <TextBlock Text="{loc:Str Editor_Skill}" Classes="subtitle" />
+              <TextBlock Text="{Binding SelectedSkillSharedSourceDisplay}"
+                         FontSize="11"
+                         Foreground="{DynamicResource Brush.AccentDefault}"
+                         IsVisible="{Binding SelectedSkillSharedSourceDisplay, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
           </DockPanel>
 
           <!-- Icon + Name row -->

@@ -68,6 +68,7 @@
   "Nav_Lumis": "Lumis (Ctrl+5)",
   "Nav_Memories": "Memories (Ctrl+6)",
   "Nav_McpServers": "MCP Servers (Ctrl+7)",
+  "Nav_Sharing": "Sharing (Ctrl+8)",
   "Nav_Settings": "Settings (Ctrl+,)",
 
   "NavLabel_Chats": "Chats",
@@ -77,6 +78,7 @@
   "NavLabel_Lumis": "Lumis",
   "NavLabel_Memories": "Memories",
   "NavLabel_McpServers": "MCP",
+  "NavLabel_Sharing": "Share",
   "NavLabel_Settings": "Settings",
 
   "Sidebar_NewChat": "New Chat",
@@ -95,6 +97,8 @@
   "Sidebar_NewLumiTooltip": "New Lumi",
   "Sidebar_Memories": "Memories",
   "Sidebar_NewMemoryTooltip": "New memory",
+  "Sidebar_Sharing": "Sharing",
+  "Sidebar_NewSharingRepoTooltip": "New sharing repository",
   "Sidebar_Settings": "Settings",
   "Sidebar_SearchSettings": "Search settings\u2026",
   "Sidebar_All": "All",
@@ -448,6 +452,8 @@
   "Settings_AIModelsDesc": "Configure AI model and behavior",
   "Settings_PrivacyData": "Privacy & Data",
   "Settings_PrivacyDataDesc": "Manage your data and privacy preferences",
+  "Settings_Sharing": "Sharing",
+  "Settings_SharingDesc": "Load and publish team capabilities from git repositories",
   "Settings_About": "About",
   "Settings_AboutDesc": "Version, update status, and Lumi details",
 
