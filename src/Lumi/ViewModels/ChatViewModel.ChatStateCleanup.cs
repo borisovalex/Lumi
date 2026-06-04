@@ -162,6 +162,18 @@ public partial class ChatViewModel
         return false;
     }
 
+    private void DropCompletedTurnState(Guid chatId, bool dropCancellation)
+    {
+        _inProgressMessages.Remove(chatId);
+
+        if (!dropCancellation)
+            return;
+
+        // SessionIdle is emitted after background work is drained. Drop our
+        // reference without cancelling/disposal, matching ReleasePreviousTurnCancellation.
+        _ctsSources.Remove(chatId);
+    }
+
     private void DisposeSessionSubscription(Guid chatId)
     {
         if (_sessionSubs.TryGetValue(chatId, out var sub))

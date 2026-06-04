@@ -142,6 +142,7 @@ public sealed class TranscriptPagingHeadlessTests
 
         await session.Dispatch(async () =>
         {
+            TranscriptTurnControl.ResetDiagnostics();
             var turn = new TranscriptTurn("turn:0000");
             turn.Items.Add(new VisualTranscriptItem("item:0000", 72, "One"));
 
@@ -167,9 +168,10 @@ public sealed class TranscriptPagingHeadlessTests
 
             host.Children.Clear();
             await PumpAsync();
+            Assert.Equal(0, GetHostedItemCount(control));
 
             turn.Items.Add(new VisualTranscriptItem("item:0001", 72, "Two"));
-            Assert.Equal(1, GetHostedItemCount(control));
+            Assert.Equal(0, GetHostedItemCount(control));
 
             host.Children.Add(control);
             await PumpAsync();
@@ -179,6 +181,8 @@ public sealed class TranscriptPagingHeadlessTests
             Assert.Equal(3, GetHostedItemCount(control));
 
             window.Close();
+            await PumpAsync();
+            Assert.Equal(0, GetHostedItemCount(control));
         }, CancellationToken.None);
     }
 

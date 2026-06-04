@@ -1024,19 +1024,48 @@ public partial class ChatViewModel
                     ResetSubagentOutputState();
                     Dispatcher.UIThread.Post(() =>
                     {
-                    runtime.IsBusy = false;
-                    runtime.IsStreaming = false;
-                    runtime.StatusText = "";
-                    if (IsDisplayedSession())
-                    {
-                        _transcriptBuilder.HideTypingIndicator();
-                        _transcriptBuilder.CloseCurrentToolGroup();
-                        _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
-                        IsBusy = runtime.IsBusy;
-                        IsStreaming = runtime.IsStreaming;
-                        StatusText = runtime.StatusText;
-                    }
-                    QueueSaveChat(chat, saveIndex: true, touchIndex: true);
+                        FlushAssistantDelta();
+                        if (streamingMsg is not null)
+                        {
+                            streamingMsg.IsStreaming = false;
+                            if (!string.IsNullOrWhiteSpace(streamingMsg.Content)
+                                && !chat.Messages.Any(message => message.Id == streamingMsg.Id))
+                            {
+                                chat.Messages.Add(streamingMsg);
+                            }
+
+                            if (IsDisplayedSession())
+                                streamingVm?.NotifyStreamingEnded();
+
+                            streamingMsg = null;
+                            streamingVm = null;
+                        }
+                        assistantStream.Clear();
+
+                        if (reasoningMsg is not null)
+                        {
+                            reasoningMsg.IsStreaming = false;
+                            if (IsDisplayedSession())
+                                reasoningVm?.NotifyStreamingEnded();
+
+                            reasoningMsg = null;
+                            reasoningVm = null;
+                        }
+                        reasoningStream.Clear();
+                        DropCompletedTurnState(chat.Id, dropCancellation: false);
+                        runtime.IsBusy = false;
+                        runtime.IsStreaming = false;
+                        runtime.StatusText = "";
+                        if (IsDisplayedSession())
+                        {
+                            _transcriptBuilder.HideTypingIndicator();
+                            _transcriptBuilder.CloseCurrentToolGroup();
+                            _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
+                            IsBusy = runtime.IsBusy;
+                            IsStreaming = runtime.IsStreaming;
+                            StatusText = runtime.StatusText;
+                        }
+                        QueueSaveChat(chat, saveIndex: true, touchIndex: true);
                     });
                     break;
 
@@ -1051,6 +1080,7 @@ public partial class ChatViewModel
                 case SessionIdleEvent:
                     ClearManualStopRequested(chat.Id);
                     ClearPendingTurnTracking(chat.Id);
+                    DropCompletedTurnState(chat.Id, dropCancellation: true);
 
                     // Show model label once at the very end of the assistant turn
                     // (not per-message during agentic loops).

@@ -1,11 +1,13 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
-using System.ComponentModel;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
+using Avalonia.Data;
 using Avalonia.Layout;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace Lumi.ViewModels;
@@ -49,6 +51,9 @@ public sealed class TranscriptTurnControl : UserControl
 
     public static readonly StyledProperty<TranscriptTurn?> TurnProperty =
         AvaloniaProperty.Register<TranscriptTurnControl, TranscriptTurn?>(nameof(Turn));
+
+    private static readonly AttachedProperty<IDisposable?> ItemVisibilityBindingProperty =
+        AvaloniaProperty.RegisterAttached<TranscriptTurnControl, ContentPresenter, IDisposable?>("ItemVisibilityBinding");
 
     static TranscriptTurnControl()
     {
@@ -94,6 +99,7 @@ public sealed class TranscriptTurnControl : UserControl
         if (ReferenceEquals(oldTurn, newTurn))
             return;
 
+        VerifyUiThread();
         UnsubscribeFromTurnItems(oldTurn);
 
         _turn = newTurn;
@@ -117,6 +123,7 @@ public sealed class TranscriptTurnControl : UserControl
     {
         UnsubscribeFromTurnItems(_turn);
         _isAttachedToVisualTree = false;
+        ClearItemHosts();
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -128,19 +135,54 @@ public sealed class TranscriptTurnControl : UserControl
 
     private void OnItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        VerifyUiThread();
         switch (e.Action)
         {
             case NotifyCollectionChangedAction.Add when e.NewItems is not null && e.NewStartingIndex >= 0:
+                if (e.NewStartingIndex > _itemsHost.Children.Count)
+                {
+                    RebuildItemHosts();
+                    break;
+                }
+
                 for (var i = 0; i < e.NewItems.Count; i++)
-                    _itemsHost.Children.Insert(e.NewStartingIndex + i, CreateItemHost((TranscriptItem)e.NewItems[i]!));
+                    InsertItemHost(e.NewStartingIndex + i, GetTranscriptItem(e.NewItems[i]));
                 break;
             case NotifyCollectionChangedAction.Remove when e.OldItems is not null && e.OldStartingIndex >= 0:
+                if (e.OldStartingIndex + e.OldItems.Count > _itemsHost.Children.Count)
+                {
+                    RebuildItemHosts();
+                    break;
+                }
+
                 for (var i = 0; i < e.OldItems.Count; i++)
+                {
+                    ClearItemHost(_itemsHost.Children[e.OldStartingIndex]);
                     _itemsHost.Children.RemoveAt(e.OldStartingIndex);
+                }
                 break;
-            case NotifyCollectionChangedAction.Replace when e.NewItems is not null && e.NewStartingIndex >= 0:
+            case NotifyCollectionChangedAction.Replace
+                when e.OldItems is not null
+                     && e.NewItems is not null
+                     && e.OldStartingIndex >= 0
+                     && e.NewStartingIndex == e.OldStartingIndex
+                     && e.OldItems.Count == e.NewItems.Count
+                     && e.NewStartingIndex + e.NewItems.Count <= _itemsHost.Children.Count:
                 for (var i = 0; i < e.NewItems.Count; i++)
-                    _itemsHost.Children[e.NewStartingIndex + i] = CreateItemHost((TranscriptItem)e.NewItems[i]!);
+                    ReplaceItemHost(e.NewStartingIndex + i, GetTranscriptItem(e.NewItems[i]));
+                break;
+            case NotifyCollectionChangedAction.Move
+                when e.OldItems is not null
+                     && e.OldItems.Count == 1
+                     && e.OldStartingIndex >= 0
+                     && e.NewStartingIndex >= 0
+                     && e.OldStartingIndex < _itemsHost.Children.Count:
+                var child = _itemsHost.Children[e.OldStartingIndex];
+                _itemsHost.Children.RemoveAt(e.OldStartingIndex);
+                if (e.NewStartingIndex <= _itemsHost.Children.Count)
+                    _itemsHost.Children.Insert(e.NewStartingIndex, child);
+                else
+                    RebuildItemHosts();
                 break;
             case NotifyCollectionChangedAction.Move:
             case NotifyCollectionChangedAction.Reset:
@@ -152,7 +194,8 @@ public sealed class TranscriptTurnControl : UserControl
 
     private void RebuildItemHosts()
     {
-        _itemsHost.Children.Clear();
+        VerifyUiThread();
+        ClearItemHosts();
         if (_turn is null)
             return;
 
@@ -160,26 +203,72 @@ public sealed class TranscriptTurnControl : UserControl
             _itemsHost.Children.Add(CreateItemHost(item));
     }
 
-    private static Control CreateItemHost(TranscriptItem item)
+    private void ClearItemHosts()
+    {
+        for (var i = _itemsHost.Children.Count - 1; i >= 0; i--)
+            ClearItemHost(_itemsHost.Children[i]);
+
+        _itemsHost.Children.Clear();
+    }
+
+    private void InsertItemHost(int index, TranscriptItem item)
+    {
+        _itemsHost.Children.Insert(index, CreateItemHost(item));
+    }
+
+    private void ReplaceItemHost(int index, TranscriptItem item)
+    {
+        ClearItemHost(_itemsHost.Children[index]);
+        _itemsHost.Children[index] = CreateItemHost(item);
+    }
+
+    [UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2026",
+        Justification = "Runtime transcript hosts bind to internal TranscriptItem properties; this desktop app is not trimmed and binding avoids leak-prone view-capturing event handlers.")]
+    private static ContentPresenter CreateItemHost(TranscriptItem item)
     {
         Interlocked.Increment(ref _itemHostCreateCount);
         var presenter = new ContentPresenter
         {
             Content = item,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            IsVisible = item.IsItemVisible
+            HorizontalAlignment = HorizontalAlignment.Stretch
         };
 
-        PropertyChangedEventHandler handler = (_, e) =>
-        {
-            if (e.PropertyName == nameof(TranscriptItem.IsItemVisible))
-                presenter.IsVisible = item.IsItemVisible;
-        };
-
-        item.PropertyChanged += handler;
-        presenter.DetachedFromVisualTree += (_, _) => item.PropertyChanged -= handler;
+        var binding = presenter.Bind(
+            IsVisibleProperty,
+            new Binding
+            {
+                Path = nameof(TranscriptItem.IsItemVisible),
+                Source = item,
+                Mode = BindingMode.OneWay
+            });
+        presenter.SetValue(ItemVisibilityBindingProperty, binding);
 
         return presenter;
+    }
+
+    private static void ClearItemHost(Control host)
+    {
+        if (host is not ContentPresenter presenter)
+            return;
+
+        presenter.GetValue(ItemVisibilityBindingProperty)?.Dispose();
+        presenter.ClearValue(ItemVisibilityBindingProperty);
+        presenter.ClearValue(IsVisibleProperty);
+        presenter.Content = null;
+    }
+
+    private static TranscriptItem GetTranscriptItem(object? value)
+    {
+        return value as TranscriptItem
+               ?? throw new InvalidOperationException("Expected TranscriptItem in transcript collection change event.");
+    }
+
+    private static void VerifyUiThread()
+    {
+        if (!Dispatcher.UIThread.CheckAccess())
+            throw new InvalidOperationException("TranscriptTurnControl item hosts must be updated on the UI thread.");
     }
 
     private void SubscribeToTurnItems(TranscriptTurn? turn)

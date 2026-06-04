@@ -104,6 +104,37 @@ public sealed class ChatViewModelLeakTests
     }
 
     [Fact]
+    public void DropCompletedTurnState_RemovesStaleLiveOwnershipMarkersAfterIdle()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "completed" };
+        dataStore.Data.Chats.Add(chat);
+
+        GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates")[chat.Id] = new ChatRuntimeState
+        {
+            Chat = chat
+        };
+        GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources")[chat.Id] = new CancellationTokenSource();
+        GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages")[chat.Id] =
+            new ChatMessage { Role = "assistant", Content = "done" };
+
+        Assert.True(vm.OwnsLiveChat(chat.Id));
+
+        InvokePrivate(vm, "DropCompletedTurnState", chat.Id, false);
+
+        Assert.True(GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources").ContainsKey(chat.Id));
+        Assert.False(GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages").ContainsKey(chat.Id));
+        Assert.True(vm.OwnsLiveChat(chat.Id));
+
+        InvokePrivate(vm, "DropCompletedTurnState", chat.Id, true);
+
+        Assert.False(GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources").ContainsKey(chat.Id));
+        Assert.False(GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages").ContainsKey(chat.Id));
+        Assert.False(vm.OwnsLiveChat(chat.Id));
+    }
+
+    [Fact]
     public void CancelPendingQuestions_RemovesTrackedQuestionTasks()
     {
         var dataStore = CreateDataStore();
