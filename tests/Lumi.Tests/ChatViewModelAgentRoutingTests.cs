@@ -365,16 +365,17 @@ public sealed class ChatViewModelAgentRoutingTests
     {
         using var harness = CreateHarness(new AppData());
 
-        var tools = InvokeBuildCustomTools(harness.ViewModel);
-        var toolNames = tools.Select(tool => tool.Name).ToArray();
+        var toolNames = InvokeBuildCustomTools(harness.ViewModel)
+            .Select(tool => tool.Name)
+            .ToArray();
 
-        Assert.Contains("lumi_browser_open", toolNames);
-        Assert.Contains("lumi_browser_look", toolNames);
-        Assert.Contains("lumi_browser_find", toolNames);
-        Assert.Contains("lumi_browser_do", toolNames);
-        Assert.Contains("lumi_browser_js", toolNames);
-        Assert.DoesNotContain(toolNames, static name =>
-            name.Equals("browser", StringComparison.Ordinal) || name.StartsWith("browser_", StringComparison.Ordinal));
+        Assert.Contains(ToolDisplayHelper.BrowserOpenToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserLookToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserFindToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserDoToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserJsToolName, toolNames);
+        Assert.DoesNotContain("browser", toolNames);
+        Assert.DoesNotContain(toolNames, static name => name.StartsWith("browser_", StringComparison.Ordinal));
     }
 
     private static TestHarness CreateHarness(AppData data)

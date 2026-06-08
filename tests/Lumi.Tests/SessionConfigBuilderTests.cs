@@ -31,6 +31,9 @@ public sealed class SessionConfigBuilderTests
         Assert.False(config.EnableConfigDiscovery);
         Assert.NotNull(config.McpServers);
         Assert.Empty(config.McpServers!);
+        Assert.Contains("builtin:web_fetch", config.ExcludedTools!);
+        Assert.Contains("builtin:browser", config.ExcludedTools!);
+        Assert.DoesNotContain("builtin:web_search", config.ExcludedTools!);
     }
 
     [Fact]
@@ -57,6 +60,9 @@ public sealed class SessionConfigBuilderTests
         Assert.False(config.EnableConfigDiscovery);
         Assert.NotNull(config.McpServers);
         Assert.Empty(config.McpServers!);
+        Assert.Contains("builtin:web_fetch", config.ExcludedTools!);
+        Assert.Contains("builtin:browser", config.ExcludedTools!);
+        Assert.DoesNotContain("builtin:web_search", config.ExcludedTools!);
     }
 
     [Fact]

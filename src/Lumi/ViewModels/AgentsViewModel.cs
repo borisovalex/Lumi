@@ -122,11 +122,11 @@ public partial class AgentsViewModel : ObservableObject
     [
         ("web_search", "Web Search", "Web", "Search the web for information (SDK built-in, Bing-powered)."),
         ("lumi_fetch", "Fetch Webpage", "Web", "Fetch a webpage and return its text content."),
-        ("lumi_browser_open", "Open Browser", "Browser", "Open a URL in the browser with persistent cookies/sessions."),
-        ("lumi_browser_look", "Browser Look", "Browser", "Get the current page state with interactive elements."),
-        ("lumi_browser_find", "Browser Find", "Browser", "Find and rank interactive elements by query."),
-        ("lumi_browser_do", "Browser Interact", "Browser", "Click, type, press keys, select, scroll in the browser."),
-        ("lumi_browser_js", "Browser JavaScript", "Browser", "Run JavaScript in the browser page context."),
+        (ToolDisplayHelper.BrowserOpenToolName, "Open Browser", "Browser", "Open a URL in the browser with persistent cookies/sessions."),
+        (ToolDisplayHelper.BrowserLookToolName, "Browser Look", "Browser", "Get the current page state with interactive elements."),
+        (ToolDisplayHelper.BrowserFindToolName, "Browser Find", "Browser", "Find and rank interactive elements by query."),
+        (ToolDisplayHelper.BrowserDoToolName, "Browser Interact", "Browser", "Click, type, press keys, select, scroll in the browser."),
+        (ToolDisplayHelper.BrowserJsToolName, "Browser JavaScript", "Browser", "Run JavaScript in the browser page context."),
         ("ui_list_windows", "List Windows", "Desktop", "List all visible windows on the desktop."),
         ("ui_inspect", "Inspect Window", "Desktop", "Inspect the UI element tree of a window."),
         ("ui_find", "Find UI Element", "Desktop", "Find UI elements matching a search query."),
@@ -155,30 +155,13 @@ public partial class AgentsViewModel : ObservableObject
         AvailableTools.Clear();
         // Empty ToolNames means "all tools" — show all as selected
         var toolNames = agent?.ToolNames ?? [];
-        var hasRestrictions = toolNames.Count > 0;
+        var runtimeToolNames = ToolDisplayHelper.ToRuntimeToolNames(toolNames);
+        var hasRestrictions = runtimeToolNames.Count > 0;
         foreach (var (name, displayName, group, description) in KnownTools)
         {
-            var isAssigned = !hasRestrictions || IsToolAssigned(toolNames, name);
+            var isAssigned = !hasRestrictions || runtimeToolNames.Contains(name);
             AvailableTools.Add(new ToolToggle(name, displayName, group, description, isAssigned));
         }
-    }
-
-    private static bool IsToolAssigned(List<string> toolNames, string toolName)
-    {
-        if (toolNames.Contains(toolName))
-            return true;
-
-        var legacyName = toolName switch
-        {
-            "lumi_browser_open" => "browser",
-            "lumi_browser_look" => "browser_look",
-            "lumi_browser_find" => "browser_find",
-            "lumi_browser_do" => "browser_do",
-            "lumi_browser_js" => "browser_js",
-            _ => null
-        };
-
-        return legacyName is not null && toolNames.Contains(legacyName);
     }
 
     [RelayCommand]

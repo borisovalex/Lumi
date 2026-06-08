@@ -988,7 +988,7 @@ public class DataStore
                        - Use the user's Documents folder (resolve from `$env:USERPROFILE` if needed via a quick PowerShell call).
                        - Use a short descriptive slug (e.g., `lumi-website-tokyo-itinerary.html`).
 
-                    6. **Open in Lumi's browser** — Use the `browser` tool to navigate to the local file URL:
+                    6. **Open in Lumi's browser** — Use the `lumi_browser_open` tool to navigate to the local file URL:
                        - Convert the file path to a `file:///` URL: replace backslashes with forward slashes and prefix with `file:///`.
                        - Example: `C:\Users\John\Documents\lumi-website-tokyo.html` → `file:///C:/Users/John/Documents/lumi-website-tokyo.html`
                        - This opens the website inside Lumi's built-in browser panel so the user sees it immediately.
@@ -997,7 +997,7 @@ public class DataStore
 
                     ## Important Rules
                     - The HTML file MUST be fully self-contained and valid. All styles and scripts are inlined or loaded from CDNs.
-                    - Never use `localhost` or start a web server. Just save an `.html` file and open it with the `browser` tool.
+                    - Never use `localhost` or start a web server. Just save an `.html` file and open it with the `lumi_browser_open` tool.
                     - Make the website genuinely impressive — not a basic page with plain text. Use modern CSS, animations, and interactivity.
                     - If the conversation content is long, organize it into navigable sections with a sticky navigation bar or sidebar.
                     - Always include a header/hero section with a title and brief description.

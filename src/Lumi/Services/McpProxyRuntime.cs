@@ -461,7 +461,6 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
     private const int DiagnosticLineLimit = 8;
     private const int DiagnosticLineMaxLength = 500;
     private const int DiagnosticTextMaxLength = 2_000;
-    private static readonly Regex CapiToolNamespacePattern = new(@"^[A-Za-z0-9_-]+$", RegexOptions.Compiled);
     private static readonly Regex SensitiveDiagnosticPattern = new(
         @"(?i)(authorization|token|api[_-]?key|secret|password)(\s*[=:]\s*)([^\s,;]+)",
         RegexOptions.Compiled);
@@ -608,7 +607,7 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
             if (!initResponse.TryGetProperty("result", out var result))
                 throw new InvalidOperationException($"MCP server '{_definition.Name}' did not return an initialize result.");
 
-            _initializeResult = SanitizeInitializeResult(result);
+            _initializeResult = result.Clone();
             await SendNotificationAsync("notifications/initialized", null, cancellationToken).ConfigureAwait(false);
             return _initializeResult.Value;
         }
@@ -616,39 +615,6 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
         {
             _lifecycleLock.Release();
         }
-    }
-
-    private JsonElement SanitizeInitializeResult(JsonElement result)
-    {
-        var configuredName = NormalizeToolNamespace(_definition.Name);
-        // The Copilot API uses MCP serverInfo.name as the tool namespace; dotted names like "Lumi.Mcp" are rejected.
-        if (result.TryGetProperty("serverInfo", out var serverInfo)
-            && serverInfo.TryGetProperty("name", out var nameProperty)
-            && CapiToolNamespacePattern.IsMatch(nameProperty.GetString() ?? ""))
-            return result.Clone();
-
-        var node = JsonNode.Parse(result.GetRawText())?.AsObject()
-            ?? throw new JsonException("MCP initialize result must be a JSON object.");
-        var serverInfoNode = node["serverInfo"] as JsonObject;
-        if (serverInfoNode is null)
-        {
-            serverInfoNode = [];
-            node["serverInfo"] = serverInfoNode;
-        }
-
-        serverInfoNode["name"] = configuredName;
-        using var document = JsonDocument.Parse(node.ToJsonString());
-        return document.RootElement.Clone();
-    }
-
-    private static string NormalizeToolNamespace(string value)
-    {
-        var builder = new StringBuilder(value.Length);
-        foreach (var ch in value)
-            builder.Append(char.IsAsciiLetterOrDigit(ch) || ch is '_' or '-' ? ch : '-');
-
-        var normalized = builder.ToString().Trim('-');
-        return string.IsNullOrWhiteSpace(normalized) ? "mcp" : normalized;
     }
 
     private void StartProcess()

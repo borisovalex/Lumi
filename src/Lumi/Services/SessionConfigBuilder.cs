@@ -30,10 +30,11 @@ public sealed class LightweightSessionOptions
         /// <summary>Lumi owns MCP and skill selection explicitly; SDK discovery would bypass per-chat toggles.</summary>
         private const bool EnableSdkConfigDiscovery = false;
 
-    /// <summary>Built-in SDK tools that Lumi provides itself and should not be duplicated by the runtime.</summary>
-    private static readonly ToolSet ExcludedBuiltInTools = new ToolSet()
-        .AddBuiltIn("web_fetch")
-        .AddBuiltIn("browser");
+    /// <summary>Built-in namespaces that Lumi provides itself and should not be duplicated by the SDK.</summary>
+    private static ToolSet ExcludedBuiltInTools()
+        => new ToolSet()
+            .AddBuiltIn("web_fetch")
+            .AddBuiltIn("browser");
 
     /// <summary>
     /// Builds a <see cref="SessionConfig"/> for creating a new session.
@@ -61,7 +62,7 @@ public sealed class LightweightSessionOptions
             ConfigDirectory = GetDefaultConfigDir(),
             EnableConfigDiscovery = EnableSdkConfigDiscovery,
             EnableSessionStore = true,
-            ExcludedTools = ExcludedBuiltInTools,
+            ExcludedTools = ExcludedBuiltInTools(),
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
         };
@@ -98,7 +99,7 @@ public sealed class LightweightSessionOptions
             ConfigDirectory = GetDefaultConfigDir(),
             EnableConfigDiscovery = EnableSdkConfigDiscovery,
             EnableSessionStore = true,
-            ExcludedTools = ExcludedBuiltInTools,
+            ExcludedTools = ExcludedBuiltInTools(),
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
         };

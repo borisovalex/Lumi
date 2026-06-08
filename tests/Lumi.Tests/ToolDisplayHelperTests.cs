@@ -7,6 +7,30 @@ namespace Lumi.Tests;
 public class ToolDisplayHelperTests
 {
     [Fact]
+    public void ToRuntimeToolNames_NormalizesLegacyBrowserToolsForSdk()
+    {
+        var normalized = ToolDisplayHelper.ToRuntimeToolNames(
+        [
+            "browser",
+            "browser_look",
+            "browser_find",
+            "browser_do",
+            "browser_js",
+            "code_review"
+        ]);
+
+        Assert.Equal(
+        [
+            "lumi_browser_open",
+            "lumi_browser_look",
+            "lumi_browser_find",
+            "lumi_browser_do",
+            "lumi_browser_js",
+            "code_review"
+        ], normalized);
+    }
+
+    [Fact]
     public void FormatToolStatusName_Task_UsesFriendlyAgentLabel()
     {
         var status = ToolDisplayHelper.FormatToolStatusName("task", "{\"agent_type\":\"explore\"}");

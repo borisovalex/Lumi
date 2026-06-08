@@ -16,6 +16,24 @@ namespace Lumi.Services;
 public static partial class ToolDisplayHelper
 {
     public const string WorkspaceFileChangedToolName = "workspace_file_changed";
+    public const string BrowserOpenToolName = "lumi_browser_open";
+    public const string BrowserLookToolName = "lumi_browser_look";
+    public const string BrowserFindToolName = "lumi_browser_find";
+    public const string BrowserDoToolName = "lumi_browser_do";
+    public const string BrowserJsToolName = "lumi_browser_js";
+
+    public static string ToRuntimeToolName(string toolName) => toolName switch
+    {
+        "browser" => BrowserOpenToolName,
+        "browser_look" => BrowserLookToolName,
+        "browser_find" => BrowserFindToolName,
+        "browser_do" => BrowserDoToolName,
+        "browser_js" => BrowserJsToolName,
+        _ => toolName
+    };
+
+    public static IReadOnlyList<string> ToRuntimeToolNames(IEnumerable<string> toolNames)
+        => [.. toolNames.Select(ToRuntimeToolName).Distinct(StringComparer.Ordinal)];
 
     public static string GetToolGlyph(string toolName) => toolName switch
     {
@@ -24,7 +42,7 @@ public static partial class ToolDisplayHelper
             or "replace_string_in_file" or "multi_replace_string_in_file" or "str_replace_editor" or "apply_patch" => "📝",
         "view" or "read_file" or "read" => "📄",
         "browser" or "browser_navigate" or "browser_do" or "browser_look" or "browser_find" or "browser_js"
-            or "lumi_browser_open" or "lumi_browser_do" or "lumi_browser_look" or "lumi_browser_find" or "lumi_browser_js" => "🌐",
+            or BrowserOpenToolName or BrowserLookToolName or BrowserFindToolName or BrowserDoToolName or BrowserJsToolName => "🌐",
         "web_search" or "search" => "🔎",
         "web_fetch" or "lumi_fetch" => "📚",
         "ui_inspect" or "ui_find" or "ui_click" or "ui_type" or "ui_read" => "🖥",
@@ -123,19 +141,19 @@ public static partial class ToolDisplayHelper
             case "delete_file" or "delete" or "rm":
                 return (Loc.Tool_DeletingFile, ExtractShortFileName(argsJson));
             case "browser":
-            case "lumi_browser_open":
+            case BrowserOpenToolName:
                 return (Loc.Tool_OpeningPage, ExtractJsonField(argsJson, "url"));
             case "browser_look":
-            case "lumi_browser_look":
+            case BrowserLookToolName:
                 return (Loc.Tool_BrowserSnapshot, null);
             case "browser_find":
-            case "lumi_browser_find":
-                return (Loc.Tool_SearchingWeb, ExtractJsonField(argsJson, "query"));
+            case BrowserFindToolName:
+                return (Loc.Tool_FindingElement, ExtractJsonField(argsJson, "query"));
             case "browser_do":
-            case "lumi_browser_do":
+            case BrowserDoToolName:
                 return (Loc.Tool_Action, ExtractJsonField(argsJson, "action"));
             case "browser_js":
-            case "lumi_browser_js":
+            case BrowserJsToolName:
                 return (Loc.Tool_BrowserEvaluate, null);
             case "save_memory":
                 return (Loc.Tool_Remembering, ExtractJsonField(argsJson, "key"));
