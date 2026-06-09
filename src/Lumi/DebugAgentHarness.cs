@@ -148,6 +148,8 @@ public static class DebugAgentHarness
         chat.Messages.Add(Tool("powershell", JsonObject(
             JsonProperty("command", JsonString("Write-Output 'fixture terminal output'")),
             JsonProperty("description", JsonString("Emit fixture output"))), "Completed", output: "fixture terminal output\nexit code: 0"));
+        chat.Messages.Add(Tool("example_mcp_lookup", JsonObject(
+            JsonProperty("query", JsonString("Busy"))), "Failed", output: "MCP server returned an example lookup failure."));
         var todoArgs = JsonObject(
             JsonProperty("todoList", JsonArray(
                 JsonObject(

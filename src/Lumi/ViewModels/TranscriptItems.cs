@@ -411,6 +411,7 @@ public partial class ToolGroupItem : TranscriptItem
 
     public ObservableCollection<ToolCallItemBase> ToolCalls { get; } = [];
     public bool HasStreamingSummary => !string.IsNullOrWhiteSpace(StreamingSummary);
+    public ChatMessageViewModel? Source { get; set; }
 
     public ToolGroupItem(string label, string? stableId = null)
         : base(stableId ?? TranscriptIds.Create("tool-group"))
@@ -426,6 +427,7 @@ public partial class ToolGroupItem : TranscriptItem
 public partial class SingleToolItem : TranscriptItem
 {
     public ToolCallItemBase Inner { get; }
+    private readonly ChatMessageViewModel? _source;
 
     [ObservableProperty] private bool _isExpanded;
 
@@ -470,6 +472,7 @@ public partial class SingleToolItem : TranscriptItem
     public string? MoreInfo => Inner switch
     {
         ToolCallItem tc => tc.MoreInfo,
+        _ when _source?.Message.ToolStatus == "Failed" => _source.Message.ToolOutput,
         _ => null
     };
 
@@ -487,6 +490,12 @@ public partial class SingleToolItem : TranscriptItem
         : base($"single:{inner.StableId}")
     {
         Inner = inner;
+    }
+
+    public SingleToolItem(ToolCallItemBase inner, ChatMessageViewModel? source)
+        : this(inner)
+    {
+        _source = source;
     }
 }
 

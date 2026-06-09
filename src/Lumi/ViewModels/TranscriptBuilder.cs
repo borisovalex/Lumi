@@ -403,6 +403,7 @@ public class TranscriptBuilder
 
             EnsureCurrentToolGroup(initialStatus, toolStableIdSeed, turnStableId);
             var capturedTermGroup = _currentToolGroup!;
+            capturedTermGroup.Source ??= msgVm;
             var termParentSubagent = FindOwningSubagent(msgVm.Message.ParentToolCallId);
 
             if (!IsRebuildingTranscript)
@@ -414,6 +415,12 @@ public class TranscriptBuilder
                         return;
 
                     termPreview.Status = MapToolStatus(msgVm.ToolStatus);
+                    if (termPreview.Status == StrataAiToolCallStatus.Failed
+                        && !string.IsNullOrWhiteSpace(msgVm.Message.ToolOutput))
+                    {
+                        termPreview.Output = msgVm.Message.ToolOutput;
+                    }
+
                     if (toolCallId is not null && termPreview.Status is not StrataAiToolCallStatus.InProgress
                         && _toolStartTimes.TryGetValue(toolCallId, out var startTick))
                     {
@@ -448,7 +455,7 @@ public class TranscriptBuilder
         var toolCall = new ToolCallItem(friendlyName, initialStatus, $"tool:{toolStableIdSeed}")
         {
             InputParameters = ToolDisplayHelper.FormatToolArgsFriendly(toolName, msgVm.Content),
-            MoreInfo = friendlyInfo,
+            MoreInfo = BuildToolCallMoreInfo(friendlyInfo, msgVm, initialStatus),
             IsCompact = ToolDisplayHelper.IsCompactEligible(toolName)
                 && initialStatus == StrataAiToolCallStatus.Completed,
         };
@@ -466,6 +473,7 @@ public class TranscriptBuilder
 
         EnsureCurrentToolGroup(initialStatus, toolStableIdSeed, turnStableId);
         var capturedToolGroup = _currentToolGroup!;
+        capturedToolGroup.Source ??= msgVm;
         var toolParentSubagent = FindOwningSubagent(msgVm.Message.ParentToolCallId);
 
         if (!IsRebuildingTranscript)
@@ -490,6 +498,12 @@ public class TranscriptBuilder
                 if (toolCall.Status == StrataAiToolCallStatus.Failed && ToolDisplayHelper.IsFileEditTool(toolName))
                     RemoveTrackedFileEditDiffs(msgVm);
 
+                if (toolCall.Status == StrataAiToolCallStatus.Failed
+                    && !string.IsNullOrWhiteSpace(msgVm.Message.ToolOutput))
+                {
+                    toolCall.MoreInfo = BuildFailedToolMoreInfo(toolCall.MoreInfo, msgVm.Message.ToolOutput);
+                }
+
                 if (toolParentSubagent is not null)
                     UpdateSubagentState(toolParentSubagent);
 
@@ -511,6 +525,31 @@ public class TranscriptBuilder
         UpdateToolGroupLabel();
         if (shouldFlushLateFileEdit && diffs.Count > 0)
             FlushPendingFileEdits();
+    }
+
+    private static string? BuildToolCallMoreInfo(
+        string? friendlyInfo,
+        ChatMessageViewModel msgVm,
+        StrataAiToolCallStatus status)
+    {
+        if (status == StrataAiToolCallStatus.Failed)
+            return BuildFailedToolMoreInfo(friendlyInfo, msgVm.Message.ToolOutput);
+
+        return friendlyInfo;
+    }
+
+    private static string? BuildFailedToolMoreInfo(string? friendlyInfo, string? toolOutput)
+    {
+        if (string.IsNullOrWhiteSpace(toolOutput))
+            return friendlyInfo;
+
+        if (string.IsNullOrWhiteSpace(friendlyInfo))
+            return toolOutput;
+
+        if (friendlyInfo.Contains(toolOutput, StringComparison.Ordinal))
+            return friendlyInfo;
+
+        return $"{friendlyInfo}{Environment.NewLine}{Environment.NewLine}{toolOutput}";
     }
 
     private List<(string FilePath, string? OldText, string? NewText)> TrackFileEditToolDiffs(
@@ -1143,7 +1182,7 @@ public class TranscriptBuilder
             {
                 var idx = target.IndexOf(_currentToolGroup);
                 if (idx >= 0)
-                    target[idx] = new SingleToolItem(_currentToolGroup.ToolCalls[0]);
+                    target[idx] = new SingleToolItem(_currentToolGroup.ToolCalls[0], _currentToolGroup.Source);
             }
         }
 
@@ -1252,7 +1291,7 @@ public class TranscriptBuilder
                 {
                     var idx = turn.IndexOf(group);
                     if (idx >= 0)
-                        turn.Items[idx] = new SingleToolItem(group.ToolCalls[0]);
+                        turn.Items[idx] = new SingleToolItem(group.ToolCalls[0], group.Source);
                 }
             }
         }

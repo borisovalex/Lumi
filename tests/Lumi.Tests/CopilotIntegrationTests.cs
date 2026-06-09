@@ -1429,6 +1429,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var config = SimpleConfig();
         Assert.Contains("builtin:web_fetch", config.ExcludedTools!);
         Assert.Contains("builtin:browser", config.ExcludedTools!);
+        Assert.Contains("builtin:ask_user", config.ExcludedTools!);
         Assert.DoesNotContain("builtin:web_search", config.ExcludedTools!);
     }
 

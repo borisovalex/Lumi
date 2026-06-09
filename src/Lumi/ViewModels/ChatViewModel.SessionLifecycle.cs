@@ -105,6 +105,7 @@ public partial class ChatViewModel
         var terminalRootByToolCallId = new Dictionary<string, string>(StringComparer.Ordinal);
         var externalToolCallIdByRequestId = new Dictionary<string, string>(StringComparer.Ordinal);
         var completedToolStatusesByCallId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var completedToolOutputsByCallId = new Dictionary<string, string>(StringComparer.Ordinal);
         StreamingTextAccumulator? assistantStream = null;
         StreamingTextAccumulator? reasoningStream = null;
         var activeSubagentSelectionDepth = 0;
@@ -773,6 +774,11 @@ public partial class ChatViewModel
                         isStreaming: runtime.IsStreaming);
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == startToolCallId);
                     var toolStatus = completedToolStatusesByCallId.GetValueOrDefault(startToolCallId) ?? "InProgress";
+                    var completedToolOutput = toolStatus == "Failed"
+                        && completedToolOutputsByCallId.TryGetValue(startToolCallId, out var cachedCompletedToolOutput)
+                            ? cachedCompletedToolOutput
+                            : null;
+                    var shouldSaveCachedFailureOutput = toolStatus == "Failed" && !string.IsNullOrWhiteSpace(completedToolOutput);
                     if (toolMsg is null)
                     {
                         toolMsg = new ChatMessage
@@ -782,6 +788,7 @@ public partial class ChatViewModel
                             ParentToolCallId = toolStart.Data.ParentToolCallId,
                             ToolName = toolStart.Data.ToolName,
                             ToolStatus = toolStatus,
+                            ToolOutput = completedToolOutput,
                             Content = toolStart.Data.Arguments?.ToString() ?? "",
                             Author = displayName
                         };
@@ -792,9 +799,15 @@ public partial class ChatViewModel
                         toolMsg.ParentToolCallId = toolStart.Data.ParentToolCallId;
                         toolMsg.ToolName = toolStart.Data.ToolName;
                         toolMsg.ToolStatus = toolStatus;
+                        if (toolStatus == "Failed")
+                            toolMsg.ToolOutput = completedToolOutput;
+
                         toolMsg.Content = toolStart.Data.Arguments?.ToString() ?? "";
                         toolMsg.Author = displayName;
                     }
+
+                    if (shouldSaveCachedFailureOutput)
+                        QueueSaveChat(chat, saveIndex: false);
 
                     if (IsDisplayedSession())
                     {
@@ -865,6 +878,13 @@ public partial class ChatViewModel
                         SchedulePostToolReconciliation(chat.Id);
                     var completedToolStatus = toolEnd.Data.Success == true ? "Completed" : "Failed";
                     completedToolStatusesByCallId[toolEnd.Data.ToolCallId] = completedToolStatus;
+                    var completedToolOutput = toolEnd.Data.Success == true
+                        ? null
+                        : ToolDisplayHelper.ExtractFailedToolOutput(toolEnd.Data.Error, toolEnd.Data.Result);
+                    if (!string.IsNullOrWhiteSpace(completedToolOutput))
+                        completedToolOutputsByCallId[toolEnd.Data.ToolCallId] = completedToolOutput;
+                    else
+                        completedToolOutputsByCallId.Remove(toolEnd.Data.ToolCallId);
                     Dispatcher.UIThread.Post(() =>
                     {
                     toolParentById[toolEnd.Data.ToolCallId] = toolEnd.Data.ParentToolCallId;
@@ -873,6 +893,9 @@ public partial class ChatViewModel
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == toolEnd.Data.ToolCallId);
                     if (toolMsg is not null)
                     {
+                        if (!success)
+                            toolMsg.ToolOutput = completedToolOutput;
+
                         toolMsg.ToolStatus = success ? "Completed" : "Failed";
                         if (IsDisplayedSession())
                         {
@@ -881,6 +904,13 @@ public partial class ChatViewModel
                         }
 
                         var toolName = toolMsg.ToolName;
+                        if (!success)
+                        {
+                            if (!string.IsNullOrWhiteSpace(completedToolOutput))
+                            {
+                                QueueSaveChat(chat, saveIndex: false);
+                            }
+                        }
 
                         if (success)
                         {
@@ -911,7 +941,7 @@ public partial class ChatViewModel
                             }
                         }
 
-                        if (ToolDisplayHelper.IsTerminalStreamingTool(toolName) && IsDisplayedSession())
+                        if (success && ToolDisplayHelper.IsTerminalStreamingTool(toolName) && IsDisplayedSession())
                         {
                             var rootToolCallId = ToolDisplayHelper.ResolveRootTerminalToolCallId(
                                 toolEnd.Data.ToolCallId, toolParentById, terminalRootByToolCallId);
@@ -944,6 +974,11 @@ public partial class ChatViewModel
 
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == externalToolRequest.Data.ToolCallId);
                     var toolStatus = completedToolStatusesByCallId.GetValueOrDefault(externalToolRequest.Data.ToolCallId) ?? "InProgress";
+                    var completedToolOutput = toolStatus == "Failed"
+                        && completedToolOutputsByCallId.TryGetValue(externalToolRequest.Data.ToolCallId, out var cachedCompletedToolOutput)
+                            ? cachedCompletedToolOutput
+                            : null;
+                    var shouldSaveCachedFailureOutput = toolStatus == "Failed" && !string.IsNullOrWhiteSpace(completedToolOutput);
                     if (toolMsg is null)
                     {
                         toolMsg = new ChatMessage
@@ -952,6 +987,7 @@ public partial class ChatViewModel
                             ToolCallId = externalToolRequest.Data.ToolCallId,
                             ToolName = externalToolRequest.Data.ToolName,
                             ToolStatus = toolStatus,
+                            ToolOutput = completedToolOutput,
                             Content = arguments ?? "",
                             Author = displayName
                         };
@@ -961,9 +997,15 @@ public partial class ChatViewModel
                     {
                         toolMsg.ToolName = externalToolRequest.Data.ToolName;
                         toolMsg.ToolStatus = toolStatus;
+                        if (toolStatus == "Failed")
+                            toolMsg.ToolOutput = completedToolOutput;
+
                         toolMsg.Content = arguments ?? "";
                         toolMsg.Author = displayName;
                     }
+
+                    if (shouldSaveCachedFailureOutput)
+                        QueueSaveChat(chat, saveIndex: false);
 
                     if (IsDisplayedSession())
                     {

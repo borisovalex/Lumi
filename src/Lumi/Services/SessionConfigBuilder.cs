@@ -34,7 +34,8 @@ public sealed class LightweightSessionOptions
     private static ToolSet ExcludedBuiltInTools()
         => new ToolSet()
             .AddBuiltIn("web_fetch")
-            .AddBuiltIn("browser");
+            .AddBuiltIn("browser")
+            .AddBuiltIn("ask_user");
 
     /// <summary>
     /// Builds a <see cref="SessionConfig"/> for creating a new session.

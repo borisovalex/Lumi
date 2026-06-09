@@ -50,6 +50,28 @@ public sealed class TranscriptBuilderToolGroupTests
     }
 
     [Fact]
+    public void ProcessMessageToTranscript_FailedTerminalStatusUpdateShowsCapturedOutput()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var toolVm = CreateToolVm("tool-1", "powershell", "InProgress", "{\"command\":\"dotnet test\"}");
+        builder.ProcessMessageToTranscript(toolVm);
+
+        var group = Assert.IsType<ToolGroupItem>(Assert.Single(Assert.Single(liveTurns).Items));
+        var terminal = Assert.IsType<TerminalPreviewItem>(Assert.Single(group.ToolCalls));
+        Assert.Empty(terminal.Output);
+
+        toolVm.Message.ToolOutput = "Command failed with exit code 1.";
+        toolVm.Message.ToolStatus = "Failed";
+        toolVm.NotifyToolStatusChanged();
+
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Failed, terminal.Status);
+        Assert.Equal("Command failed with exit code 1.", terminal.Output);
+    }
+
+    [Fact]
     public void ProcessMessageToTranscript_SequentialFastTools_KeepOpenGroupMounted()
     {
         var builder = CreateBuilder();
@@ -147,6 +169,48 @@ public sealed class TranscriptBuilderToolGroupTests
         Assert.Equal(2, group.ToolCalls.Count);
         Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Completed, Assert.IsType<ToolCallItem>(group.ToolCalls[0]).Status);
         Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.InProgress, Assert.IsType<TerminalPreviewItem>(group.ToolCalls[1]).Status);
+    }
+
+    [Fact]
+    public void Rebuild_FailedGenericToolShowsPersistedErrorOutput()
+    {
+        var builder = CreateBuilder();
+
+        var failedTool = CreateToolVm(
+            "tool-1",
+            "example_mcp_lookup",
+            "Failed",
+            "{\"query\":\"Busy\"}");
+        failedTool.Message.ToolOutput = "MCP server returned an example lookup failure.";
+
+        var turns = builder.Rebuild([failedTool]);
+
+        var turn = Assert.Single(turns);
+        var singleTool = Assert.IsType<SingleToolItem>(Assert.Single(turn.Items));
+        var toolCall = Assert.IsType<ToolCallItem>(singleTool.Inner);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Failed, toolCall.Status);
+        Assert.Contains("MCP server returned an example lookup failure.", toolCall.MoreInfo);
+    }
+
+    [Fact]
+    public void Rebuild_FailedToolWithFriendlyInfoStillShowsPersistedErrorOutput()
+    {
+        var builder = CreateBuilder();
+        var failedTool = CreateToolVm(
+            "tool-1",
+            "web_fetch",
+            "Failed",
+            "{\"url\":\"https://example.com/docs\"}");
+        failedTool.Message.ToolOutput = "Request failed with status 500.";
+
+        var turns = builder.Rebuild([failedTool]);
+
+        var turn = Assert.Single(turns);
+        var singleTool = Assert.IsType<SingleToolItem>(Assert.Single(turn.Items));
+        var toolCall = Assert.IsType<ToolCallItem>(singleTool.Inner);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Failed, toolCall.Status);
+        Assert.Contains("example.com", toolCall.MoreInfo);
+        Assert.Contains("Request failed with status 500.", toolCall.MoreInfo);
     }
 
     [Fact]

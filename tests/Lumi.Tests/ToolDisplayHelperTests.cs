@@ -218,4 +218,114 @@ public class ToolDisplayHelperTests
         Assert.Null(ToolDisplayHelper.ExtractFetchSource("{}"));
         Assert.Null(ToolDisplayHelper.ExtractFetchSource("{\"url\":\"file:///C:/temp/page.html\"}"));
     }
+
+    [Fact]
+    public void ExtractFailedToolOutput_IncludesSdkErrorMessageAndCode()
+    {
+        var output = ToolDisplayHelper.ExtractFailedToolOutput(
+            new ToolExecutionCompleteError
+            {
+                Message = "MCP server returned an example lookup failure.",
+                Code = "failure"
+            },
+            result: null);
+
+        Assert.Equal("MCP server returned an example lookup failure. (code: failure)", output);
+    }
+
+    [Fact]
+    public void ExtractFailedToolOutput_IncludesAllResultTextFields()
+    {
+        var output = ToolDisplayHelper.ExtractFailedToolOutput(
+            error: null,
+            result: new ToolExecutionCompleteResult
+            {
+                Content = "summary",
+                DetailedContent = "full result",
+                Contents =
+                [
+                    new ToolExecutionCompleteContentText { Text = "stderr details" }
+                ]
+            });
+
+        Assert.Contains("stderr details", output);
+        Assert.Contains("full result", output);
+        Assert.Contains("summary", output);
+    }
+
+    [Fact]
+    public void ExtractFailedToolOutput_IncludesErrorAndDetailedResult()
+    {
+        var output = ToolDisplayHelper.ExtractFailedToolOutput(
+            new ToolExecutionCompleteError
+            {
+                Message = "MCP server failed.",
+                Code = "failure"
+            },
+            new ToolExecutionCompleteResult
+            {
+                Content = string.Empty,
+                DetailedContent = "Underlying stack trace"
+            });
+
+        Assert.Contains("MCP server failed. (code: failure)", output);
+        Assert.Contains("Underlying stack trace", output);
+    }
+
+    [Fact]
+    public void ExtractFailedToolOutput_TruncatesLargeResult()
+    {
+        var output = ToolDisplayHelper.ExtractFailedToolOutput(
+            error: null,
+            result: new ToolExecutionCompleteResult
+            {
+                Content = string.Empty,
+                DetailedContent = new string('x', 8100)
+            });
+
+        Assert.NotNull(output);
+        Assert.True(output.Length <= 8000);
+        Assert.Contains("[Output truncated]", output);
+    }
+
+    [Fact]
+    public void ExtractFailedToolOutput_RemovesAnsiAndUnsafeControls()
+    {
+        var output = ToolDisplayHelper.ExtractFailedToolOutput(
+            new ToolExecutionCompleteError
+            {
+                Message = "\u001b]8;;https://example.com\u0007\u001b[31mFailed\u001b[0m\u001b]8;;\u0007\u0001\u202E",
+                Code = " bad \u0002"
+            },
+            result: null);
+
+        Assert.Equal("Failed (code: bad)", output);
+    }
+
+    [Fact]
+    public void ExtractFailedToolOutput_RedactsCommonSecrets()
+    {
+        var output = ToolDisplayHelper.ExtractFailedToolOutput(
+            error: null,
+            result: new ToolExecutionCompleteResult
+            {
+                Content = string.Empty,
+                DetailedContent = "OPENAI_API_KEY=sk-secret AWS_SECRET_ACCESS_KEY='aws secret' \"access_token\": \"ghp_secret\" \"password\": \"secret password\" client_secret=\"client secret\" \"Authorization\": \"Bearer bearer-token\" Authorization: Basic basic-token"
+            });
+
+        Assert.DoesNotContain("sk-secret", output);
+        Assert.DoesNotContain("aws secret", output);
+        Assert.DoesNotContain("ghp_secret", output);
+        Assert.DoesNotContain("secret password", output);
+        Assert.DoesNotContain("client secret", output);
+        Assert.DoesNotContain("bearer-token", output);
+        Assert.DoesNotContain("basic-token", output);
+        Assert.Contains("OPENAI_API_KEY=[REDACTED]", output);
+        Assert.Contains("AWS_SECRET_ACCESS_KEY='[REDACTED]'", output);
+        Assert.Contains("\"access_token\": \"[REDACTED]\"", output);
+        Assert.Contains("\"password\": \"[REDACTED]\"", output);
+        Assert.Contains("client_secret=\"[REDACTED]\"", output);
+        Assert.Contains("\"Authorization\": \"Bearer [REDACTED]\"", output);
+        Assert.Contains("Authorization: Basic [REDACTED]", output);
+    }
 }
