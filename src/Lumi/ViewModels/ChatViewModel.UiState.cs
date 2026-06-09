@@ -77,6 +77,11 @@ public partial class ChatViewModel
     public bool IsWorktreeLocked => CurrentChat is not null;
     private int _gitRefreshVersion;
     private string? _gitStatusDirectory;
+    private CancellationTokenSource? _gitRefreshThrottleCts;
+    private DateTime _lastLiveGitRefreshUtc = DateTime.MinValue;
+    /// <summary>Minimum interval between live git status refreshes triggered by agent
+    /// file edits, so the coding strip updates promptly without thrashing during bursts.</summary>
+    private static readonly TimeSpan GitRefreshMinInterval = TimeSpan.FromMilliseconds(700);
     public ObservableCollection<GitFileChangeViewModel> GitChangedFiles { get; } = [];
     /// <summary>Existing worktrees available for selection (excludes main repo).</summary>
     public ObservableCollection<WorktreeInfo> AvailableWorktrees { get; } = [];
@@ -1219,6 +1224,58 @@ public partial class ChatViewModel
     private void QueueRefreshCodingProjectState()
     {
         _ = RefreshCodingProjectStateSafelyAsync();
+    }
+
+    /// <summary>Refreshes the coding strip's git status shortly after the agent edits
+    /// workspace files, so the change count stays live while a turn is still running —
+    /// independent of the IsBusy turn lifecycle. Throttled with a leading edge plus a
+    /// trailing refresh: rapid successive edits update promptly but at most once per
+    /// <see cref="GitRefreshMinInterval"/>. Must be called on the UI thread.</summary>
+    private void QueueLiveGitRefresh()
+    {
+        if (!IsCodingProject)
+            return;
+
+        _gitRefreshThrottleCts?.Cancel();
+        _gitRefreshThrottleCts?.Dispose();
+        _gitRefreshThrottleCts = null;
+
+        var sinceLast = DateTime.UtcNow - _lastLiveGitRefreshUtc;
+        if (sinceLast >= GitRefreshMinInterval)
+        {
+            // Leading edge: nothing refreshed recently, so update immediately.
+            _lastLiveGitRefreshUtc = DateTime.UtcNow;
+            QueueRefreshCodingProjectState();
+            return;
+        }
+
+        // Within the throttle window: schedule a single trailing refresh.
+        var delay = GitRefreshMinInterval - sinceLast;
+        var cts = new CancellationTokenSource();
+        _gitRefreshThrottleCts = cts;
+        var token = cts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            // Marshal back to the UI thread so the synchronous prefix of the refresh
+            // (which mutates bound observable state) does not run off-thread.
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (token.IsCancellationRequested)
+                    return;
+                _lastLiveGitRefreshUtc = DateTime.UtcNow;
+                QueueRefreshCodingProjectState();
+            });
+        }, token);
     }
 
     private async Task RefreshCodingProjectStateSafelyAsync()

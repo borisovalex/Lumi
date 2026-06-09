@@ -57,6 +57,9 @@ public partial class ChatViewModel
         _fileSearchCts?.Cancel();
         _fileSearchCts?.Dispose();
         _fileSearchCts = null;
+        _gitRefreshThrottleCts?.Cancel();
+        _gitRefreshThrottleCts?.Dispose();
+        _gitRefreshThrottleCts = null;
     }
 
     private bool IsChatRuntimeActive(Guid chatId)

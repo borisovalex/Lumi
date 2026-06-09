@@ -914,6 +914,17 @@ public partial class ChatViewModel
 
                         if (success)
                         {
+                            // Keep the coding strip's git change count live as the agent
+                            // edits files, independent of the IsBusy turn lifecycle. This
+                            // tool-completion signal is reliable; SessionWorkspaceFileChangedEvent
+                            // is not always emitted. powershell is included because the agent
+                            // frequently mutates the repo (git, builds, file moves) through it.
+                            if (IsDisplayedSession()
+                                && (ToolDisplayHelper.IsFileCreationTool(toolName) || toolName == "powershell"))
+                            {
+                                QueueLiveGitRefresh();
+                            }
+
                             // fetch_skill tracking is handled by TranscriptBuilder.ProcessToolMessage()
 
                             if (ToolDisplayHelper.IsWebFetchTool(toolName)
@@ -1766,6 +1777,9 @@ public partial class ChatViewModel
                         {
                             Messages.Add(new ChatMessageViewModel(toolMsg));
                             ScrollToEndRequested?.Invoke();
+                            // Keep the coding strip's change count live as the agent edits
+                            // files, independent of the IsBusy turn lifecycle.
+                            QueueLiveGitRefresh();
                         }
                     });
                     break;
