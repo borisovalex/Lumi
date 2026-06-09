@@ -30,6 +30,8 @@ internal sealed class PendingTurnRecoveryAnalysis
 
     public string? ErrorMessage { get; init; }
 
+    public bool AssistantTurnEnded { get; init; }
+
     public IReadOnlyList<RecoveredAssistantMessage> AssistantMessages { get; init; } = [];
 
     public IReadOnlyCollection<string> CompletedToolCallIds { get; init; } = [];
@@ -69,26 +71,45 @@ internal static class PendingTurnRecoveryAnalyzer
         var failedToolCallIds = new HashSet<string>();
         var activeToolCallIds = new HashSet<string>();
         var externalToolCallIdByRequestId = new Dictionary<string, string>();
+        var assistantTurnEnded = false;
         var terminalState = PendingTurnTerminalState.None;
         string? errorMessage = null;
+
+        void InvalidateAssistantTurnEnd() => assistantTurnEnded = false;
 
         for (var i = turnStartIndex + 1; i < events.Count; i++)
         {
             switch (events[i])
             {
-                case AssistantMessageEvent assistantMessage
-                    when string.IsNullOrWhiteSpace(assistantMessage.Data.ParentToolCallId)
-                         && !string.IsNullOrWhiteSpace(assistantMessage.Data.Content):
-                    assistantMessages.Add(new RecoveredAssistantMessage(assistantMessage.Data.Content));
+                case AssistantTurnStartEvent:
+                case AssistantMessageDeltaEvent:
+                case AssistantReasoningDeltaEvent:
+                case AssistantReasoningEvent:
+                    InvalidateAssistantTurnEnd();
+                    break;
+
+                case AssistantMessageEvent assistantMessage:
+                    InvalidateAssistantTurnEnd();
+                    if (string.IsNullOrWhiteSpace(assistantMessage.Data.ParentToolCallId)
+                        && !string.IsNullOrWhiteSpace(assistantMessage.Data.Content))
+                    {
+                        assistantMessages.Add(new RecoveredAssistantMessage(assistantMessage.Data.Content));
+                    }
+                    break;
+
+                case AssistantTurnEndEvent:
+                    assistantTurnEnded = true;
                     break;
 
                 case ToolExecutionStartEvent toolStart
                     when !string.IsNullOrWhiteSpace(toolStart.Data.ToolCallId):
+                    InvalidateAssistantTurnEnd();
                     activeToolCallIds.Add(toolStart.Data.ToolCallId);
                     break;
 
                 case ToolExecutionCompleteEvent toolComplete
                     when !string.IsNullOrWhiteSpace(toolComplete.Data.ToolCallId):
+                    InvalidateAssistantTurnEnd();
                     activeToolCallIds.Remove(toolComplete.Data.ToolCallId);
                     if (toolComplete.Data.Success == true)
                         completedToolCallIds.Add(toolComplete.Data.ToolCallId);
@@ -99,6 +120,7 @@ internal static class PendingTurnRecoveryAnalyzer
                 case ExternalToolRequestedEvent externalToolRequested
                     when !string.IsNullOrWhiteSpace(externalToolRequested.Data.RequestId)
                          && !string.IsNullOrWhiteSpace(externalToolRequested.Data.ToolCallId):
+                    InvalidateAssistantTurnEnd();
                     externalToolCallIdByRequestId[externalToolRequested.Data.RequestId] = externalToolRequested.Data.ToolCallId;
                     activeToolCallIds.Add(externalToolRequested.Data.ToolCallId);
                     break;
@@ -106,9 +128,19 @@ internal static class PendingTurnRecoveryAnalyzer
                 case ExternalToolCompletedEvent externalToolCompleted
                     when !string.IsNullOrWhiteSpace(externalToolCompleted.Data.RequestId)
                          && externalToolCallIdByRequestId.TryGetValue(externalToolCompleted.Data.RequestId, out var externalToolCallId):
+                    InvalidateAssistantTurnEnd();
                     activeToolCallIds.Remove(externalToolCallId);
                     completedToolCallIds.Add(externalToolCallId);
                     externalToolCallIdByRequestId.Remove(externalToolCompleted.Data.RequestId);
+                    break;
+
+                case SessionBackgroundTasksChangedEvent:
+                case SubagentSelectedEvent:
+                case SubagentDeselectedEvent:
+                case SubagentStartedEvent:
+                case SubagentCompletedEvent:
+                case SubagentFailedEvent:
+                    InvalidateAssistantTurnEnd();
                     break;
 
                 case SessionIdleEvent:
@@ -135,6 +167,7 @@ internal static class PendingTurnRecoveryAnalyzer
             UserMessageObserved = true,
             TerminalState = terminalState,
             ErrorMessage = errorMessage,
+            AssistantTurnEnded = assistantTurnEnded,
             AssistantMessages = assistantMessages,
             CompletedToolCallIds = completedToolCallIds,
             FailedToolCallIds = failedToolCallIds,
@@ -289,6 +322,8 @@ internal static class PendingTurnRecoveryAnalyzer
         var assistantMessages = persistedAnalysis.AssistantMessages.Count >= liveAnalysis.AssistantMessages.Count
             ? persistedAnalysis.AssistantMessages
             : liveAnalysis.AssistantMessages;
+        var assistantTurnEnded = terminalState == PendingTurnTerminalState.None
+            && liveAnalysis.AssistantTurnEnded;
 
         var activeToolCount = terminalState == PendingTurnTerminalState.None
             ? persistedAnalysis.UserMessageObserved
@@ -301,6 +336,7 @@ internal static class PendingTurnRecoveryAnalyzer
             UserMessageObserved = liveAnalysis.UserMessageObserved || persistedAnalysis.UserMessageObserved,
             TerminalState = terminalState,
             ErrorMessage = errorMessage,
+            AssistantTurnEnded = assistantTurnEnded,
             AssistantMessages = assistantMessages,
             CompletedToolCallIds = completedToolCallIds,
             FailedToolCallIds = failedToolCallIds,

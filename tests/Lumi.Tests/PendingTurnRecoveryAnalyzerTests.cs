@@ -107,12 +107,48 @@ public sealed class PendingTurnRecoveryAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_FlagsAssistantTurnEnded_WhenTurnEndsWithoutIdle()
+    {
+        var events = new SessionEvent[]
+        {
+            UserMessage("continue"),
+            AssistantMessage("Done"),
+            AssistantTurnEnd()
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Analyze(events, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.True(analysis.AssistantTurnEnded);
+        Assert.Equal(PendingTurnTerminalState.None, analysis.TerminalState);
+        Assert.Equal(0, analysis.ActiveToolCount);
+    }
+
+    [Fact]
+    public void Analyze_DoesNotFlagTurnEnded_WhenActivityFollowsTurnEnd()
+    {
+        var events = new SessionEvent[]
+        {
+            UserMessage("continue"),
+            AssistantTurnEnd(),
+            ToolStart("tool-1", "powershell")
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Analyze(events, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.False(analysis.AssistantTurnEnded);
+        Assert.Equal(1, analysis.ActiveToolCount);
+    }
+
+    [Fact]
     public void Merge_PrefersPersistedTerminalState()
     {
         var liveAnalysis = new PendingTurnRecoveryAnalysis
         {
             UserMessageObserved = true,
-            AssistantMessages = [new RecoveredAssistantMessage("Recovered answer")]
+            AssistantMessages = [new RecoveredAssistantMessage("Recovered answer")],
+            AssistantTurnEnded = true
         };
         var persistedAnalysis = new PendingTurnRecoveryAnalysis
         {
@@ -124,7 +160,27 @@ public sealed class PendingTurnRecoveryAnalyzerTests
 
         Assert.True(analysis.UserMessageObserved);
         Assert.Equal(PendingTurnTerminalState.Shutdown, analysis.TerminalState);
+        Assert.False(analysis.AssistantTurnEnded);
         Assert.Equal("Recovered answer", Assert.Single(analysis.AssistantMessages).Content);
+    }
+
+    [Fact]
+    public void Merge_FlagsAssistantTurnEnded_FromLiveWhenNoTerminalState()
+    {
+        var liveAnalysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true,
+            AssistantTurnEnded = true
+        };
+        var persistedAnalysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Merge(liveAnalysis, persistedAnalysis);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.True(analysis.AssistantTurnEnded);
     }
 
     [Fact]
@@ -221,6 +277,12 @@ public sealed class PendingTurnRecoveryAnalyzerTests
                 MessageId = Guid.NewGuid().ToString("N"),
                 Content = content
             }
+        };
+
+    private static AssistantTurnEndEvent AssistantTurnEnd()
+        => new()
+        {
+            Data = new AssistantTurnEndData { TurnId = "turn" }
         };
 
     private static ToolExecutionStartEvent ToolStart(string toolCallId, string toolName)

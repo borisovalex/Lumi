@@ -165,7 +165,7 @@ public partial class ChatViewModel
         }
     }
 
-    private void SchedulePostToolReconciliation(Guid chatId)
+    private void SchedulePostToolReconciliation(Guid chatId, bool treatCompletedTurnAsIdle = false)
     {
         if (!_runtimeStates.TryGetValue(chatId, out var runtime))
             return;
@@ -175,7 +175,10 @@ public partial class ChatViewModel
         long sequence;
         lock (runtime)
         {
-            if (runtime.PendingSessionUserMessageCount <= 0 || runtime.ActiveToolCount > 0)
+            var ready = treatCompletedTurnAsIdle
+                ? ShouldRecoverCompletedTurnIfIdleIsMissing(runtime)
+                : runtime.PendingSessionUserMessageCount > 0 && runtime.ActiveToolCount == 0;
+            if (!ready)
                 return;
 
             oldReconciliationCts = runtime.PostToolReconciliationCts;
@@ -186,10 +189,14 @@ public partial class ChatViewModel
 
         oldReconciliationCts?.Cancel();
         oldReconciliationCts?.Dispose();
-        _ = RunPostToolReconciliationAsync(chatId, sequence, newReconciliationCts);
+        _ = RunPostToolReconciliationAsync(chatId, sequence, newReconciliationCts, treatCompletedTurnAsIdle);
     }
 
-    private async Task RunPostToolReconciliationAsync(Guid chatId, long sequence, CancellationTokenSource reconciliationCts)
+    private async Task RunPostToolReconciliationAsync(
+        Guid chatId,
+        long sequence,
+        CancellationTokenSource reconciliationCts,
+        bool treatCompletedTurnAsIdle = false)
     {
         try
         {
@@ -202,17 +209,20 @@ public partial class ChatViewModel
 
                 lock (runtime)
                 {
-                    if (runtime.PendingSessionUserMessageCount <= 0
-                        || runtime.PendingTurnSequence != sequence
-                        || runtime.ActiveToolCount > 0)
-                    {
+                    var stillEligible = treatCompletedTurnAsIdle
+                        ? ShouldRecoverCompletedTurnIfIdleIsMissing(runtime)
+                        : runtime.PendingSessionUserMessageCount > 0 && runtime.ActiveToolCount == 0;
+                    if (runtime.PendingTurnSequence != sequence || !stillEligible)
                         return;
-                    }
                 }
 
                 using var recoveryCts = CancellationTokenSource.CreateLinkedTokenSource(reconciliationCts.Token);
                 recoveryCts.CancelAfter(SilentTurnRecoveryTimeout);
-                if (await TryApplyCurrentTurnRecoveryAsync(chatId, sequence, recoveryCts.Token))
+                if (await TryApplyCurrentTurnRecoveryAsync(
+                        chatId,
+                        sequence,
+                        recoveryCts.Token,
+                        treatCompletedTurnAsIdle))
                     return;
             }
         }
@@ -234,7 +244,11 @@ public partial class ChatViewModel
         }
     }
 
-    private async Task<bool> TryApplyCurrentTurnRecoveryAsync(Guid chatId, long sequence, CancellationToken ct)
+    private async Task<bool> TryApplyCurrentTurnRecoveryAsync(
+        Guid chatId,
+        long sequence,
+        CancellationToken ct,
+        bool treatCompletedTurnAsIdle = false)
     {
         var chat = _dataStore.Data.Chats.FirstOrDefault(c => c.Id == chatId);
         if (chat is null || !_runtimeStates.TryGetValue(chatId, out var runtime))
@@ -258,12 +272,16 @@ public partial class ChatViewModel
             pendingSessionUserMessageCount,
             ct);
 
-        return await ApplyRecoveredTurnStateAsync(chat, analysis);
+        return await ApplyRecoveredTurnStateAsync(
+            chat,
+            analysis,
+            treatCompletedTurnAsIdle);
     }
 
     private async Task<bool> ApplyRecoveredTurnStateAsync(
         Chat chat,
-        PendingTurnRecoveryAnalysis analysis)
+        PendingTurnRecoveryAnalysis analysis,
+        bool treatCompletedTurnAsIdle = false)
     {
         if (!analysis.UserMessageObserved)
             return false;
@@ -294,8 +312,26 @@ public partial class ChatViewModel
         if (analysis.ActiveToolCount > 0)
             return true;
 
+        if (treatCompletedTurnAsIdle && CanTreatCompletedTurnAsIdle(analysis))
+        {
+            await ApplyRecoveredIdleAsync(chat);
+            return true;
+        }
+
         return false;
     }
+
+    private static bool ShouldRecoverCompletedTurnIfIdleIsMissing(ChatRuntimeState runtime)
+        => runtime.PendingSessionUserMessageCount > 0
+           && runtime.ActiveToolCount == 0
+           && !runtime.HasPendingBackgroundWork
+           && !runtime.IsStreaming;
+
+    private static bool CanTreatCompletedTurnAsIdle(PendingTurnRecoveryAnalysis analysis)
+        => analysis.UserMessageObserved
+           && analysis.TerminalState == PendingTurnTerminalState.None
+           && analysis.AssistantTurnEnded
+           && analysis.ActiveToolCount == 0;
 
     private async Task ApplyRecoveredToolStatusesAsync(Chat chat, PendingTurnRecoveryAnalysis analysis)
     {

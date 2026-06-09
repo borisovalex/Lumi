@@ -1108,6 +1108,8 @@ public partial class ChatViewModel
                         reasoningStream.Clear();
                         DropCompletedTurnState(chat.Id, dropCancellation: false);
                         MarkRuntimeWaitingForSessionIdle(runtime);
+                        if (runtime.IsBusy)
+                            SchedulePostToolReconciliation(chat.Id, treatCompletedTurnAsIdle: true);
                         if (IsDisplayedSession())
                         {
                             if (!runtime.IsBusy)
