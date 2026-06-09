@@ -675,10 +675,27 @@ public partial class MainViewModel : ObservableObject, IDisposable
         if (TryFocusDetachedChat(chat))
             return true;
 
-        var surface = await AcquireChatSurfaceAsync(chat);
-        ShowChatSurface(surface);
-        if (ChatVM.CurrentChat?.Id != chat.Id)
-            return false;
+        var visibleSurface = ChatVM;
+        var shouldBridgeLoading = visibleSurface.CurrentChat?.Id != chat.Id;
+        if (shouldBridgeLoading)
+            visibleSurface.IsLoadingChat = true;
+
+        try
+        {
+            var surface = await AcquireChatSurfaceAsync(chat);
+            if (shouldBridgeLoading && !ReferenceEquals(visibleSurface, surface))
+                visibleSurface.IsLoadingChat = false;
+
+            ShowChatSurface(surface);
+            if (ChatVM.CurrentChat?.Id != chat.Id)
+                return false;
+        }
+        catch
+        {
+            if (shouldBridgeLoading)
+                visibleSurface.IsLoadingChat = false;
+            throw;
+        }
 
         SelectedNavIndex = 0;
         return true;

@@ -419,6 +419,56 @@ public sealed class MultipleChatWindowsTests
     }
 
     [Fact]
+    public async Task OpenChatByIdAsync_ShowsLoadingOnVisibleSurfaceWhileTargetSurfaceLoads()
+    {
+        using var session = HeadlessTestSession.Start();
+
+        await session.Dispatch(async () =>
+        {
+            var visibleChat = new Chat { Title = "Visible chat" };
+            visibleChat.Messages.Add(new ChatMessage { Role = "user", Content = "visible" });
+            var targetChat = new Chat { Title = "Target chat" };
+            targetChat.Messages.Add(new ChatMessage { Role = "user", Content = "target" });
+            var dataStore = CreateDataStore(visibleChat, targetChat);
+            var copilotService = new CopilotService();
+            using var registry = new ChatSurfaceRegistry();
+            var loadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var allowLoadToComplete = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var store = new ChatSessionStore(
+                dataStore,
+                copilotService,
+                registry,
+                async (surface, chatToLoad) =>
+                {
+                    loadStarted.TrySetResult();
+                    await allowLoadToComplete.Task;
+                    surface.CurrentChat = chatToLoad;
+                });
+            var viewModel = new MainViewModel(
+                dataStore,
+                copilotService,
+                new UpdateService(),
+                startBackgroundJobs: false,
+                chatSurfaceRegistry: registry,
+                chatSessionStore: store);
+            viewModel.ChatVM.CurrentChat = visibleChat;
+            var visibleSurface = viewModel.ChatVM;
+
+            var openTask = viewModel.OpenChatByIdAsync(targetChat.Id);
+            await loadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.True(visibleSurface.IsLoadingChat);
+
+            allowLoadToComplete.SetResult();
+            Assert.True(await openTask);
+
+            Assert.False(visibleSurface.IsLoadingChat);
+            Assert.Same(targetChat, viewModel.ChatVM.CurrentChat);
+            viewModel.Dispose();
+        }, CancellationToken.None);
+    }
+
+    [Fact]
     public async Task ChatSessionStore_KeepsRecentlyIdleSurfaceAvailableForFastSwitching()
     {
         using var session = HeadlessTestSession.Start();
