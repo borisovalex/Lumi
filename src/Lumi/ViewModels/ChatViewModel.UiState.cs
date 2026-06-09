@@ -1117,92 +1117,103 @@ public partial class ChatViewModel
         // Increment version so any in-flight async refresh is discarded on completion.
         var version = Interlocked.Increment(ref _gitRefreshVersion);
 
-        // Always use the original project dir for git detection (not worktree)
-        var projectDir = GetProjectWorkingDirectory();
-        var isGit = GitService.IsGitRepo(projectDir);
-        IsCodingProject = isGit;
+        try
+        {
+            // Always use the original project dir for git detection (not worktree)
+            var projectDir = GetProjectWorkingDirectory();
+            var isGit = GitService.IsGitRepo(projectDir);
+            IsCodingProject = isGit;
 
-        // Worktree state comes exclusively from the current chat's persisted data.
-        // On welcome screen (no chat), always reset to local.
-        string? savedWorktreePath = null;
-        if (CurrentChat?.WorktreePath is { Length: > 0 } savedWt && Directory.Exists(savedWt))
-        {
-            savedWorktreePath = savedWt;
-            WorktreePath = savedWt;
-            IsWorktreeMode = true;
-        }
-        else
-        {
-            WorktreePath = null;
-            IsWorktreeMode = false;
-        }
+            // Worktree state comes exclusively from the current chat's persisted data.
+            // On welcome screen (no chat), always reset to local.
+            string? savedWorktreePath = null;
+            if (CurrentChat?.WorktreePath is { Length: > 0 } savedWt && Directory.Exists(savedWt))
+            {
+                savedWorktreePath = savedWt;
+                WorktreePath = savedWt;
+                IsWorktreeMode = true;
+            }
+            else
+            {
+                WorktreePath = null;
+                IsWorktreeMode = false;
+            }
 
-        if (!isGit)
-        {
-            GitBranch = null;
+            if (!isGit)
+            {
+                GitBranch = null;
+                GitChangedFileCount = 0;
+                GitChangedFiles.Clear();
+                _gitStatusDirectory = null;
+                AvailableWorktrees.Clear();
+                OnPropertyChanged(nameof(HasAvailableWorktrees));
+                return;
+            }
+
+            // Use the effective dir (worktree or project) for status
+            var workDir = savedWorktreePath ?? projectDir;
+            var normalizedWorkDir = Path.GetFullPath(workDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!string.Equals(_gitStatusDirectory, normalizedWorkDir, StringComparison.OrdinalIgnoreCase))
+                GitBranch = null;
+            _gitStatusDirectory = normalizedWorkDir;
+
+            // Reset stale change data immediately; keep the branch visible while refreshing
+            // the same coding context so the strip does not flicker blank.
             GitChangedFileCount = 0;
             GitChangedFiles.Clear();
-            _gitStatusDirectory = null;
-            AvailableWorktrees.Clear();
-            OnPropertyChanged(nameof(HasAvailableWorktrees));
-            IsRefreshingGitStatus = false;
-            return;
-        }
+            IsRefreshingGitStatus = true;
 
-        // Use the effective dir (worktree or project) for status
-        var workDir = savedWorktreePath ?? projectDir;
-        var normalizedWorkDir = Path.GetFullPath(workDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (!string.Equals(_gitStatusDirectory, normalizedWorkDir, StringComparison.OrdinalIgnoreCase))
-            GitBranch = null;
-        _gitStatusDirectory = normalizedWorkDir;
+            var branchTask = GitService.GetCurrentBranchAsync(workDir);
+            var changesTask = GitService.GetChangedFilesAsync(workDir);
+            var worktreesTask = GitService.ListWorktreeInfoAsync(projectDir);
 
-        // Reset stale change data immediately; keep the branch visible while refreshing
-        // the same coding context so the strip does not flicker blank.
-        GitChangedFileCount = 0;
-        GitChangedFiles.Clear();
-        IsRefreshingGitStatus = true;
+            await Task.WhenAll(branchTask, changesTask, worktreesTask).ConfigureAwait(false);
 
-        var branchTask = GitService.GetCurrentBranchAsync(workDir);
-        var changesTask = GitService.GetChangedFilesAsync(workDir);
-        var worktreesTask = GitService.ListWorktreeInfoAsync(projectDir);
+            var branch = await branchTask;
+            var changes = await changesTask;
+            var worktrees = await worktreesTask;
 
-        await Task.WhenAll(branchTask, changesTask, worktreesTask).ConfigureAwait(false);
+            // Exclude the main repo worktree (it's the "Local" option)
+            // Normalize paths to handle forward/backward slash differences from git output
+            static string NormalizePath(string p) =>
+                Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var normalizedProjectDir = NormalizePath(projectDir);
+            worktrees.RemoveAll(w =>
+                string.Equals(NormalizePath(w.Path), normalizedProjectDir, StringComparison.OrdinalIgnoreCase));
 
-        var branch = await branchTask;
-        var changes = await changesTask;
-        var worktrees = await worktreesTask;
-
-        // Exclude the main repo worktree (it's the "Local" option)
-        // Normalize paths to handle forward/backward slash differences from git output
-        static string NormalizePath(string p) =>
-            Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var normalizedProjectDir = NormalizePath(projectDir);
-        worktrees.RemoveAll(w =>
-            string.Equals(NormalizePath(w.Path), normalizedProjectDir, StringComparison.OrdinalIgnoreCase));
-
-        // A newer refresh was started while we were awaiting — discard these stale results.
-        if (version != Volatile.Read(ref _gitRefreshVersion))
-            return;
-
-        Dispatcher.UIThread.Post(() =>
-        {
-            // Double-check inside the UI dispatch in case another refresh snuck in.
+            // A newer refresh was started while we were awaiting — discard these stale results.
             if (version != Volatile.Read(ref _gitRefreshVersion))
                 return;
 
-            GitBranch = branch;
-            GitChangedFileCount = changes.Count;
-            GitChangedFiles.Clear();
-            foreach (var c in changes)
-                GitChangedFiles.Add(new GitFileChangeViewModel(c));
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                // Double-check inside the UI dispatch in case another refresh snuck in.
+                if (version != Volatile.Read(ref _gitRefreshVersion))
+                    return;
 
-            AvailableWorktrees.Clear();
-            foreach (var wt in worktrees)
-                AvailableWorktrees.Add(wt);
-            OnPropertyChanged(nameof(HasAvailableWorktrees));
+                GitBranch = branch;
+                GitChangedFileCount = changes.Count;
+                GitChangedFiles.Clear();
+                foreach (var c in changes)
+                    GitChangedFiles.Add(new GitFileChangeViewModel(c));
 
-            IsRefreshingGitStatus = false;
-        });
+                AvailableWorktrees.Clear();
+                foreach (var wt in worktrees)
+                    AvailableWorktrees.Add(wt);
+                OnPropertyChanged(nameof(HasAvailableWorktrees));
+            });
+        }
+        finally
+        {
+            if (version == Volatile.Read(ref _gitRefreshVersion))
+            {
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    if (version == Volatile.Read(ref _gitRefreshVersion))
+                        IsRefreshingGitStatus = false;
+                });
+            }
+        }
     }
 
     private void QueueRefreshCodingProjectState()
@@ -1219,7 +1230,6 @@ public partial class ChatViewModel
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[Lumi] Git status refresh failed: {ex}");
-            Dispatcher.UIThread.Post(() => IsRefreshingGitStatus = false);
         }
     }
 

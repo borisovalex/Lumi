@@ -52,6 +52,13 @@ internal sealed class ChatRuntimeState
     /// Keeps the session alive without blocking the UI until session.idle arrives.</summary>
     public bool HasPendingBackgroundWork { get; set; }
 
+    public bool HasActiveWork
+        => IsBusy
+           || IsStreaming
+           || HasPendingBackgroundWork
+           || ActiveToolCount > 0
+           || PendingSessionUserMessageCount > 0;
+
     /// <summary>True when the user explicitly clicked Stop for the current turn.
     /// Unexpected SDK aborts must not be mistaken for this state.</summary>
     public bool ManualStopRequested { get; set; }

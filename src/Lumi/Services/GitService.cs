@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Lumi.Services;
@@ -12,6 +13,10 @@ namespace Lumi.Services;
 /// </summary>
 public static class GitService
 {
+    private static readonly TimeSpan DefaultGitCommandTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan WorktreeGitCommandTimeout = TimeSpan.FromMinutes(2);
+    private static readonly TimeSpan TimedOutGitCleanupTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>Returns true if the directory is inside a git repository.</summary>
     public static bool IsGitRepo(string dir)
     {
@@ -158,17 +163,17 @@ public static class GitService
             return worktreePath; // Already exists
 
         // Try creating with a new branch first
-        var result = await RunGitAsync(repoDir, $"worktree add \"{worktreePath}\" -b \"{branchName}\"").ConfigureAwait(false);
+        var result = await RunGitAsync(repoDir, $"worktree add \"{worktreePath}\" -b \"{branchName}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
         if (result is not null && Directory.Exists(worktreePath))
             return worktreePath;
 
         // Branch may already exist — try attaching to it
-        result = await RunGitAsync(repoDir, $"worktree add \"{worktreePath}\" \"{branchName}\"").ConfigureAwait(false);
+        result = await RunGitAsync(repoDir, $"worktree add \"{worktreePath}\" \"{branchName}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
         if (result is not null && Directory.Exists(worktreePath))
             return worktreePath;
 
         // Last resort — create with detached HEAD
-        result = await RunGitAsync(repoDir, $"worktree add --detach \"{worktreePath}\"").ConfigureAwait(false);
+        result = await RunGitAsync(repoDir, $"worktree add --detach \"{worktreePath}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
         if (result is not null && Directory.Exists(worktreePath))
             return worktreePath;
 
@@ -251,7 +256,7 @@ public static class GitService
         return results;
     }
 
-    private static async Task<string?> RunGitAsync(string workDir, string args)
+    private static async Task<string?> RunGitAsync(string workDir, string args, TimeSpan? timeout = null)
     {
         try
         {
@@ -269,17 +274,89 @@ public static class GitService
 
             var stdoutTask = proc.StandardOutput.ReadToEndAsync();
             var stderrTask = proc.StandardError.ReadToEndAsync();
+            using var timeoutCts = new CancellationTokenSource(timeout ?? DefaultGitCommandTimeout);
+
+            try
+            {
+                await proc.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                TryKillProcessTree(proc);
+                await WaitForExitQuietlyAsync(proc, TimedOutGitCleanupTimeout).ConfigureAwait(false);
+                await DrainOutputQuietlyAsync(stdoutTask, stderrTask, TimedOutGitCleanupTimeout).ConfigureAwait(false);
+                System.Diagnostics.Debug.WriteLine($"[Lumi] Git command timed out after {(timeout ?? DefaultGitCommandTimeout).TotalSeconds:N0}s: git {args}");
+                return null;
+            }
 
             await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-            await proc.WaitForExitAsync().ConfigureAwait(false);
 
             var output = stdoutTask.Result;
             return proc.ExitCode == 0 ? output : null;
         }
-        catch
+        catch (Exception ex)
         {
+            System.Diagnostics.Debug.WriteLine($"[Lumi] Git command failed: git {args} ({ex.Message})");
             return null;
         }
+    }
+
+    private static void TryKillProcessTree(Process proc)
+    {
+        try
+        {
+            if (!proc.HasExited)
+                proc.Kill(entireProcessTree: true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Lumi] Failed to kill timed-out git process {proc.Id}: {ex.Message}");
+        }
+    }
+
+    private static async Task WaitForExitQuietlyAsync(Process proc, TimeSpan timeout)
+    {
+        try
+        {
+            var waitTask = proc.WaitForExitAsync();
+            if (await Task.WhenAny(waitTask, Task.Delay(timeout)).ConfigureAwait(false) == waitTask)
+                await waitTask.ConfigureAwait(false);
+            else
+                System.Diagnostics.Debug.WriteLine($"[Lumi] Timed out waiting for killed git process {proc.Id} to exit.");
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Lumi] Failed waiting for timed-out git process {proc.Id}: {ex.Message}");
+        }
+    }
+
+    private static async Task DrainOutputQuietlyAsync(Task<string> stdoutTask, Task<string> stderrTask, TimeSpan timeout)
+    {
+        var drainTask = Task.WhenAll(stdoutTask, stderrTask);
+        try
+        {
+            if (await Task.WhenAny(drainTask, Task.Delay(timeout)).ConfigureAwait(false) == drainTask)
+                await drainTask.ConfigureAwait(false);
+            else
+            {
+                ObserveFault(stdoutTask);
+                ObserveFault(stderrTask);
+                System.Diagnostics.Debug.WriteLine("[Lumi] Timed out draining killed git process output.");
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Lumi] Failed draining timed-out git output: {ex.Message}");
+        }
+    }
+
+    private static void ObserveFault(Task<string> task)
+    {
+        _ = task.ContinueWith(
+            completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
     private static string? NormalizeBranchName(string? value)

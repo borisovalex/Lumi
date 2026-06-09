@@ -1625,15 +1625,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
 
             var runtime = GetOrCreateRuntimeState(chatId);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Thinking;
+            MarkRuntimeActive(runtime, Loc.Status_Thinking);
             if (CurrentChat?.Id == chatId)
-            {
-                IsBusy = true;
-                IsStreaming = true;
-                StatusText = runtime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(runtime);
 
             var needsSessionSetup = targetChat.CopilotSessionId is null
                                     || !_sessionCache.TryGetValue(chatId, out var cachedSession)
@@ -1899,7 +1893,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var projectDir = GetProjectWorkingDirectory();
             if (GitService.IsGitRepo(projectDir))
             {
-                _transcriptBuilder.ShowTypingIndicator(Loc.Status_CreatingWorktree);
+                var runtime = GetOrCreateRuntimeState(targetChat.Id);
+                MarkRuntimeActive(runtime, Loc.Status_CreatingWorktree);
+                if (CurrentChat?.Id == targetChat.Id)
+                    ApplyDisplayedRuntimeState(runtime);
                 try
                 {
                     var chatId = Guid.NewGuid().ToString("N")[..8];
@@ -1974,15 +1971,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 }
             }
             var runtime = GetOrCreateRuntimeState(targetChat.Id);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Thinking;
+            MarkRuntimeActive(runtime, Loc.Status_Thinking);
             if (CurrentChat?.Id == targetChat.Id)
-            {
-                IsBusy = runtime.IsBusy;
-                IsStreaming = runtime.IsStreaming;
-                StatusText = runtime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(runtime);
 
             var needsSessionSetup = _activeSession?.SessionId != targetChat.CopilotSessionId
                                     || targetChat.CopilotSessionId is null;
@@ -2193,15 +2184,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             using var reconnectCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var runtime = GetOrCreateRuntimeState(chat.Id);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Reconnecting;
+            MarkRuntimeActive(runtime, Loc.Status_Reconnecting);
             if (CurrentChat?.Id == chat.Id)
-            {
-                IsBusy = true;
-                IsStreaming = true;
-                StatusText = runtime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(runtime);
 
             if (!await TryReconnectCopilotAsync(reconnectCts.Token))
                 return (null, Loc.Status_ConnectionRecoveryFailed);
@@ -2244,15 +2229,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             recoveredTurnCts.Token);
         if (!recoveredAnalysis.UserMessageObserved)
         {
-            pendingRuntime.IsBusy = true;
-            pendingRuntime.IsStreaming = true;
-            pendingRuntime.StatusText = Loc.Status_ConnectionRecoveredRetry;
+            MarkRuntimeActive(pendingRuntime, Loc.Status_ConnectionRecoveredRetry);
             if (CurrentChat?.Id == chat.Id)
-            {
-                IsBusy = true;
-                IsStreaming = true;
-                StatusText = pendingRuntime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(pendingRuntime);
 
             var expectedSessionUserMessageCount = await CaptureExpectedSessionUserMessageCountAsync(
                 recoveredSession,
@@ -2384,14 +2363,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         var runtime = GetOrCreateRuntimeState(chat.Id);
-        runtime.IsBusy = false;
-        runtime.IsStreaming = false;
-        runtime.StatusText = "";
+        MarkRuntimeTerminal(runtime);
         if (CurrentChat?.Id == chat.Id)
         {
-            IsBusy = false;
-            IsStreaming = false;
-            StatusText = runtime.StatusText;
+            ApplyDisplayedRuntimeState(runtime);
             ScrollToEndRequested?.Invoke();
         }
 
@@ -3516,12 +3491,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
 
             var runtime = GetOrCreateRuntimeState(CurrentChat.Id);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Thinking;
-            IsBusy = runtime.IsBusy;
-            IsStreaming = runtime.IsStreaming;
-            StatusText = runtime.StatusText;
+            MarkRuntimeActive(runtime, Loc.Status_Thinking);
+            ApplyDisplayedRuntimeState(runtime);
 
             var resendPrompt = BuildResendPrompt(
                 retainedContext,

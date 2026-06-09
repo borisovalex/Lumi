@@ -61,8 +61,7 @@ public partial class ChatViewModel
 
     private bool IsChatRuntimeActive(Guid chatId)
         => _runtimeStates.TryGetValue(chatId, out var runtime)
-           && (runtime.IsBusy || runtime.IsStreaming || runtime.HasPendingBackgroundWork
-               || runtime.PendingSessionUserMessageCount > 0);
+           && runtime.HasActiveWork;
 
     internal bool OwnsLiveChat(Guid chatId)
     {
@@ -366,9 +365,7 @@ public partial class ChatViewModel
         var currentChatId = CurrentChat?.Id;
         var staleIds = _runtimeStates
             .Where(kvp => kvp.Key != currentChatId
-                          && !kvp.Value.IsBusy
-                          && !kvp.Value.IsStreaming
-                          && !kvp.Value.HasPendingBackgroundWork)
+                          && !kvp.Value.HasActiveWork)
             .Select(static kvp => kvp.Key)
             .ToList();
 

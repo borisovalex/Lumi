@@ -174,6 +174,97 @@ public sealed class ChatViewModelLeakTests
     }
 
     [Fact]
+    public void IsChatBusy_ReturnsTrueWhileToolIsStillTracked()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "tool-chat" };
+
+        dataStore.Data.Chats.Add(chat);
+        GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates")[chat.Id] = new ChatRuntimeState
+        {
+            Chat = chat,
+            ActiveToolCount = 1
+        };
+
+        Assert.True(vm.IsChatBusy(chat.Id));
+    }
+
+    [Fact]
+    public void MarkRuntimeActive_SetsRunningFlagForPreSendWork()
+    {
+        var chat = new Chat { Title = "worktree-chat" };
+        var runtime = new ChatRuntimeState { Chat = chat };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeActive", runtime, "Creating worktree", true, false);
+
+        Assert.True(runtime.IsBusy);
+        Assert.True(runtime.IsStreaming);
+        Assert.True(chat.IsRunning);
+        Assert.Equal("Creating worktree", runtime.StatusText);
+    }
+
+    [Fact]
+    public void MarkRuntimeWaitingForSessionIdle_KeepsRunningWhileTurnIsTracked()
+    {
+        var chat = new Chat { Title = "agent-chat" };
+        var runtime = new ChatRuntimeState
+        {
+            Chat = chat,
+            IsBusy = true,
+            IsStreaming = true,
+            PendingSessionUserMessageCount = 1,
+            StatusText = "Running agent"
+        };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeWaitingForSessionIdle", runtime);
+
+        Assert.True(runtime.IsBusy);
+        Assert.False(runtime.IsStreaming);
+        Assert.True(chat.IsRunning);
+        Assert.Equal("Running agent", runtime.StatusText);
+    }
+
+    [Fact]
+    public void MarkRuntimeWaitingForSessionIdle_KeepsRunningWhileBackgroundWorkIsPending()
+    {
+        var chat = new Chat { Title = "background-chat" };
+        var runtime = new ChatRuntimeState
+        {
+            Chat = chat,
+            IsStreaming = true,
+            HasPendingBackgroundWork = true
+        };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeWaitingForSessionIdle", runtime);
+
+        Assert.True(runtime.IsBusy);
+        Assert.False(runtime.IsStreaming);
+        Assert.True(runtime.HasPendingBackgroundWork);
+        Assert.True(chat.IsRunning);
+    }
+
+    [Fact]
+    public void MarkRuntimeWaitingForSessionIdle_ClearsWhenNoWorkRemains()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var runtime = new ChatRuntimeState
+        {
+            Chat = chat,
+            IsBusy = true,
+            IsStreaming = true,
+            StatusText = "Finishing"
+        };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeWaitingForSessionIdle", runtime);
+
+        Assert.False(runtime.IsBusy);
+        Assert.False(runtime.IsStreaming);
+        Assert.False(chat.IsRunning);
+        Assert.Equal("", runtime.StatusText);
+    }
+
+    [Fact]
     public async Task SendMessage_WhenChatRuntimeActive_QueuesPromptAndClearsComposer()
     {
         var dataStore = CreateDataStore();
@@ -903,6 +994,20 @@ public sealed class ChatViewModelLeakTests
             ActiveToolCount = 0,
             IsBusy = false,
             IsStreaming = false
+        };
+
+        var shouldMark = InvokePrivateStatic<bool>(typeof(ChatViewModel), "ShouldMarkBackgroundWorkPending", runtime);
+
+        Assert.False(shouldMark);
+    }
+
+    [Fact]
+    public void ShouldMarkBackgroundWorkPending_IgnoresStaleBusyAfterTurnTrackingClears()
+    {
+        var runtime = new ChatRuntimeState
+        {
+            IsBusy = true,
+            IsStreaming = true
         };
 
         var shouldMark = InvokePrivateStatic<bool>(typeof(ChatViewModel), "ShouldMarkBackgroundWorkPending", runtime);

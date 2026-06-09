@@ -541,15 +541,9 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                         turnModelId = ResolveSelectedModelForChat(chat);
-                        runtime.IsBusy = true;
-                        runtime.IsStreaming = true;
-                        runtime.StatusText = Loc.Status_Thinking;
+                        MarkRuntimeActive(runtime, Loc.Status_Thinking);
                         if (IsDisplayedSession())
-                        {
-                            IsBusy = runtime.IsBusy;
-                            IsStreaming = runtime.IsStreaming;
-                            StatusText = runtime.StatusText;
-                        }
+                            ApplyDisplayedRuntimeState(runtime);
                     });
                     break;
 
@@ -773,7 +767,10 @@ public partial class ChatViewModel
                     }
 
                     var displayName = ToolDisplayHelper.FormatToolStatusName(toolStart.Data.ToolName, toolStart.Data.Arguments?.ToString());
-                    runtime.StatusText = ToolDisplayHelper.FormatProgressLabel(displayName);
+                    MarkRuntimeActive(
+                        runtime,
+                        ToolDisplayHelper.FormatProgressLabel(displayName),
+                        isStreaming: runtime.IsStreaming);
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == startToolCallId);
                     var toolStatus = completedToolStatusesByCallId.GetValueOrDefault(startToolCallId) ?? "InProgress";
                     if (toolMsg is null)
@@ -813,7 +810,7 @@ public partial class ChatViewModel
                             vm.NotifyToolStatusChanged();
                         }
 
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     }
                     });
                     break;
@@ -940,7 +937,10 @@ public partial class ChatViewModel
                     {
                     var arguments = externalToolRequest.Data.Arguments?.ToString();
                     var displayName = ToolDisplayHelper.FormatToolStatusName(externalToolRequest.Data.ToolName, arguments);
-                    runtime.StatusText = ToolDisplayHelper.FormatProgressLabel(displayName);
+                    MarkRuntimeActive(
+                        runtime,
+                        ToolDisplayHelper.FormatProgressLabel(displayName),
+                        isStreaming: runtime.IsStreaming);
 
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == externalToolRequest.Data.ToolCallId);
                     var toolStatus = completedToolStatusesByCallId.GetValueOrDefault(externalToolRequest.Data.ToolCallId) ?? "InProgress";
@@ -979,7 +979,7 @@ public partial class ChatViewModel
                             vm.NotifyToolStatusChanged();
                         }
 
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     }
                     });
                     break;
@@ -1011,9 +1011,9 @@ public partial class ChatViewModel
                 case CommandQueuedEvent commandQueued:
                     Dispatcher.UIThread.Post(() =>
                     {
-                    runtime.StatusText = $"Queued command: {commandQueued.Data.Command}";
+                    MarkRuntimeActive(runtime, $"Queued command: {commandQueued.Data.Command}", isStreaming: runtime.IsStreaming);
                     if (IsDisplayedSession())
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     });
                     break;
 
@@ -1021,7 +1021,8 @@ public partial class ChatViewModel
                     ClearManualStopRequested(chat.Id);
                     assistantStream.CancelPending();
                     reasoningStream.CancelPending();
-                    ResetSubagentOutputState();
+                    if (!IsSubagentOutputActive())
+                        ResetSubagentOutputState();
                     Dispatcher.UIThread.Post(() =>
                     {
                         FlushAssistantDelta();
@@ -1053,17 +1054,17 @@ public partial class ChatViewModel
                         }
                         reasoningStream.Clear();
                         DropCompletedTurnState(chat.Id, dropCancellation: false);
-                        runtime.IsBusy = false;
-                        runtime.IsStreaming = false;
-                        runtime.StatusText = "";
+                        MarkRuntimeWaitingForSessionIdle(runtime);
                         if (IsDisplayedSession())
                         {
-                            _transcriptBuilder.HideTypingIndicator();
-                            _transcriptBuilder.CloseCurrentToolGroup();
-                            _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
-                            IsBusy = runtime.IsBusy;
-                            IsStreaming = runtime.IsStreaming;
-                            StatusText = runtime.StatusText;
+                            if (!runtime.IsBusy)
+                            {
+                                _transcriptBuilder.HideTypingIndicator();
+                                _transcriptBuilder.CloseCurrentToolGroup();
+                                _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
+                            }
+
+                            ApplyDisplayedRuntimeState(runtime);
                         }
                         QueueSaveChat(chat, saveIndex: true, touchIndex: true);
                     });
@@ -1074,7 +1075,15 @@ public partial class ChatViewModel
                     // after session.idle when the background queue drains. Treat it as
                     // "pending" only while the current turn is still active locally.
                     if (ShouldMarkBackgroundWorkPending(runtime))
+                    {
                         runtime.HasPendingBackgroundWork = true;
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            MarkRuntimeActive(runtime, isStreaming: false, hasPendingBackgroundWork: true);
+                            if (IsDisplayedSession())
+                                ApplyDisplayedRuntimeState(runtime);
+                        });
+                    }
                     break;
 
                 case SessionIdleEvent:
@@ -1095,11 +1104,12 @@ public partial class ChatViewModel
                         }
                     });
 
-                    // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
-                    MarkRuntimeTerminal(runtime);
-
                     Dispatcher.UIThread.Post(() =>
                     {
+                    // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
+                    // Clearing IsBusy updates Chat.IsRunning, so keep it on the UI thread.
+                    MarkRuntimeTerminal(runtime);
+
                     // Mark chat as unread if user is on a different chat
                     if (CurrentChat?.Id != chat.Id)
                         chat.HasUnreadMessages = true;
@@ -1116,6 +1126,9 @@ public partial class ChatViewModel
                     // Flush file changes only when session is truly idle (not between agentic turns).
                     if (IsDisplayedSession())
                     {
+                        ApplyDisplayedRuntimeState(runtime);
+                        _transcriptBuilder.CloseCurrentToolGroup();
+                        _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
                         _transcriptBuilder.FlushPendingFileEdits();
                         ScrollToEndRequested?.Invoke();
                     }
@@ -1210,9 +1223,9 @@ public partial class ChatViewModel
                 case SessionCompactionStartEvent:
                     Dispatcher.UIThread.Post(() =>
                     {
-                    runtime.StatusText = Loc.Status_Compacting;
+                    MarkRuntimeActive(runtime, Loc.Status_Compacting, isStreaming: false);
                     if (IsDisplayedSession())
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     });
                     break;
 
@@ -1398,9 +1411,9 @@ public partial class ChatViewModel
                     {
                     if (!string.IsNullOrWhiteSpace(intent.Data.Intent))
                     {
-                        runtime.StatusText = intent.Data.Intent;
+                        MarkRuntimeActive(runtime, intent.Data.Intent, isStreaming: runtime.IsStreaming);
                         if (IsDisplayedSession())
-                            StatusText = runtime.StatusText;
+                            ApplyDisplayedRuntimeState(runtime);
                     }
                     });
                     break;
@@ -1425,7 +1438,7 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                     var displayName = subStart.Data.AgentDisplayName ?? subStart.Data.AgentName ?? "Agent";
-                    runtime.StatusText = $"⚡ {displayName}";
+                    MarkRuntimeActive(runtime, $"⚡ {displayName}", isStreaming: false);
                     var subagentPayload = BuildSubagentPayloadJson(
                         description: string.Empty,
                         agentName: subStart.Data.AgentName,
@@ -1462,7 +1475,7 @@ public partial class ChatViewModel
                         {
                             var vm = Messages.LastOrDefault(m => m.Message.ToolCallId == subStart.Data.ToolCallId);
                             vm?.NotifyContentChanged();
-                            StatusText = runtime.StatusText;
+                            ApplyDisplayedRuntimeState(runtime);
                         }
                     }
                     else
@@ -1481,7 +1494,7 @@ public partial class ChatViewModel
                         if (IsDisplayedSession())
                         {
                             Messages.Add(new ChatMessageViewModel(toolMsg));
-                            StatusText = runtime.StatusText;
+                            ApplyDisplayedRuntimeState(runtime);
                             ScrollToEndRequested?.Invoke();
                         }
                     }
@@ -1803,11 +1816,52 @@ public partial class ChatViewModel
         runtime.StatusText = statusText ?? string.Empty;
     }
 
-    private static bool ShouldMarkBackgroundWorkPending(ChatRuntimeState runtime)
+    private static void MarkRuntimeActive(
+        ChatRuntimeState runtime,
+        string? statusText = null,
+        bool isStreaming = true,
+        bool hasPendingBackgroundWork = false)
+    {
+        runtime.StatusText = string.IsNullOrWhiteSpace(statusText)
+            ? string.IsNullOrWhiteSpace(runtime.StatusText) ? Loc.Status_Thinking : runtime.StatusText
+            : statusText;
+        runtime.IsStreaming = isStreaming;
+        if (hasPendingBackgroundWork)
+            runtime.HasPendingBackgroundWork = true;
+        runtime.IsBusy = true;
+    }
+
+    private void ApplyDisplayedRuntimeState(ChatRuntimeState runtime)
+    {
+        StatusText = runtime.StatusText;
+        IsStreaming = runtime.IsStreaming;
+        IsBusy = runtime.IsBusy;
+    }
+
+    private static void MarkRuntimeWaitingForSessionIdle(ChatRuntimeState runtime)
+    {
+        runtime.IsStreaming = false;
+        if (ShouldKeepRuntimeBusyUntilSessionIdle(runtime))
+        {
+            MarkRuntimeActive(
+                runtime,
+                string.IsNullOrWhiteSpace(runtime.StatusText) ? Loc.Status_Thinking : runtime.StatusText,
+                isStreaming: false,
+                hasPendingBackgroundWork: runtime.HasPendingBackgroundWork);
+            return;
+        }
+
+        MarkRuntimeTerminal(runtime);
+    }
+
+    private static bool ShouldKeepRuntimeBusyUntilSessionIdle(ChatRuntimeState runtime)
         => runtime.PendingSessionUserMessageCount > 0
            || runtime.ActiveToolCount > 0
-           || runtime.IsBusy
-           || runtime.IsStreaming;
+           || runtime.HasPendingBackgroundWork;
+
+    private static bool ShouldMarkBackgroundWorkPending(ChatRuntimeState runtime)
+        => runtime.PendingSessionUserMessageCount > 0
+           || runtime.ActiveToolCount > 0;
 
     private string ResolveWorkspaceFileChangedPath(Chat chat, string path)
     {
