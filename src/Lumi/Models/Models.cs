@@ -364,6 +364,12 @@ public class UserSettings
     public string PreferredModel { get; set; } = "";
     public string ReasoningEffort { get; set; } = ""; // "", "low", "medium", "high", "xhigh"
 
+    // ── MCP ──
+    // When true, local MCP servers are routed through Lumi's shared proxy so they
+    // start once and are reused across chats. When false (default), MCP servers are
+    // passed directly to Copilot and initialized per session.
+    public bool UseMcpProxy { get; set; }
+
     // ── Privacy & Data ──
     public bool EnableMemoryAutoSave { get; set; } = true;
     public bool EnableMemoryAutoMaintenance { get; set; } = true;

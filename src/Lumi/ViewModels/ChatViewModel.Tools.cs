@@ -110,6 +110,8 @@ public partial class ChatViewModel
         if (CurrentChat?.Id == chat.Id)
             selectedServerNames = ActiveMcpServerNames.ToList();
 
+        var proxyRuntime = McpSessionPlanner.SelectProxyRuntime(_dataStore.Data.Settings, McpProxyRuntime.Shared);
+
         return McpSessionPlanner.Build(
             _dataStore.Data,
             workDir,
@@ -117,7 +119,7 @@ public partial class ChatViewModel
             chat,
             selectedServerNames,
             activeAgent,
-            McpProxyRuntime.Shared);
+            proxyRuntime);
     }
 
     private List<AIFunction> BuildWebTools()

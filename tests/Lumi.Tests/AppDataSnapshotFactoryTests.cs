@@ -28,6 +28,30 @@ public class AppDataSnapshotFactoryTests
     }
 
     [Fact]
+    public void CreateIndexSnapshot_PreservesUseMcpProxy()
+    {
+        var source = new AppData { Settings = new UserSettings { UseMcpProxy = true } };
+
+        var snapshot = InvokeCreateIndexSnapshot(source);
+
+        Assert.True(snapshot.Settings.UseMcpProxy);
+    }
+
+    [Fact]
+    public void AppDataJsonContext_SerializesUseMcpProxy()
+    {
+        var data = new AppData { Settings = new UserSettings { UseMcpProxy = true } };
+
+        var json = JsonSerializer.Serialize(data, AppDataJsonContext.Default.AppData);
+        using var document = JsonDocument.Parse(json);
+
+        Assert.True(document.RootElement
+            .GetProperty("settings")
+            .GetProperty("useMcpProxy")
+            .GetBoolean());
+    }
+
+    [Fact]
     public void AppDataJsonContext_SerializesSettingsReasoningEffort()
     {
         var data = new AppData

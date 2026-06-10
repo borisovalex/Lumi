@@ -10,6 +10,25 @@ namespace Lumi.Tests;
 public sealed class McpSessionPlannerTests
 {
     [Fact]
+    public async Task SelectProxyRuntime_ReturnsNull_WhenSettingDisabledByDefault()
+    {
+        var settings = new UserSettings();
+        await using var shared = new McpProxyRuntime();
+
+        Assert.False(settings.UseMcpProxy);
+        Assert.Null(McpSessionPlanner.SelectProxyRuntime(settings, shared));
+    }
+
+    [Fact]
+    public async Task SelectProxyRuntime_ReturnsSharedRuntime_WhenSettingEnabled()
+    {
+        var settings = new UserSettings { UseMcpProxy = true };
+        await using var shared = new McpProxyRuntime();
+
+        Assert.Same(shared, McpSessionPlanner.SelectProxyRuntime(settings, shared));
+    }
+
+    [Fact]
     public void Build_ReturnsLocalAndRemoteServersAsSdkConfigs()
     {
         var local = new McpServer

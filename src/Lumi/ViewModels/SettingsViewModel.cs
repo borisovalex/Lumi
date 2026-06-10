@@ -90,6 +90,9 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     private readonly Dictionary<string, string> _modelDefaultEfforts = new(StringComparer.OrdinalIgnoreCase);
     public ObservableCollection<string> AvailableModels { get; } = [];
 
+    // ── MCP ──
+    [ObservableProperty] private bool _useMcpProxy;
+
     // ── GitHub Account ──
     [ObservableProperty] private bool _isAuthenticated;
     [ObservableProperty] private string _gitHubLogin = "";
@@ -331,6 +334,9 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         if (!string.IsNullOrWhiteSpace(_preferredModel))
             AvailableModels.Add(_preferredModel);
         UpdateQualityLevels(_preferredModel);
+
+        // MCP
+        _useMcpProxy = s.UseMcpProxy;
 
         // Privacy
         _enableMemoryAutoSave = s.EnableMemoryAutoSave;
@@ -620,6 +626,8 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         NotifyModified();
     }
 
+    partial void OnUseMcpProxyChanged(bool value) { _dataStore.Data.Settings.UseMcpProxy = value; Save(); NotifyModified(); }
+
     public void SyncDefaultModelSelectionFromChat(string model, string? reasoningEffort)
     {
         if (string.IsNullOrWhiteSpace(model))
@@ -769,6 +777,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     public bool IsDefaultModelSelectionModified => PreferredModel != _defaults.PreferredModel || ReasoningEffort != _defaults.ReasoningEffort;
     public bool IsPreferredModelModified=> PreferredModel != _defaults.PreferredModel;
     public bool IsReasoningEffortModified => ReasoningEffort != _defaults.ReasoningEffort;
+    public bool IsUseMcpProxyModified => UseMcpProxy != _defaults.UseMcpProxy;
     public bool IsEnableMemoryAutoSaveModified => EnableMemoryAutoSave != _defaults.EnableMemoryAutoSave;
     public bool IsEnableMemoryAutoMaintenanceModified => EnableMemoryAutoMaintenance != _defaults.EnableMemoryAutoMaintenance;
     public bool IsAutoSaveChatsModified => AutoSaveChats != _defaults.AutoSaveChats;
@@ -793,6 +802,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(IsDefaultModelSelectionModified));
         OnPropertyChanged(nameof(IsPreferredModelModified));
         OnPropertyChanged(nameof(IsReasoningEffortModified));
+        OnPropertyChanged(nameof(IsUseMcpProxyModified));
         OnPropertyChanged(nameof(IsEnableMemoryAutoSaveModified));
         OnPropertyChanged(nameof(IsEnableMemoryAutoMaintenanceModified));
         OnPropertyChanged(nameof(IsAutoSaveChatsModified));
@@ -820,6 +830,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         PreferredModel = _defaults.PreferredModel;
         ReasoningEffort = _defaults.ReasoningEffort;
     }
+    [RelayCommand] private void RevertUseMcpProxy() => UseMcpProxy = _defaults.UseMcpProxy;
     [RelayCommand] private void RevertEnableMemoryAutoSave() => EnableMemoryAutoSave = _defaults.EnableMemoryAutoSave;
     [RelayCommand] private void RevertEnableMemoryAutoMaintenance() => EnableMemoryAutoMaintenance = _defaults.EnableMemoryAutoMaintenance;
     [RelayCommand] private void RevertAutoSaveChats() => AutoSaveChats = _defaults.AutoSaveChats;
@@ -947,6 +958,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         AutoGenerateTitles = defaults.AutoGenerateTitles;
         PreferredModel = defaults.PreferredModel;
         ReasoningEffort = defaults.ReasoningEffort;
+        UseMcpProxy = defaults.UseMcpProxy;
         EnableMemoryAutoSave = defaults.EnableMemoryAutoSave;
         EnableMemoryAutoMaintenance = defaults.EnableMemoryAutoMaintenance;
         AutoSaveChats = defaults.AutoSaveChats;

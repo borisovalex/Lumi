@@ -1057,6 +1057,7 @@ internal sealed class LumiDebugBridge : IAsyncDisposable
             settings.ReasoningEffort = value;
             _mainViewModel.SettingsVM.ReasoningEffort = value;
         });
+        SetBool("useMcpProxy", value => settings.UseMcpProxy = _mainViewModel.SettingsVM.UseMcpProxy = value);
         SetBool("enableMemoryAutoSave", value => settings.EnableMemoryAutoSave = _mainViewModel.SettingsVM.EnableMemoryAutoSave = value);
         SetBool("enableMemoryAutoMaintenance", value => settings.EnableMemoryAutoMaintenance = _mainViewModel.SettingsVM.EnableMemoryAutoMaintenance = value);
         SetBool("autoSaveChats", value => settings.AutoSaveChats = _mainViewModel.SettingsVM.AutoSaveChats = value);

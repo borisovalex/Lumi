@@ -10,6 +10,18 @@ public static class McpSessionPlanner
 {
     private static readonly StringComparer NameComparer = StringComparer.OrdinalIgnoreCase;
 
+    /// <summary>
+    /// Chooses the MCP proxy runtime for a session. Returns the shared proxy when the user
+    /// enabled fast MCP initialization, otherwise null so MCP servers are passed directly to
+    /// Copilot and initialized per session.
+    /// </summary>
+    public static McpProxyRuntime? SelectProxyRuntime(UserSettings settings, McpProxyRuntime sharedRuntime)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        ArgumentNullException.ThrowIfNull(sharedRuntime);
+        return settings.UseMcpProxy ? sharedRuntime : null;
+    }
+
     public static Dictionary<string, McpServerConfig> Build(
         AppData data,
         string workDir,

@@ -276,6 +276,13 @@
             </sc:StrataModelPicker>
           </sc:StrataSetting>
         </sc:StrataSettingGroup>
+
+        <sc:StrataSettingGroup Header="{loc:Str SettingsGroup_McpServers}">
+          <sc:StrataSetting Header="{loc:Str Setting_UseMcpProxy}" Description="{loc:Str SettingDesc_UseMcpProxy}"
+                            IsModified="{Binding IsUseMcpProxyModified}">
+            <ToggleSwitch IsChecked="{Binding UseMcpProxy}" />
+          </sc:StrataSetting>
+        </sc:StrataSettingGroup>
       </StackPanel>
 
     <!-- ═══ Page 5: Privacy & Data ═══ -->
