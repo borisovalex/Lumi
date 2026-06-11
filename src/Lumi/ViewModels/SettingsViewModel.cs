@@ -808,6 +808,18 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         }
         catch
         {
+            // A transient backend/RPC failure (e.g. GitHub's user-service returning an internal
+            // error) is NOT a logout. If a stored credential is still present, keep the
+            // last-known-good signed-in state instead of wiping it — otherwise Lumi would show
+            // "logged out" during a brief server hiccup even though the user is still signed in.
+            var storedLogin = _copilotService.GetStoredLogin();
+            if (!string.IsNullOrWhiteSpace(storedLogin))
+            {
+                IsAuthenticated = true;
+                GitHubLogin = storedLogin;
+                return;
+            }
+
             IsAuthenticated = false;
             GitHubLogin = "";
             QuotaDisplayText = null;

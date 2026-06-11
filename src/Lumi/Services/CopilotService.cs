@@ -753,6 +753,45 @@ public class CopilotService : IAsyncDisposable
         options.UseLoggedInUser = true;
     }
 
+    /// <summary>
+    /// Detects transient, server-side authentication failures that are safe to retry with the
+    /// <em>same</em> credential. GitHub's backend intermittently returns a spurious <c>401</c>
+    /// that actually wraps an internal RPC failure (e.g. <c>twirp error internal: ... failed to
+    /// do request</c> against the <c>usersd</c> user-service) on long-running sessions. These are
+    /// NOT a logout — the stored token is still valid and simply re-issuing the request (what a
+    /// manual "continue" does) succeeds once the backend recovers. The CLI marks them
+    /// non-recoverable ("Retry after is not set. Giving up."), so Lumi must recognise and retry
+    /// them itself. Genuine credential rejections (e.g. "Bad credentials") deliberately return
+    /// <c>false</c> so they surface instead of retrying in a loop.
+    /// </summary>
+    internal static bool IsTransientServerAuthError(string? errorText)
+    {
+        if (string.IsNullOrWhiteSpace(errorText))
+            return false;
+
+        var text = errorText.ToLowerInvariant();
+
+        // GitHub backend internal failures surfaced as a 401 (observed verbatim in CLI logs).
+        if (text.Contains("twirp error internal")
+            || text.Contains("failed to do request")
+            || text.Contains("authenticatetoken authentication failed"))
+            return true;
+
+        // A 401/unauthorized that co-occurs with a server-internal/transient marker — as opposed
+        // to a definitive credential rejection such as "bad credentials".
+        var unauthorized = text.Contains("401") || text.Contains("unauthorized");
+        if (!unauthorized)
+            return false;
+
+        return text.Contains("internal")
+            || text.Contains("usersd")
+            || text.Contains("temporarily")
+            || text.Contains("unavailable")
+            || text.Contains("timeout")
+            || text.Contains("timed out")
+            || text.Contains("try again later");
+    }
+
     internal static string? TryGetGitHubTokenForMcp()
     {
         foreach (var name in new[]

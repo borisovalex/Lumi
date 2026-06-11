@@ -272,6 +272,7 @@
   "Status_ConnectionFailedShort": "Connection failed.",
   "Status_ConnectionRecoveredRetry": "Connection to GitHub Copilot was lost. Lumi reconnected automatically and retried your message.",
   "Status_ConnectionRecoveryFailed": "Connection to GitHub Copilot was lost and Lumi couldn't reconnect automatically. Please restart Lumi.",
+  "Status_TransientAuthRetry": "GitHub Copilot hit a temporary authentication error. You're still signed in — click Retry to continue.",
   "Status_Error": "Error: {0}",
   "Status_Compacting": "Compacting context\u2026",
   "Status_Truncated": "Context trimmed",

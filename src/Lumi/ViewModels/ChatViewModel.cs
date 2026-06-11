@@ -1134,9 +1134,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             },
             OnErrorOccurred = async (input, invocation) =>
             {
-                // Retry transient errors, abort on persistent ones
-                if (input.Recoverable)
-                    return new GitHub.Copilot.ErrorOccurredHookOutput { ErrorHandling = "retry", RetryCount = 2 };
+                // Retry transient errors, abort on persistent ones. Besides the SDK's own
+                // Recoverable flag, GitHub's backend intermittently returns spurious 401s
+                // (internal "twirp" RPC failures) on long sessions that the CLI marks
+                // non-recoverable but which succeed on a plain resend — retry those too.
+                if (input.Recoverable || CopilotService.IsTransientServerAuthError(input.Error))
+                    return new GitHub.Copilot.ErrorOccurredHookOutput { ErrorHandling = "retry", RetryCount = 3 };
                 return new GitHub.Copilot.ErrorOccurredHookOutput { ErrorHandling = "abort" };
             }
         };
@@ -2769,6 +2772,17 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         if (chat is not null)
             ClearPendingTurnTracking(chat.Id);
+
+        // A spurious server-side 401 (GitHub backend "twirp" internal error / AuthenticateToken)
+        // is not a real logout: the credential is still valid and a simple resend recovers.
+        // Surface it as a one-click-retryable failure (same affordance as a connection loss)
+        // instead of a terminal error, so the user can "continue" without re-authenticating.
+        if (overrideMessage is null && chat is not null
+            && CopilotService.IsTransientServerAuthError(FlattenExceptionMessages(ex)))
+        {
+            ApplyUnexpectedAbortState(chat, Loc.Status_TransientAuthRetry);
+            return;
+        }
 
         var message = overrideMessage ?? FlattenExceptionMessages(ex);
         var errorText = string.Format(Loc.Status_Error, message);

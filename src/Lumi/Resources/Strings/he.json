@@ -272,6 +272,7 @@
   "Status_ConnectionFailedShort": "החיבור נכשל.",
   "Status_ConnectionRecoveredRetry": "החיבור ל-GitHub Copilot אבד. Lumi התחבר מחדש אוטומטית וניסה שוב את ההודעה שלך.",
   "Status_ConnectionRecoveryFailed": "החיבור ל-GitHub Copilot אבד ו-Lumi לא הצליח להתחבר מחדש אוטומטית. נא להפעיל מחדש את Lumi.",
+  "Status_TransientAuthRetry": "ב-GitHub Copilot אירעה שגיאת אימות זמנית. אתה עדיין מחובר — לחץ נסה שוב כדי להמשיך.",
   "Status_Error": "שגיאה: {0}",
   "Status_Compacting": "דוחס הקשר\u2026",
   "Status_Truncated": "ההקשר קוצץ",
