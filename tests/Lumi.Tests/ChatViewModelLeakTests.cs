@@ -265,6 +265,76 @@ public sealed class ChatViewModelLeakTests
     }
 
     [Fact]
+    public void FinalizeTerminalAssistantMessage_AddsCompletedStreamingMessage()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var streamingMessage = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "final answer",
+            IsStreaming = true
+        };
+
+        var added = ChatViewModel.FinalizeTerminalAssistantMessage(chat, streamingMessage);
+
+        Assert.True(added);
+        Assert.False(streamingMessage.IsStreaming);
+        Assert.Same(streamingMessage, Assert.Single(chat.Messages));
+    }
+
+    [Fact]
+    public void FinalizeTerminalAssistantMessage_DoesNotPersistEmptyStreamingMessage()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var streamingMessage = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "   ",
+            IsStreaming = true
+        };
+
+        var added = ChatViewModel.FinalizeTerminalAssistantMessage(chat, streamingMessage);
+
+        Assert.False(added);
+        Assert.False(streamingMessage.IsStreaming);
+        Assert.Empty(chat.Messages);
+    }
+
+    [Fact]
+    public void FinalizeTerminalAssistantMessage_DoesNotDuplicateExistingMessage()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var streamingMessage = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "final answer",
+            IsStreaming = true
+        };
+        chat.Messages.Add(streamingMessage);
+
+        var added = ChatViewModel.FinalizeTerminalAssistantMessage(chat, streamingMessage);
+
+        Assert.True(added);
+        Assert.False(streamingMessage.IsStreaming);
+        Assert.Single(chat.Messages);
+    }
+
+    [Fact]
+    public void FinalizeTerminalReasoningMessage_ClearsStreamingState()
+    {
+         var reasoningMessage = new ChatMessage
+        {
+            Role = "reasoning",
+            Content = "thinking",
+            IsStreaming = true
+        };
+
+        ChatViewModel.FinalizeTerminalReasoningMessage(reasoningMessage);
+
+        Assert.False(reasoningMessage.IsStreaming);
+    }
+
+    [Fact]
     public async Task SendMessage_WhenChatRuntimeActive_QueuesPromptAndClearsComposer()
     {
         var dataStore = CreateDataStore();

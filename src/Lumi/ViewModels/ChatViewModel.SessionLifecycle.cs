@@ -40,6 +40,21 @@ public partial class ChatViewModel
         return string.IsNullOrWhiteSpace(existingContent) ? null : existingContent;
     }
 
+    internal static bool FinalizeTerminalAssistantMessage(Chat chat, ChatMessage streamingMessage)
+    {
+        streamingMessage.IsStreaming = false;
+        if (string.IsNullOrWhiteSpace(streamingMessage.Content))
+            return false;
+
+        if (!chat.Messages.Any(message => message.Id == streamingMessage.Id))
+            chat.Messages.Add(streamingMessage);
+
+        return true;
+    }
+
+    internal static void FinalizeTerminalReasoningMessage(ChatMessage reasoningMessage)
+        => reasoningMessage.IsStreaming = false;
+
     private static string? NormalizeAssistantContent(string? content)
         => content?.TrimStart('\n', '\r');
 
@@ -523,6 +538,40 @@ public partial class ChatViewModel
                 StatusText = runtime.StatusText;
                 ScrollToEndRequested?.Invoke();
             }
+        }
+
+        void FinalizeCompletedTurnStreams(bool shouldUpdateDisplayedChatUi)
+        {
+            FlushAssistantDelta();
+            if (streamingMsg is not null)
+            {
+                _inProgressMessages.Remove(chat.Id);
+                if (FinalizeTerminalAssistantMessage(chat, streamingMsg))
+                {
+                    if (shouldUpdateDisplayedChatUi)
+                        streamingVm?.NotifyStreamingEnded();
+                }
+                else if (shouldUpdateDisplayedChatUi && streamingVm is not null)
+                {
+                    Messages.Remove(streamingVm);
+                }
+
+                streamingMsg = null;
+                streamingVm = null;
+            }
+            assistantStream.Clear();
+
+            FlushReasoningDelta();
+            if (reasoningMsg is not null)
+            {
+                FinalizeTerminalReasoningMessage(reasoningMsg);
+                if (shouldUpdateDisplayedChatUi)
+                    reasoningVm?.NotifyStreamingEnded();
+
+                reasoningMsg = null;
+                reasoningVm = null;
+            }
+            reasoningStream.Clear();
         }
 
         assistantStream = new StreamingTextAccumulator(
@@ -1080,39 +1129,13 @@ public partial class ChatViewModel
                         ResetSubagentOutputState();
                     Dispatcher.UIThread.Post(() =>
                     {
-                        FlushAssistantDelta();
-                        if (streamingMsg is not null)
-                        {
-                            streamingMsg.IsStreaming = false;
-                            if (!string.IsNullOrWhiteSpace(streamingMsg.Content)
-                                && !chat.Messages.Any(message => message.Id == streamingMsg.Id))
-                            {
-                                chat.Messages.Add(streamingMsg);
-                            }
-
-                            if (IsDisplayedSession())
-                                streamingVm?.NotifyStreamingEnded();
-
-                            streamingMsg = null;
-                            streamingVm = null;
-                        }
-                        assistantStream.Clear();
-
-                        if (reasoningMsg is not null)
-                        {
-                            reasoningMsg.IsStreaming = false;
-                            if (IsDisplayedSession())
-                                reasoningVm?.NotifyStreamingEnded();
-
-                            reasoningMsg = null;
-                            reasoningVm = null;
-                        }
-                        reasoningStream.Clear();
+                        var shouldUpdateDisplayedChatUi = IsDisplayedSession();
+                        FinalizeCompletedTurnStreams(shouldUpdateDisplayedChatUi);
                         DropCompletedTurnState(chat.Id, dropCancellation: false);
                         MarkRuntimeWaitingForSessionIdle(runtime);
                         if (runtime.IsBusy)
                             SchedulePostToolReconciliation(chat.Id, treatCompletedTurnAsIdle: true);
-                        if (IsDisplayedSession())
+                        if (shouldUpdateDisplayedChatUi)
                         {
                             if (!runtime.IsBusy)
                             {
@@ -1147,57 +1170,55 @@ public partial class ChatViewModel
                     ClearManualStopRequested(chat.Id);
                     ClearPendingTurnTracking(chat.Id);
                     DropCompletedTurnState(chat.Id, dropCancellation: true);
+                    assistantStream.CancelPending();
+                    reasoningStream.CancelPending();
 
-                    // Show model label once at the very end of the assistant turn
-                    // (not per-message during agentic loops).
                     Dispatcher.UIThread.Post(() =>
                     {
+                        var shouldUpdateDisplayedChatUi = IsDisplayedSession();
+                        FinalizeCompletedTurnStreams(shouldUpdateDisplayedChatUi);
                         AttachPendingSourcesToFinalAssistantMessage();
 
-                        if (IsDisplayedSession())
+                        // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
+                        // Clearing IsBusy updates Chat.IsRunning, so keep it on the UI thread.
+                        MarkRuntimeTerminal(runtime);
+
+                        // Mark chat as unread if user is on a different chat
+                        if (CurrentChat?.Id != chat.Id)
+                            chat.HasUnreadMessages = true;
+
+                        if (_dataStore.Data.Settings.NotificationsEnabled)
                         {
+                            var chatTitle = chat.Title;
+                            var body = string.IsNullOrWhiteSpace(chatTitle)
+                                ? Loc.Notification_ResponseReady
+                                : $"{chatTitle} — {Loc.Notification_ResponseReady}";
+                            NotificationService.ShowIfInactive(agentName, body, chat.Id);
+                        }
+
+                        // Flush file changes only when session is truly idle (not between agentic turns).
+                        if (shouldUpdateDisplayedChatUi)
+                        {
+                            // Show model label once at the very end of the assistant turn
+                            // (not per-message during agentic loops).
                             _transcriptBuilder.AppendModelLabel(turnModelId);
+                            ApplyDisplayedRuntimeState(runtime);
+                            _transcriptBuilder.CloseCurrentToolGroup();
+                            _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
+                            _transcriptBuilder.FlushPendingFileEdits();
                             ScrollToEndRequested?.Invoke();
                         }
-                    });
 
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                    // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
-                    // Clearing IsBusy updates Chat.IsRunning, so keep it on the UI thread.
-                    MarkRuntimeTerminal(runtime);
+                        // Memory checkpoint + suggestions only when session is truly idle.
+                        // Running these on every AssistantTurnEndEvent creates a storm of
+                        // background sessions that can starve the CLI process and stall
+                        // all active sessions.
+                        QueueChatCompletionFollowUps(chat);
 
-                    // Mark chat as unread if user is on a different chat
-                    if (CurrentChat?.Id != chat.Id)
-                        chat.HasUnreadMessages = true;
-
-                    if (_dataStore.Data.Settings.NotificationsEnabled)
-                    {
-                        var chatTitle = chat.Title;
-                        var body = string.IsNullOrWhiteSpace(chatTitle)
-                            ? Loc.Notification_ResponseReady
-                            : $"{chatTitle} — {Loc.Notification_ResponseReady}";
-                        NotificationService.ShowIfInactive(agentName, body, chat.Id);
-                    }
-
-                    // Flush file changes only when session is truly idle (not between agentic turns).
-                    if (IsDisplayedSession())
-                    {
-                        ApplyDisplayedRuntimeState(runtime);
-                        _transcriptBuilder.CloseCurrentToolGroup();
-                        _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
-                        _transcriptBuilder.FlushPendingFileEdits();
-                        ScrollToEndRequested?.Invoke();
-                    }
-
-                    // Memory checkpoint + suggestions only when session is truly idle.
-                    // Running these on every AssistantTurnEndEvent creates a storm of
-                    // background sessions that can starve the CLI process and stall
-                    // all active sessions.
-                    QueueChatCompletionFollowUps(chat);
-
-                    if (CurrentChat?.Id != chat.Id)
-                        QueueSaveChat(chat, saveIndex: false, releaseIfInactive: true);
+                        if (CurrentChat?.Id != chat.Id)
+                            QueueSaveChat(chat, saveIndex: false, releaseIfInactive: true);
+                        else
+                            QueueSaveChat(chat, saveIndex: false);
                     });
                     break;
 
