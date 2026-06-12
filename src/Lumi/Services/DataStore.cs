@@ -26,6 +26,13 @@ public class DataStore
     public static string SkillsDir { get; } = Path.Combine(AppDir, "skills");
     public static string ChatsDir { get; } = Path.Combine(AppDir, "chats");
     public static string CopilotConfigDir { get; } = Path.Combine(AppDir, "copilot");
+    public static string SearchContentIndexFile { get; } = Path.Combine(AppDir, "search-content-index.bin");
+
+    /// <summary>Raised when a chat's persisted content changes (saved or deleted) so search indexes can refresh.</summary>
+    public event Action<Guid>? ChatContentChanged;
+
+    /// <summary>Raised when all chats are cleared so search indexes can be reset.</summary>
+    public event Action? ChatsContentReset;
 
     private AppData _data;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -298,6 +305,8 @@ public class DataStore
         {
             _writeLock.Release();
         }
+
+        ChatContentChanged?.Invoke(chat.Id);
     }
 
     /// <summary>Loads messages from a chat's per-chat file into chat.Messages.</summary>
@@ -551,6 +560,28 @@ public class DataStore
             _chatSearchCache.Remove(chatId);
     }
 
+    /// <summary>Evicts a chat's cached full-text snapshot to bound memory (e.g., after it is indexed elsewhere).</summary>
+    public void EvictChatSearchSnapshot(Guid chatId) => RemoveChatSearchSnapshot(chatId);
+
+    /// <summary>
+    /// Returns the last-write time (UTC) of a chat's persisted file, or null when it has no file.
+    /// Used by the search content index to detect entries that went stale between runs.
+    /// </summary>
+    public DateTimeOffset? GetChatFileTimestamp(Guid chatId)
+    {
+        var chatFile = Path.Combine(ChatsDir, $"{chatId}.json");
+        try
+        {
+            return File.Exists(chatFile)
+                ? new DateTimeOffset(File.GetLastWriteTimeUtc(chatFile))
+                : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+    }
+
     private static ChatSearchSnapshot CreateLoadedChatSearchSnapshot(IReadOnlyList<ChatMessage> messages)
     {
         var signature = new HashCode();
@@ -659,6 +690,8 @@ public class DataStore
         var chatFile = Path.Combine(ChatsDir, $"{chatId}.json");
         if (File.Exists(chatFile))
             File.Delete(chatFile);
+
+        ChatContentChanged?.Invoke(chatId);
     }
 
     /// <summary>Deletes all per-chat files.</summary>
@@ -672,6 +705,8 @@ public class DataStore
             foreach (var file in Directory.GetFiles(ChatsDir, "*.json"))
                 File.Delete(file);
         }
+
+        ChatsContentReset?.Invoke();
     }
 
     /// <summary>

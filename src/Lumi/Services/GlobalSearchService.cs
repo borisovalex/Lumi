@@ -58,11 +58,25 @@ public sealed class ChatSearchSnapshot
 public sealed class GlobalSearchService
 {
     private readonly Func<AppData> _getData;
-    private readonly Func<Chat, ChatSearchSnapshot> _chatSnapshotProvider;
     private readonly Func<DateTimeOffset> _nowProvider;
-    private readonly object _chatFieldCacheSync = new();
-    private readonly Dictionary<Guid, CachedChatFields> _chatFieldCache = [];
+    private readonly ChatContentIndex _contentIndex;
     private const int InteractiveColdChatContentLimit = 16;
+
+    // Chat titles are often long auto-generated sentences, so the fuzzy text engine can match a
+    // query against an unrelated word (e.g. "exposes"/"expert" for "expenses") and the high primary
+    // field weight then floats that noise above genuine hits. When a chat matches only fuzzily —
+    // the query is neither a real substring/token of the title nor present in the content — its
+    // relevance is damped so exact title and real content matches always rank first.
+    private const double FuzzyChatRelevanceFactor = 0.2;
+
+    // Browse base scores keep categories grouped (chats first) when listing by time/recency.
+    private const double BrowseBaseChats = 1_000;
+    private const double BrowseBaseJobs = 920;
+    private const double BrowseBaseProjects = 900;
+    private const double BrowseBaseSkills = 800;
+    private const double BrowseBaseAgents = 780;
+    private const double BrowseBaseMemories = 760;
+    private const double BrowseBaseMcp = 740;
 
     private static readonly SearchSettingEntry[] SettingsIndex =
     [
@@ -97,12 +111,18 @@ public sealed class GlobalSearchService
     public GlobalSearchService(
         Func<AppData> getData,
         Func<Chat, ChatSearchSnapshot> chatSnapshotProvider,
-        Func<DateTimeOffset>? nowProvider = null)
+        Func<DateTimeOffset>? nowProvider = null,
+        Action<Guid>? releaseChatSnapshot = null,
+        Func<Guid, DateTimeOffset?>? chatFileTimestampProvider = null)
     {
         _getData = getData ?? throw new ArgumentNullException(nameof(getData));
-        _chatSnapshotProvider = chatSnapshotProvider ?? throw new ArgumentNullException(nameof(chatSnapshotProvider));
+        ArgumentNullException.ThrowIfNull(chatSnapshotProvider);
         _nowProvider = nowProvider ?? (() => DateTimeOffset.Now);
+        _contentIndex = new ChatContentIndex(chatSnapshotProvider, releaseChatSnapshot, chatFileTimestampProvider);
     }
+
+    /// <summary>Number of chats whose content is currently indexed (full-coverage progress).</summary>
+    public int IndexedChatCount => _contentIndex.Count;
 
     public Task<IReadOnlyList<GlobalSearchMatch>> SearchAsync(
         string query,
@@ -124,35 +144,50 @@ public sealed class GlobalSearchService
                 cancellationToken);
         }
 
-        var searchQuery = SearchQuery.Create(trimmedQuery);
-        if (searchQuery.IsEmpty)
+        var now = _nowProvider();
+        var timeQuery = SearchTimeQuery.Parse(trimmedQuery, now);
+        var textQuery = SearchQuery.Create(timeQuery.ResidualText);
+
+        // Nothing searchable and no temporal signal → fall back to the default listing.
+        if (textQuery.IsEmpty && !timeQuery.HasAnyTimeSignal)
         {
             return Task.Run<IReadOnlyList<GlobalSearchMatch>>(
                 () => BuildDefaultResults(snapshot),
                 cancellationToken);
         }
 
+        var context = new SearchContext(textQuery, timeQuery.Range, timeQuery.HasRecencyIntent, executionMode);
+
         return Task.Run<IReadOnlyList<GlobalSearchMatch>>(
-            () => SearchCore(snapshot, searchQuery, executionMode, cancellationToken),
+            () => SearchCore(snapshot, context, cancellationToken),
             cancellationToken);
     }
 
     private IReadOnlyList<GlobalSearchMatch> SearchCore(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         CancellationToken cancellationToken)
     {
         var results = new List<GlobalSearchMatch>();
 
-        SearchChats(snapshot, query, executionMode, results, cancellationToken);
-        SearchJobs(snapshot, query, executionMode, results, cancellationToken);
-        SearchProjects(snapshot, query, executionMode, results, cancellationToken);
-        SearchSkills(snapshot, query, executionMode, results, cancellationToken);
-        SearchAgents(snapshot, query, executionMode, results, cancellationToken);
-        SearchMemories(snapshot, query, executionMode, results, cancellationToken);
-        SearchMcpServers(snapshot, query, executionMode, results, cancellationToken);
-        SearchSettings(query, results, cancellationToken);
+        if (context.IsBrowse)
+        {
+            BuildBrowseResults(snapshot, context, results, cancellationToken);
+        }
+        else
+        {
+            SearchChats(snapshot, context, results, cancellationToken);
+            SearchJobs(snapshot, context, results, cancellationToken);
+            SearchProjects(snapshot, context, results, cancellationToken);
+            SearchSkills(snapshot, context, results, cancellationToken);
+            SearchAgents(snapshot, context, results, cancellationToken);
+            SearchMemories(snapshot, context, results, cancellationToken);
+            SearchMcpServers(snapshot, context, results, cancellationToken);
+
+            // Settings have no timestamp, so they only make sense for plain text queries.
+            if (!context.HasRange)
+                SearchSettings(context.TextQuery, results, cancellationToken);
+        }
 
         results.Sort(static (left, right) =>
         {
@@ -169,49 +204,59 @@ public sealed class GlobalSearchService
             return StringComparer.CurrentCultureIgnoreCase.Compare(left.Title, right.Title);
         });
 
-        return LimitResultsPerCategory(results, executionMode == GlobalSearchExecutionMode.Preview ? 12 : 32);
+        return LimitResultsPerCategory(results, context.Mode == GlobalSearchExecutionMode.Preview ? 12 : 32);
     }
 
     private void SearchChats(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
-        var interactiveColdChatIds = executionMode == GlobalSearchExecutionMode.Interactive
-            ? GetInteractiveColdChatIds(snapshot.Chats, cancellationToken)
+        var interactiveColdChatIds = context.Mode == GlobalSearchExecutionMode.Interactive
+            ? GetInteractiveColdChatIds(snapshot.Chats, context, cancellationToken)
             : null;
 
         foreach (var chat in snapshot.Chats)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var titleField = new PreparedSearchField(chat.Title, 3.8, SearchFieldKind.Primary);
-            var evaluation = SearchEngine.Evaluate(query, [titleField]);
+            if (!context.InRange(chat.UpdatedAt))
+                continue;
 
-            if (!evaluation.IsMatch && executionMode != GlobalSearchExecutionMode.Preview)
+            var titleField = new PreparedSearchField(chat.Title, 3.8, SearchFieldKind.Primary);
+            var evaluation = SearchEngine.Evaluate(context.TextQuery, [titleField]);
+
+            if (!evaluation.IsMatch && context.Mode != GlobalSearchExecutionMode.Preview)
             {
-                var contentFields = GetChatContentFields(
+                var contentField = GetChatContentField(
                     chat,
-                    executionMode,
+                    context.Mode,
                     interactiveColdChatIds,
+                    context.TextQuery,
                     cancellationToken);
-                if (contentFields.Count > 0)
-                {
-                    var fields = new List<PreparedSearchField>(contentFields.Count + 1) { titleField };
-                    fields.AddRange(contentFields);
-                    evaluation = SearchEngine.Evaluate(query, fields);
-                }
+
+                if (contentField is not null)
+                    evaluation = SearchEngine.Evaluate(context.TextQuery, [titleField, contentField]);
             }
 
             if (!evaluation.IsMatch)
                 continue;
 
             snapshot.ProjectNames.TryGetValue(chat.ProjectId ?? Guid.Empty, out var projectName);
-            var score = evaluation.Score
-                        + GetTitleBonus(chat.Title, query)
-                        + GetRecencyBoost(chat.UpdatedAt, multiplier: 1.6);
+
+            // A match is "genuine" when the query actually occurs in the content (content fields are
+            // never fuzzy-matched) or every term is a real substring/token of the title. Pure fuzzy
+            // title matches are damped so they cannot bury exact title or real content matches.
+            var isGenuineMatch = evaluation.IsContentMatch
+                                 || QueryTermsPresentInTitle(chat.Title, context.TextQuery);
+            var relevance = isGenuineMatch
+                ? evaluation.Score
+                : evaluation.Score * FuzzyChatRelevanceFactor;
+
+            var score = relevance
+                        + GetTitleBonus(chat.Title, context.TextQuery)
+                        + GetChatRecencyBoost(chat.UpdatedAt, context.HasRecencyIntent);
 
             results.Add(new GlobalSearchMatch
             {
@@ -229,8 +274,7 @@ public sealed class GlobalSearchService
 
     private void SearchProjects(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -238,9 +282,16 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            snapshot.ProjectChatCounts.TryGetValue(project.Id, out var chatCount);
+            snapshot.ProjectLastActivity.TryGetValue(project.Id, out var latestActivity);
+            var sortTimestamp = latestActivity == default ? project.CreatedAt : latestActivity;
+
+            if (!context.InRange(sortTimestamp))
+                continue;
+
             var evaluation = SearchEngine.Evaluate(
-                query,
-                IncludeContentFields(executionMode)
+                context.TextQuery,
+                IncludeContentFields(context.Mode)
                     ?
                     [
                         SearchField.Primary(project.Name, 3.5),
@@ -254,9 +305,6 @@ public sealed class GlobalSearchService
             if (!evaluation.IsMatch)
                 continue;
 
-            snapshot.ProjectChatCounts.TryGetValue(project.Id, out var chatCount);
-            snapshot.ProjectLastActivity.TryGetValue(project.Id, out var latestActivity);
-            var sortTimestamp = latestActivity == default ? project.CreatedAt : latestActivity;
             var defaultSubtitle = chatCount == 0
                 ? "No chats"
                 : $"{chatCount} chat{(chatCount == 1 ? "" : "s")} · {FormatRelativeTime(sortTimestamp)}";
@@ -269,7 +317,7 @@ public sealed class GlobalSearchService
                 NavIndex = 2,
                 Item = project,
                 Score = evaluation.Score
-                        + GetTitleBonus(project.Name, query)
+                        + GetTitleBonus(project.Name, context.TextQuery)
                         + GetRecencyBoost(sortTimestamp, multiplier: 0.8),
                 IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = sortTimestamp
@@ -279,8 +327,7 @@ public sealed class GlobalSearchService
 
     private void SearchJobs(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -288,9 +335,12 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (!context.InRange(job.UpdatedAt))
+                continue;
+
             var evaluation = SearchEngine.Evaluate(
-                query,
-                IncludeContentFields(executionMode)
+                context.TextQuery,
+                IncludeContentFields(context.Mode)
                     ?
                     [
                         SearchField.Primary(job.Name, 3.5),
@@ -319,7 +369,7 @@ public sealed class GlobalSearchService
                 NavIndex = 1,
                 Item = job,
                 Score = evaluation.Score
-                        + GetTitleBonus(job.Name, query)
+                        + GetTitleBonus(job.Name, context.TextQuery)
                         + GetRecencyBoost(job.UpdatedAt, multiplier: 0.6),
                 IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = job.UpdatedAt
@@ -329,8 +379,7 @@ public sealed class GlobalSearchService
 
     private void SearchSkills(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -338,9 +387,12 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (!context.InRange(skill.CreatedAt))
+                continue;
+
             var evaluation = SearchEngine.Evaluate(
-                query,
-                IncludeContentFields(executionMode)
+                context.TextQuery,
+                IncludeContentFields(context.Mode)
                     ?
                     [
                         SearchField.Primary(skill.Name, 3.4),
@@ -364,7 +416,7 @@ public sealed class GlobalSearchService
                 NavIndex = 3,
                 Item = skill,
                 Score = evaluation.Score
-                        + GetTitleBonus(skill.Name, query)
+                        + GetTitleBonus(skill.Name, context.TextQuery)
                         + GetRecencyBoost(skill.CreatedAt, multiplier: 0.45),
                 IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = skill.CreatedAt
@@ -374,8 +426,7 @@ public sealed class GlobalSearchService
 
     private void SearchAgents(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -383,9 +434,12 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (!context.InRange(agent.CreatedAt))
+                continue;
+
             var evaluation = SearchEngine.Evaluate(
-                query,
-                IncludeContentFields(executionMode)
+                context.TextQuery,
+                IncludeContentFields(context.Mode)
                     ?
                     [
                         SearchField.Primary(agent.Name, 3.4),
@@ -409,7 +463,7 @@ public sealed class GlobalSearchService
                 NavIndex = 4,
                 Item = agent,
                 Score = evaluation.Score
-                        + GetTitleBonus(agent.Name, query)
+                        + GetTitleBonus(agent.Name, context.TextQuery)
                         + GetRecencyBoost(agent.CreatedAt, multiplier: 0.45),
                 IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = agent.CreatedAt
@@ -419,8 +473,7 @@ public sealed class GlobalSearchService
 
     private void SearchMemories(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -428,9 +481,12 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (!context.InRange(memory.UpdatedAt))
+                continue;
+
             var evaluation = SearchEngine.Evaluate(
-                query,
-                IncludeContentFields(executionMode)
+                context.TextQuery,
+                IncludeContentFields(context.Mode)
                     ?
                     [
                         SearchField.Primary(memory.Key, 3.3),
@@ -458,7 +514,7 @@ public sealed class GlobalSearchService
                 NavIndex = 5,
                 Item = memory,
                 Score = evaluation.Score
-                        + GetTitleBonus(memory.Key, query)
+                        + GetTitleBonus(memory.Key, context.TextQuery)
                         + GetRecencyBoost(memory.UpdatedAt, multiplier: 0.7),
                 IsContentMatch = evaluation.IsContentMatch,
                 SortTimestamp = memory.UpdatedAt
@@ -468,8 +524,7 @@ public sealed class GlobalSearchService
 
     private void SearchMcpServers(
         SearchSnapshot snapshot,
-        SearchQuery query,
-        GlobalSearchExecutionMode executionMode,
+        SearchContext context,
         ICollection<GlobalSearchMatch> results,
         CancellationToken cancellationToken)
     {
@@ -477,9 +532,12 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (!context.InRange(server.CreatedAt))
+                continue;
+
             var evaluation = SearchEngine.Evaluate(
-                query,
-                executionMode == GlobalSearchExecutionMode.Preview
+                context.TextQuery,
+                context.Mode == GlobalSearchExecutionMode.Preview
                     ?
                     [
                         SearchField.Primary(server.Name, 3.2),
@@ -506,7 +564,7 @@ public sealed class GlobalSearchService
                 NavIndex = 6,
                 Item = server,
                 Score = evaluation.Score
-                        + GetTitleBonus(server.Name, query)
+                        + GetTitleBonus(server.Name, context.TextQuery)
                         + GetRecencyBoost(server.CreatedAt, multiplier: 0.4),
                 IsContentMatch = false,
                 SortTimestamp = server.CreatedAt
@@ -544,6 +602,154 @@ public sealed class GlobalSearchService
         }
     }
 
+    /// <summary>
+    /// Time-driven browse: lists items inside the requested window (or all when only a
+    /// recency preference was given), ordered by recency. Used when the query was purely
+    /// temporal ("yesterday", "last week", "recent").
+    /// </summary>
+    private void BuildBrowseResults(
+        SearchSnapshot snapshot,
+        SearchContext context,
+        ICollection<GlobalSearchMatch> results,
+        CancellationToken cancellationToken)
+    {
+        foreach (var chat in snapshot.Chats)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!context.InRange(chat.UpdatedAt))
+                continue;
+
+            snapshot.ProjectNames.TryGetValue(chat.ProjectId ?? Guid.Empty, out var projectName);
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Chats,
+                Title = chat.Title,
+                Subtitle = BuildChatSubtitle(projectName, chat.UpdatedAt, snippet: null),
+                NavIndex = 0,
+                Item = chat,
+                Score = BrowseBaseChats + GetChatRecencyBoost(chat.UpdatedAt, context.HasRecencyIntent),
+                SortTimestamp = chat.UpdatedAt
+            });
+        }
+
+        foreach (var job in snapshot.BackgroundJobs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!context.InRange(job.UpdatedAt))
+                continue;
+
+            var status = job.IsEnabled ? "Enabled" : "Paused";
+            var next = job.NextRunAt.HasValue ? $" · next {FormatRelativeTime(job.NextRunAt.Value)}" : "";
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.BackgroundJobs,
+                Title = job.Name,
+                Subtitle = $"{status}{next} · {BackgroundJobSchedule.Describe(job)}",
+                NavIndex = 1,
+                Item = job,
+                Score = BrowseBaseJobs + GetRecencyBoost(job.UpdatedAt, multiplier: 0.7),
+                SortTimestamp = job.UpdatedAt
+            });
+        }
+
+        foreach (var project in snapshot.Projects)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            snapshot.ProjectChatCounts.TryGetValue(project.Id, out var chatCount);
+            snapshot.ProjectLastActivity.TryGetValue(project.Id, out var latestActivity);
+            var sortTimestamp = latestActivity == default ? project.CreatedAt : latestActivity;
+            if (!context.InRange(sortTimestamp))
+                continue;
+
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Projects,
+                Title = project.Name,
+                Subtitle = chatCount == 0
+                    ? "No chats"
+                    : $"{chatCount} chat{(chatCount == 1 ? "" : "s")} · {FormatRelativeTime(sortTimestamp)}",
+                NavIndex = 2,
+                Item = project,
+                Score = BrowseBaseProjects + GetRecencyBoost(sortTimestamp, multiplier: 0.9),
+                SortTimestamp = sortTimestamp
+            });
+        }
+
+        foreach (var skill in snapshot.Skills)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!context.InRange(skill.CreatedAt))
+                continue;
+
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Skills,
+                Title = skill.Name,
+                Subtitle = skill.Description,
+                NavIndex = 3,
+                Item = skill,
+                Score = BrowseBaseSkills + GetRecencyBoost(skill.CreatedAt, multiplier: 0.45),
+                SortTimestamp = skill.CreatedAt
+            });
+        }
+
+        foreach (var agent in snapshot.Agents)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!context.InRange(agent.CreatedAt))
+                continue;
+
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Lumis,
+                Title = agent.Name,
+                Subtitle = agent.Description,
+                NavIndex = 4,
+                Item = agent,
+                Score = BrowseBaseAgents + GetRecencyBoost(agent.CreatedAt, multiplier: 0.45),
+                SortTimestamp = agent.CreatedAt
+            });
+        }
+
+        foreach (var memory in snapshot.Memories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!context.InRange(memory.UpdatedAt))
+                continue;
+
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.Memories,
+                Title = memory.Key,
+                Subtitle = string.IsNullOrWhiteSpace(memory.Category)
+                    ? TrimForSubtitle(memory.Content)
+                    : $"[{memory.Category}] {TrimForSubtitle(memory.Content)}",
+                NavIndex = 5,
+                Item = memory,
+                Score = BrowseBaseMemories + GetRecencyBoost(memory.UpdatedAt, multiplier: 0.7),
+                SortTimestamp = memory.UpdatedAt
+            });
+        }
+
+        foreach (var server in snapshot.McpServers)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!context.InRange(server.CreatedAt))
+                continue;
+
+            results.Add(new GlobalSearchMatch
+            {
+                Category = GlobalSearchCategory.McpServers,
+                Title = server.Name,
+                Subtitle = server.Description,
+                NavIndex = 6,
+                Item = server,
+                Score = BrowseBaseMcp + GetRecencyBoost(server.CreatedAt, multiplier: 0.4),
+                SortTimestamp = server.CreatedAt
+            });
+        }
+    }
+
     private IReadOnlyList<GlobalSearchMatch> BuildDefaultResults(SearchSnapshot snapshot)
     {
         var results = new List<GlobalSearchMatch>();
@@ -558,7 +764,7 @@ public sealed class GlobalSearchService
                 Subtitle = BuildChatSubtitle(projectName, chat.UpdatedAt, snippet: null),
                 NavIndex = 0,
                 Item = chat,
-                Score = 1_000 + GetRecencyBoost(chat.UpdatedAt, multiplier: 2.0),
+                Score = BrowseBaseChats + GetChatRecencyBoost(chat.UpdatedAt, hasRecencyIntent: false),
                 SortTimestamp = chat.UpdatedAt
             });
         }
@@ -574,7 +780,7 @@ public sealed class GlobalSearchService
                 Subtitle = $"{status}{next} · {BackgroundJobSchedule.Describe(job)}",
                 NavIndex = 1,
                 Item = job,
-                Score = 920 + GetRecencyBoost(job.UpdatedAt, multiplier: 0.7),
+                Score = BrowseBaseJobs + GetRecencyBoost(job.UpdatedAt, multiplier: 0.7),
                 SortTimestamp = job.UpdatedAt
             });
         }
@@ -597,7 +803,7 @@ public sealed class GlobalSearchService
                     : $"{chatCount} chat{(chatCount == 1 ? "" : "s")} · {FormatRelativeTime(sortTimestamp)}",
                 NavIndex = 2,
                 Item = project,
-                Score = 900 + GetRecencyBoost(sortTimestamp, multiplier: 0.9),
+                Score = BrowseBaseProjects + GetRecencyBoost(sortTimestamp, multiplier: 0.9),
                 SortTimestamp = sortTimestamp
             });
         }
@@ -611,7 +817,7 @@ public sealed class GlobalSearchService
                 Subtitle = skill.Description,
                 NavIndex = 3,
                 Item = skill,
-                Score = 800 + GetRecencyBoost(skill.CreatedAt, multiplier: 0.45),
+                Score = BrowseBaseSkills + GetRecencyBoost(skill.CreatedAt, multiplier: 0.45),
                 SortTimestamp = skill.CreatedAt
             });
         }
@@ -625,7 +831,7 @@ public sealed class GlobalSearchService
                 Subtitle = agent.Description,
                 NavIndex = 4,
                 Item = agent,
-                Score = 780 + GetRecencyBoost(agent.CreatedAt, multiplier: 0.45),
+                Score = BrowseBaseAgents + GetRecencyBoost(agent.CreatedAt, multiplier: 0.45),
                 SortTimestamp = agent.CreatedAt
             });
         }
@@ -641,7 +847,7 @@ public sealed class GlobalSearchService
                     : $"[{memory.Category}] {TrimForSubtitle(memory.Content)}",
                 NavIndex = 5,
                 Item = memory,
-                Score = 760 + GetRecencyBoost(memory.UpdatedAt, multiplier: 0.7),
+                Score = BrowseBaseMemories + GetRecencyBoost(memory.UpdatedAt, multiplier: 0.7),
                 SortTimestamp = memory.UpdatedAt
             });
         }
@@ -655,7 +861,7 @@ public sealed class GlobalSearchService
                 Subtitle = server.Description,
                 NavIndex = 6,
                 Item = server,
-                Score = 740 + GetRecencyBoost(server.CreatedAt, multiplier: 0.4),
+                Score = BrowseBaseMcp + GetRecencyBoost(server.CreatedAt, multiplier: 0.4),
                 SortTimestamp = server.CreatedAt
             });
         }
@@ -674,34 +880,50 @@ public sealed class GlobalSearchService
         return results;
     }
 
-    private IReadOnlyList<PreparedSearchField> GetChatContentFields(
+    /// <summary>
+    /// Resolves the content field for a chat according to the execution mode. Cheap modes only use
+    /// already-indexed content (no disk reads); Interactive additionally builds a bounded number of
+    /// the most recent cold chats; Full builds everything. A cheap substring gate avoids running the
+    /// fuzzy evaluator on chats whose content cannot contain the query.
+    /// </summary>
+    private PreparedSearchField? GetChatContentField(
         Chat chat,
         GlobalSearchExecutionMode executionMode,
         IReadOnlySet<Guid>? interactiveColdChatIds,
+        SearchQuery query,
         CancellationToken cancellationToken)
     {
         if (executionMode == GlobalSearchExecutionMode.Preview)
-            return [];
+            return null;
 
-        IReadOnlyList<PreparedSearchField> cachedFields;
-        if (executionMode == GlobalSearchExecutionMode.Fast)
-            return TryGetCachedChatContentFields(chat.Id, out cachedFields) ? cachedFields : [];
+        cancellationToken.ThrowIfCancellationRequested();
 
-        if (executionMode == GlobalSearchExecutionMode.Interactive)
+        ChatContentIndex.Entry? entry;
+        switch (executionMode)
         {
-            if (chat.Messages.Count > 0)
-                return GetChatContentFields(chat, cancellationToken);
+            case GlobalSearchExecutionMode.Fast:
+                // Loaded chats rebuild cheaply from memory; cold chats use only indexed content.
+                entry = _contentIndex.GetEntry(chat, allowBuild: false);
+                break;
 
-            if (TryGetCachedChatContentFields(chat.Id, out cachedFields))
-                return cachedFields;
+            case GlobalSearchExecutionMode.Interactive:
+                if (chat.Messages.Count > 0 || _contentIndex.IsCached(chat.Id))
+                    entry = _contentIndex.GetEntry(chat, allowBuild: false);
+                else if (interactiveColdChatIds is not null && interactiveColdChatIds.Contains(chat.Id))
+                    entry = _contentIndex.GetEntry(chat, allowBuild: true);
+                else
+                    entry = null;
+                break;
 
-            if (interactiveColdChatIds is null || !interactiveColdChatIds.Contains(chat.Id))
-                return [];
-
-            return GetChatContentFields(chat, cancellationToken);
+            default: // Full
+                entry = _contentIndex.GetEntry(chat, allowBuild: true);
+                break;
         }
 
-        return GetChatContentFields(chat, cancellationToken);
+        if (entry is null || entry.IsEmpty || !entry.MayMatch(query))
+            return null;
+
+        return entry.ToContentField(1.0);
     }
 
     private static IReadOnlyList<GlobalSearchMatch> LimitResultsPerCategory(
@@ -729,6 +951,7 @@ public sealed class GlobalSearchService
 
     private HashSet<Guid>? GetInteractiveColdChatIds(
         IReadOnlyList<Chat> chats,
+        SearchContext context,
         CancellationToken cancellationToken)
     {
         var recentColdChats = new List<Chat>(InteractiveColdChatContentLimit);
@@ -736,7 +959,10 @@ public sealed class GlobalSearchService
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (chat.Messages.Count > 0 || TryGetCachedChatContentFields(chat.Id, out _))
+            if (chat.Messages.Count > 0 || _contentIndex.IsCached(chat.Id))
+                continue;
+
+            if (!context.InRange(chat.UpdatedAt))
                 continue;
 
             if (recentColdChats.Count < InteractiveColdChatContentLimit)
@@ -761,54 +987,38 @@ public sealed class GlobalSearchService
             : recentColdChats.Select(static chat => chat.Id).ToHashSet();
     }
 
-    private IReadOnlyList<PreparedSearchField> GetChatContentFields(
-        Chat chat,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var snapshot = _chatSnapshotProvider(chat);
-        cancellationToken.ThrowIfCancellationRequested();
-        return GetChatContentFields(chat, snapshot);
-    }
+    // ── Content index maintenance (called from the view model) ────────────────
 
-    private IReadOnlyList<PreparedSearchField> GetChatContentFields(Chat chat, ChatSearchSnapshot snapshot)
-    {
-        lock (_chatFieldCacheSync)
-        {
-            if (_chatFieldCache.TryGetValue(chat.Id, out var cached)
-                && string.Equals(cached.Version, snapshot.Version, StringComparison.Ordinal))
-            {
-                return cached.Fields;
-            }
-        }
+    /// <summary>Builds content entries for all cold chats in the background so search covers the full history.</summary>
+    public Task WarmChatContentAsync(CancellationToken cancellationToken = default)
+        => _contentIndex.WarmAsync(_getData().Chats.ToArray(), cancellationToken);
 
-        var fields = snapshot.Messages
-            .Where(static message => !string.IsNullOrWhiteSpace(message.Text))
-            .Select(static message => new PreparedSearchField(message.Text, 1.0, SearchFieldKind.Content))
-            .ToArray();
+    /// <summary>
+    /// Builds content entries for the supplied cold chats. The caller captures the chat list on the
+    /// UI thread (<see cref="AppData.Chats"/> is not thread-safe) so this can run off the UI thread.
+    /// </summary>
+    public Task WarmChatContentAsync(IReadOnlyList<Chat> chats, CancellationToken cancellationToken = default)
+        => _contentIndex.WarmAsync(chats, cancellationToken);
 
-        lock (_chatFieldCacheSync)
-        {
-            _chatFieldCache[chat.Id] = new CachedChatFields(snapshot.Version, fields);
-        }
+    /// <summary>Forces a chat's content entry to rebuild on next access (after it was edited/saved).</summary>
+    public void InvalidateChatContent(Guid chatId) => _contentIndex.Invalidate(chatId);
 
-        return fields;
-    }
+    /// <summary>Drops a deleted chat's content entry.</summary>
+    public void RemoveChatContent(Guid chatId) => _contentIndex.Remove(chatId);
 
-    private bool TryGetCachedChatContentFields(Guid chatId, out IReadOnlyList<PreparedSearchField> fields)
-    {
-        lock (_chatFieldCacheSync)
-        {
-            if (_chatFieldCache.TryGetValue(chatId, out var cached))
-            {
-                fields = cached.Fields;
-                return true;
-            }
-        }
+    /// <summary>Removes index entries for chats that no longer exist.</summary>
+    public void PruneChatContent()
+        => _contentIndex.Prune(_getData().Chats.Select(static chat => chat.Id));
 
-        fields = Array.Empty<PreparedSearchField>();
-        return false;
-    }
+    /// <summary>Removes index entries for chats not present in the supplied live id set (caller-captured).</summary>
+    public void PruneChatContent(IEnumerable<Guid> liveChatIds)
+        => _contentIndex.Prune(liveChatIds);
+
+    /// <summary>Loads a previously persisted content index. Returns the number of entries restored.</summary>
+    public int LoadChatContentIndex(string path) => _contentIndex.Load(path);
+
+    /// <summary>Persists the content index so a restart can skip re-reading the whole history.</summary>
+    public void SaveChatContentIndex(string path) => _contentIndex.Save(path);
 
     private double GetRecencyBoost(DateTimeOffset timestamp, double multiplier)
     {
@@ -819,6 +1029,50 @@ public sealed class GlobalSearchService
         var days = age.TotalDays;
         var baseBoost = 52d / (1d + (days / 7d));
         return baseBoost * multiplier;
+    }
+
+    /// <summary>
+    /// Recency signal for chats, where finding the right recent conversation matters most.
+    /// Decays on a ~3-week half-life and is amplified when the query expressed a "recent" intent,
+    /// so it meaningfully reorders near-ties without overriding clearly stronger relevance.
+    /// </summary>
+    private double GetChatRecencyBoost(DateTimeOffset timestamp, bool hasRecencyIntent)
+    {
+        var age = _nowProvider() - timestamp;
+        if (age < TimeSpan.Zero)
+            age = TimeSpan.Zero;
+
+        var days = age.TotalDays;
+        var boost = 240d / (1d + (days / 21d));
+        return hasRecencyIntent ? boost * 2.5 : boost;
+    }
+
+    /// <summary>
+    /// True when every query term occurs as a real substring/token of the title (separator-insensitive).
+    /// Used to tell a genuine title match apart from a purely fuzzy one before applying the fuzzy damp.
+    /// </summary>
+    private static bool QueryTermsPresentInTitle(string title, SearchQuery query)
+    {
+        if (query.IsEmpty)
+            return false;
+
+        var titleText = SearchText.Create(title);
+        if (titleText.IsEmpty)
+            return false;
+
+        foreach (var term in query.Terms)
+        {
+            if (term.IsEmpty)
+                continue;
+
+            if (!titleText.Compact.Contains(term.Compact, StringComparison.Ordinal)
+                && !titleText.Normalized.Contains(term.Normalized, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static double GetTitleBonus(string title, SearchQuery query)
@@ -965,6 +1219,25 @@ public sealed class GlobalSearchService
             projectLastActivity);
     }
 
+    private sealed class SearchContext(
+        SearchQuery textQuery,
+        SearchTimeRange? range,
+        bool hasRecencyIntent,
+        GlobalSearchExecutionMode mode)
+    {
+        public SearchQuery TextQuery { get; } = textQuery;
+        public SearchTimeRange? Range { get; } = range;
+        public bool HasRecencyIntent { get; } = hasRecencyIntent;
+        public GlobalSearchExecutionMode Mode { get; } = mode;
+        public bool HasRange => Range.HasValue;
+
+        /// <summary>True when there is no residual text to match (list by time/recency instead).</summary>
+        public bool IsBrowse => TextQuery.IsEmpty;
+
+        public bool InRange(DateTimeOffset timestamp)
+            => Range is not { } window || window.Contains(timestamp);
+    }
+
     private sealed class SearchSnapshot(
         Chat[] chats,
         Project[] projects,
@@ -989,6 +1262,5 @@ public sealed class GlobalSearchService
         public IReadOnlyDictionary<Guid, DateTimeOffset> ProjectLastActivity { get; } = projectLastActivity;
     }
 
-    private readonly record struct CachedChatFields(string Version, IReadOnlyList<PreparedSearchField> Fields);
     private readonly record struct SearchSettingEntry(string Name, string Page, int PageIndex);
 }
