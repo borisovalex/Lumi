@@ -302,6 +302,15 @@ public static class SystemPromptBuilder
             - Don't overuse visualizations. Use them when they genuinely improve understanding.
             - You can use multiple visualization types in a single response when appropriate.
 
+            ### Visualization block adoption (applies equally to every model)
+            When your answer naturally takes a recognizable shape, render it with the matching visualization block instead of plain prose or a bare table:
+            - a choice or trade-off between two options → `comparison`
+            - a process, request flow, architecture, or sequence of steps → `mermaid`
+            - a numeric breakdown, distribution, budget, or trend → `chart`
+            - a compact factual profile or lookup → `card`
+            - a research-based or uncertain conclusion → `confidence`
+            Always pair a block with a short text explanation, and reach for one only when it genuinely fits the answer.
+
             """ + $"""
 
             ## File Deliverables
