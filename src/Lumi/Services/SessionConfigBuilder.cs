@@ -32,6 +32,17 @@ public sealed class LightweightSessionOptions
         private const bool EnableSdkConfigDiscovery = false;
 
         /// <summary>
+        /// Lumi is a single-user desktop client (like VS Code), so MCP OAuth tokens must be persisted
+        /// in the OS keychain and shared across sessions. The SDK default (<c>null</c>) maps to
+        /// <see cref="McpOAuthTokenStorageMode.InMemory"/>, which discards tokens when a session ends —
+        /// intended for multitenant hosts. Because Lumi creates and resumes sessions frequently
+        /// (reloads, reconnects, per-chat lifecycle), in-memory tokens are lost at every session
+        /// boundary, so OAuth MCP servers re-prompt or drop mid-conversation. Persisting them lets the
+        /// runtime's browserless fallback silently reuse the cached token on every reconnect.
+        /// </summary>
+        private const McpOAuthTokenStorageMode McpOAuthTokenStorage = McpOAuthTokenStorageMode.Persistent;
+
+        /// <summary>
         /// Reasoning models (e.g. the GPT-5 family) never expose their raw chain-of-thought — they
         /// only emit it as an opt-in summary that defaults to "none". Without requesting a summary the
         /// model still reasons, but no reasoning text reaches the client, so the transcript shows none.
@@ -78,6 +89,7 @@ public sealed class LightweightSessionOptions
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
             ContextTier = CreateContextTier(contextTier),
+            McpOAuthTokenStorage = McpOAuthTokenStorage,
         };
 
         Populate(config, systemPrompt, reasoningEffort, skillDirectories,
@@ -117,6 +129,7 @@ public sealed class LightweightSessionOptions
             InfiniteSessions = new InfiniteSessionConfig { Enabled = true },
             OnPermissionRequest = onPermission ?? PermissionHandler.ApproveAll,
             ContextTier = CreateContextTier(contextTier),
+            McpOAuthTokenStorage = McpOAuthTokenStorage,
         };
 
         Populate(config, systemPrompt, reasoningEffort, skillDirectories,

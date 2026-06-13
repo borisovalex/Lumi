@@ -193,6 +193,8 @@ public partial class ChatViewModel
             sub.Dispose();
             _sessionSubs.Remove(chatId);
         }
+        _activeMcpConfigs.TryRemove(chatId, out _);
+        ForgetMcpOAuthState(chatId);
     }
 
     private void RemoveSuggestionTracking(Guid chatId)

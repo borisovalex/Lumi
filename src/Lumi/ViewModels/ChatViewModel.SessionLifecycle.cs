@@ -1833,6 +1833,19 @@ public partial class ChatViewModel
                     // Mode API removed — Lumi always uses the server default (interactive).
                     break;
 
+                case SessionMcpServerStatusChangedEvent mcpStatusChanged:
+                    // Live MCP lifecycle: keep the composer chip in sync as servers connect, drop, or
+                    // need auth mid-conversation, and drive interactive OAuth when a remote server
+                    // requests it. Fire-and-forget; the handler marshals its own UI updates.
+                    _ = HandleMcpServerStatusAsync(
+                        session,
+                        chat.Id,
+                        mcpStatusChanged.Data.ServerName,
+                        mcpStatusChanged.Data.Status,
+                        mcpStatusChanged.Data.Error,
+                        CancellationToken.None);
+                    break;
+
                 case SessionPlanChangedEvent planChanged:
                     Dispatcher.UIThread.Post(() =>
                     {
@@ -2078,6 +2091,14 @@ public partial class ChatViewModel
         // Clear session cache (objects reference the dead client)
         _sessionCache.Clear();
         _activeSession = null;
+
+        // Those sessions can never reconnect, so drop their per-session OAuth chip/login state too
+        // (keyed by sessionId, this map would otherwise orphan entries on every reconnect).
+        lock (_mcpOAuthLoginLock)
+        {
+            _mcpOAuthLoginAttempts.Clear();
+            _mcpOAuthResolvedMessages.Clear();
+        }
 
         // Cancel any in-flight requests
         foreach (var cts in _ctsSources.Values)

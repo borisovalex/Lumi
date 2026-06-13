@@ -69,6 +69,48 @@ public sealed class SessionConfigBuilderTests
     }
 
     [Fact]
+    public void Build_UsesPersistentMcpOAuthTokenStorage()
+    {
+        var config = SessionConfigBuilder.Build(
+            systemPrompt: "prompt",
+            model: "gpt-5.4",
+            workingDirectory: @"C:\Repo",
+            skillDirectories: [],
+            customAgents: [],
+            tools: [],
+            mcpServers: new Dictionary<string, McpServerConfig>(),
+            reasoningEffort: null,
+            userInputHandler: null,
+            onPermission: null,
+            hooks: null);
+
+        // The SDK default is InMemory ("discarded when the session ends"), which is meant for
+        // multitenant hosts. Lumi is a single-user desktop client, so MCP OAuth tokens must be
+        // stored in the OS keychain and reused across sessions — otherwise OAuth MCP servers
+        // re-prompt / drop every time a session is created or resumed.
+        Assert.Equal(McpOAuthTokenStorageMode.Persistent, config.McpOAuthTokenStorage);
+    }
+
+    [Fact]
+    public void BuildForResume_UsesPersistentMcpOAuthTokenStorage()
+    {
+        var config = SessionConfigBuilder.BuildForResume(
+            systemPrompt: "prompt",
+            model: "gpt-5.4",
+            workingDirectory: @"C:\Repo",
+            skillDirectories: [],
+            customAgents: [],
+            tools: [],
+            mcpServers: new Dictionary<string, McpServerConfig>(),
+            reasoningEffort: null,
+            userInputHandler: null,
+            onPermission: null,
+            hooks: null);
+
+        Assert.Equal(McpOAuthTokenStorageMode.Persistent, config.McpOAuthTokenStorage);
+    }
+
+    [Fact]
     public void Build_RequestsReasoningSummary_SoReasoningStaysVisible()
     {
         var config = SessionConfigBuilder.Build(

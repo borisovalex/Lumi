@@ -480,6 +480,43 @@ public class CopilotService : IAsyncDisposable
         return await _client.ResumeSessionAsync(sessionId, config, ct);
     }
 
+    /// <summary>
+    /// Initiates the interactive OAuth login flow for a remote MCP server and opens the returned
+    /// authorization URL in the system browser.
+    /// </summary>
+    /// <remarks>
+    /// The SDK only drives interactive MCP OAuth when a consumer asks for it — without this call the
+    /// runtime installs a browserless fallback that can merely reuse an already-cached token. The
+    /// returned URL is empty when a cached token already authenticated the server (no browser needed);
+    /// when non-empty, the runtime starts the loopback callback listener before returning and finishes
+    /// the flow in the background, signalling completion via the session's
+    /// <c>mcp_server_status_changed</c> event.
+    /// </remarks>
+    /// <returns>The authorization URL that was opened, or an empty string when no browser step was required.</returns>
+    public async Task<string> StartMcpOAuthLoginAsync(
+        CopilotSession session,
+        string serverName,
+        bool forceReauth = false,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (string.IsNullOrWhiteSpace(serverName))
+            return string.Empty;
+
+        var result = await session.Rpc.Mcp.Oauth.LoginAsync(
+            serverName,
+            forceReauth,
+            clientName: "Lumi",
+            callbackSuccessMessage: $"Signed in to \"{serverName}\". You can return to Lumi — the MCP server will reconnect automatically.",
+            ct).ConfigureAwait(false);
+
+        var url = result?.AuthorizationUrl;
+        if (!string.IsNullOrWhiteSpace(url))
+            OpenBrowser(url);
+
+        return url ?? string.Empty;
+    }
+
     /// <summary>Lists all known sessions, optionally filtered.</summary>
     public async Task<List<SessionMetadata>> ListSessionsAsync(
         SessionListFilter? filter = null, CancellationToken ct = default)

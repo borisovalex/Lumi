@@ -43,8 +43,33 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         || string.Equals(Environment.GetEnvironmentVariable("LUMI_TRANSCRIPT_DEBUG"), "1", StringComparison.Ordinal);
 
     /// <summary>
-    /// Checks MCP server status after session creation and marks failed server chips with an error.
-    /// Runs in the background so it doesn't block message sending.
+    /// Tracks <c>sessionId|serverName</c> pairs we've already started an interactive OAuth login for,
+    /// so the startup status poll and repeated live status events don't relaunch the browser for the
+    /// same server. Removed when the server connects, or when an attempt is cancelled by navigate-away,
+    /// so a later status change can retry; kept on a genuine sign-in failure to avoid hammering a
+    /// failing endpoint. Purged on session teardown so dead sessions don't accumulate entries.
+    /// </summary>
+    private readonly HashSet<string> _mcpOAuthLoginAttempts = new(StringComparer.Ordinal);
+    private readonly object _mcpOAuthLoginLock = new();
+
+    /// <summary>
+    /// The resolved OAuth chip message per <c>sessionId|serverName</c> once a login attempt has produced
+    /// an outcome (browser opened, or sign-in couldn't start). Repeated <c>NeedsAuth</c> status events
+    /// re-assert this instead of downgrading the chip back to the generic "signing you in" text.
+    /// Guarded by <see cref="_mcpOAuthLoginLock"/>; cleared when the server connects.
+    /// </summary>
+    private readonly Dictionary<string, string> _mcpOAuthResolvedMessages = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Configured MCP servers for the active session of each chat, captured so live
+    /// <c>mcp_server_status_changed</c> events can build a meaningful error message and tell each
+    /// server's transport apart (stdio servers never use OAuth).
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, IReadOnlyDictionary<string, McpServerConfig>> _activeMcpConfigs = new();
+
+    /// <summary>
+    /// Checks MCP server status after session creation and reacts to any server that failed or needs
+    /// authentication. Runs in the background so it doesn't block message sending.
     /// </summary>
     private async Task CheckMcpServerStatusAsync(
         CopilotSession session,
@@ -52,6 +77,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         IReadOnlyDictionary<string, McpServerConfig> configuredServers,
         CancellationToken ct)
     {
+        _activeMcpConfigs[chatId] = configuredServers;
         try
         {
             // Give the MCP servers a moment to connect
@@ -59,46 +85,216 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var mcpList = await session.Rpc.Mcp.ListAsync(ct);
             if (mcpList?.Servers is not { Count: > 0 }) return;
 
-            var unavailable = mcpList.Servers
-                .Where(s => s.Status == McpServerStatus.Failed
-                    || s.Status == McpServerStatus.NeedsAuth)
-                .ToList();
-
-            if (unavailable.Count == 0) return;
-
-            var messages = new List<(string Name, string ErrorMessage)>();
-            foreach (var server in unavailable)
+            foreach (var server in mcpList.Servers)
             {
-                configuredServers.TryGetValue(server.Name, out var config);
-                var errorMessage = await BuildMcpStatusErrorMessageAsync(
-                    server.Name,
-                    server.Status,
-                    server.Error ?? "",
-                    config,
-                    ct).ConfigureAwait(false);
-                messages.Add((server.Name, errorMessage));
-            }
-
-            Dispatcher.UIThread.Post(() =>
-            {
-                if (CurrentChat?.Id != chatId)
-                    return;
-
-                foreach (var (name, errorMessage) in messages)
+                if (server.Status == McpServerStatus.Failed || server.Status == McpServerStatus.NeedsAuth)
                 {
-                    // Replace the active chip with an error-state chip
-                    var existingChip = ActiveMcpChips.OfType<StrataComposerChip>()
-                        .FirstOrDefault(c => c.Name == name);
-                    if (existingChip is not null)
-                    {
-                        var index = ActiveMcpChips.IndexOf(existingChip);
-                        ActiveMcpChips[index] = new StrataComposerChip(
-                            name, existingChip.Glyph, ErrorMessage: errorMessage);
-                    }
+                    await HandleMcpServerStatusAsync(
+                        session, chatId, server.Name, server.Status, server.Error, ct).ConfigureAwait(false);
                 }
-            });
+            }
         }
         catch { /* best effort — don't let MCP status checks break the chat flow */ }
+    }
+
+    /// <summary>
+    /// Reacts to a single MCP server's status: refreshes its composer chip and, when a remote server
+    /// needs OAuth, starts the interactive login once per session+server. Safe to call from both the
+    /// startup status poll and live <c>mcp_server_status_changed</c> events.
+    /// </summary>
+    private async Task HandleMcpServerStatusAsync(
+        CopilotSession session,
+        Guid chatId,
+        string serverName,
+        McpServerStatus status,
+        string? error,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+            return;
+
+        McpServerConfig? config = null;
+        if (_activeMcpConfigs.TryGetValue(chatId, out var configured))
+            configured.TryGetValue(serverName, out config);
+
+        if (status == McpServerStatus.Connected)
+        {
+            // A server that recovered — including after the user completed OAuth — drops its error chip
+            // and forgets the prior login attempt so a later token expiry can re-drive sign-in.
+            var connectedKey = McpOAuthKey(session, serverName);
+            lock (_mcpOAuthLoginLock)
+            {
+                _mcpOAuthLoginAttempts.Remove(connectedKey);
+                _mcpOAuthResolvedMessages.Remove(connectedKey);
+            }
+            Dispatcher.UIThread.Post(() => ClearMcpChipError(chatId, serverName));
+            return;
+        }
+
+        if (status != McpServerStatus.NeedsAuth && status != McpServerStatus.Failed)
+            return;
+
+        var errorMessage = await BuildMcpStatusErrorMessageAsync(
+            serverName, status, error ?? "", config, ct).ConfigureAwait(false);
+
+        if (status == McpServerStatus.NeedsAuth)
+        {
+            // Don't let a repeated NeedsAuth event downgrade a richer, already-resolved message
+            // (e.g. revert "Lumi opened your browser…" back to the generic "signing you in…").
+            lock (_mcpOAuthLoginLock)
+            {
+                if (_mcpOAuthResolvedMessages.TryGetValue(McpOAuthKey(session, serverName), out var resolved))
+                    errorMessage = resolved;
+            }
+        }
+
+        Dispatcher.UIThread.Post(() => SetMcpChipError(chatId, serverName, errorMessage));
+
+        if (status == McpServerStatus.NeedsAuth)
+            await TryInitiateMcpOAuthLoginAsync(session, chatId, serverName, config, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts the interactive MCP OAuth login for a remote server at most once per session+server.
+    /// Opening the browser is delegated to <see cref="CopilotService.StartMcpOAuthLoginAsync"/>; when a
+    /// cached token already authenticates the server the runtime reconnects silently and reports
+    /// completion via a later status event that clears the chip.
+    /// </summary>
+    private async Task TryInitiateMcpOAuthLoginAsync(
+        CopilotSession session,
+        Guid chatId,
+        string serverName,
+        McpServerConfig? config,
+        CancellationToken ct)
+    {
+        // stdio servers don't authenticate over OAuth; only remote (and unknown) servers can.
+        if (config is McpStdioServerConfig)
+            return;
+
+        // Don't pop a browser for a chat the user has navigated away from.
+        if (CurrentChat?.Id != chatId || _activeSession != session)
+            return;
+
+        var key = McpOAuthKey(session, serverName);
+        lock (_mcpOAuthLoginLock)
+        {
+            if (!_mcpOAuthLoginAttempts.Add(key))
+                return;
+        }
+
+        try
+        {
+            var authorizationUrl = await _copilotService
+                .StartMcpOAuthLoginAsync(session, serverName, forceReauth: false, ct)
+                .ConfigureAwait(false);
+
+            // A non-empty URL means the runtime opened the browser for interactive consent.
+            // An empty URL means a cached token is being reused; a later Connected event clears the chip.
+            if (!string.IsNullOrWhiteSpace(authorizationUrl))
+            {
+                var openedMessage =
+                    $"Lumi opened your browser to sign in to MCP server '{serverName}'. " +
+                    "Finish signing in and it reconnects automatically.";
+                ResolveMcpOAuthChip(chatId, serverName, key, openedMessage);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The chat was navigated away from (or its load was superseded) while sign-in was starting.
+            // That isn't a real failure: forget the attempt so a later status event can retry cleanly,
+            // and don't poison the chip with a bogus "couldn't start sign-in (The operation was canceled)".
+            // Note the guard: an *internal* timeout (TaskCanceledException with ct NOT cancelled) is a real
+            // sign-in failure and must fall through to the honest-failure branch below, not be retried.
+            lock (_mcpOAuthLoginLock)
+                _mcpOAuthLoginAttempts.Remove(key);
+        }
+        catch (Exception ex)
+        {
+            // Sign-in couldn't be started — e.g. the server's identity provider doesn't support
+            // dynamic client registration. Report it honestly and keep the attempt recorded so we
+            // don't hammer a failing endpoint on every status event; a later session retries cleanly.
+            var failedMessage =
+                $"Lumi couldn't start sign-in for MCP server '{serverName}' automatically " +
+                $"({DescribeMcpOAuthLoginFailure(ex)}). Open it from the MCP servers page to sign in.";
+            ResolveMcpOAuthChip(chatId, serverName, key, failedMessage);
+        }
+    }
+
+    /// <summary>
+    /// Records the final OAuth chip message for a session+server and shows it, so later repeated
+    /// <c>NeedsAuth</c> status events re-assert it rather than reverting to the generic pending text.
+    /// </summary>
+    private void ResolveMcpOAuthChip(Guid chatId, string serverName, string key, string message)
+    {
+        lock (_mcpOAuthLoginLock)
+            _mcpOAuthResolvedMessages[key] = message;
+        Dispatcher.UIThread.Post(() => SetMcpChipError(chatId, serverName, message));
+    }
+
+    private static string McpOAuthKey(CopilotSession session, string serverName)
+        => $"{session.SessionId}|{serverName}";
+
+    /// <summary>
+    /// Releases the per-session OAuth chip/login bookkeeping for a chat's current session when that
+    /// session is torn down, so servers that never reached <c>Connected</c> (dismissed browser, failed
+    /// sign-in, navigate-away) don't leak <c>sessionId|serverName</c> entries for the app's lifetime.
+    /// </summary>
+    private void ForgetMcpOAuthState(Guid chatId)
+    {
+        if (!_sessionCache.TryGetValue(chatId, out var session))
+            return;
+
+        var prefix = $"{session.SessionId}|";
+        lock (_mcpOAuthLoginLock)
+        {
+            _mcpOAuthLoginAttempts.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
+            if (_mcpOAuthResolvedMessages.Count > 0)
+            {
+                var stale = _mcpOAuthResolvedMessages.Keys
+                    .Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+                    .ToList();
+                foreach (var staleKey in stale)
+                    _mcpOAuthResolvedMessages.Remove(staleKey);
+            }
+        }
+    }
+
+    /// <summary>Extracts a short, user-facing reason from an MCP OAuth login failure.</summary>
+    private static string DescribeMcpOAuthLoginFailure(Exception ex)
+    {
+        var message = ex.Message ?? string.Empty;
+        const string marker = "message: ";
+        var index = message.LastIndexOf(marker, StringComparison.Ordinal);
+        if (index >= 0)
+            message = message[(index + marker.Length)..];
+        message = message.Trim();
+        return string.IsNullOrEmpty(message) ? ex.GetType().Name : message;
+    }
+
+    /// <summary>Puts the named MCP composer chip into an error state (tooltip = <paramref name="errorMessage"/>).</summary>
+    private void SetMcpChipError(Guid chatId, string serverName, string errorMessage)
+    {
+        if (CurrentChat?.Id != chatId)
+            return;
+
+        var existingChip = ActiveMcpChips.OfType<StrataComposerChip>().FirstOrDefault(c => c.Name == serverName);
+        if (existingChip is null)
+            return;
+
+        ActiveMcpChips[ActiveMcpChips.IndexOf(existingChip)] = existingChip with { ErrorMessage = errorMessage };
+    }
+
+    /// <summary>Clears the error state from the named MCP composer chip, if present.</summary>
+    private void ClearMcpChipError(Guid chatId, string serverName)
+    {
+        if (CurrentChat?.Id != chatId)
+            return;
+
+        var existingChip = ActiveMcpChips.OfType<StrataComposerChip>().FirstOrDefault(c => c.Name == serverName);
+        if (existingChip is null || !existingChip.HasError)
+            return;
+
+        ActiveMcpChips[ActiveMcpChips.IndexOf(existingChip)] = existingChip with { ErrorMessage = null };
     }
 
     internal static async Task<string> BuildMcpStatusErrorMessageAsync(
@@ -111,8 +307,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (status == McpServerStatus.NeedsAuth)
         {
             return config is McpHttpServerConfig authRemote
-                ? $"Authentication required for MCP server '{serverName}' at {SanitizeMcpDiagnosticUrl(authRemote.Url)}. Configure the required headers or complete MCP OAuth login if this server supports it."
-                : $"Authentication required for MCP server '{serverName}'.";
+                ? $"Sign-in required for MCP server '{serverName}' at {SanitizeMcpDiagnosticUrl(authRemote.Url)}. Lumi is signing you in…"
+                : $"Sign-in required for MCP server '{serverName}'. If it supports OAuth, Lumi will sign you in and reconnect automatically.";
         }
 
         if (config is McpHttpServerConfig remote)
