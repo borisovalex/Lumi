@@ -51,6 +51,7 @@ public partial class MainWindow : Window
     private Control?[] _pages = [];
     private Panel?[] _sidebarPanels = [];
     private Button?[] _navButtons = [];
+    private Button?[] _railNavButtons = [];
     private Panel? _renameOverlay;
     private TextBox? _renameTextBox;
     private Border? _projectSwitcherRoot;
@@ -76,6 +77,7 @@ public partial class MainWindow : Window
     private ContentControl? _settingsHost;
     private SettingsView? _settingsView;
     private Border? _sidebarBorder;
+    private Border? _contentArea;
     private Thumb? _sidebarResizeThumb;
     private Border? _navPill;
     private TextBlock?[] _navLabels = [];
@@ -96,6 +98,7 @@ public partial class MainWindow : Window
     private int _pendingNavHoverIndex = -1;
     private int _navPillScaleAnimationVersion;
     private bool _isNavPillWidthLocked;
+    private bool _navHoverInitPending;
     private double _expandedSidebarWidth = DefaultSidebarWidth;
     private Guid? _lastChatListClickChatId;
     private DateTimeOffset _lastChatListClickAt;
@@ -211,6 +214,7 @@ public partial class MainWindow : Window
         _acrylicFallback = this.FindControl<Border>("AcrylicFallback");
         _windowContentRoot = this.FindControl<Border>("WindowContentRoot");
         _sidebarBorder = this.FindControl<Border>("SidebarBorder");
+        _contentArea = this.FindControl<Border>("ContentArea");
         _sidebarResizeThumb = this.FindControl<Thumb>("SidebarResizeThumb");
         _navPill = this.FindControl<Border>("NavPill");
 
@@ -248,6 +252,18 @@ public partial class MainWindow : Window
             this.FindControl<Button>("NavMemories"),
             this.FindControl<Button>("NavMcpServers"),
             this.FindControl<Button>("NavSettings"),
+        ];
+
+        _railNavButtons =
+        [
+            this.FindControl<Button>("RailChat"),
+            this.FindControl<Button>("RailJobs"),
+            this.FindControl<Button>("RailProjects"),
+            this.FindControl<Button>("RailSkills"),
+            this.FindControl<Button>("RailAgents"),
+            this.FindControl<Button>("RailMemories"),
+            this.FindControl<Button>("RailMcpServers"),
+            this.FindControl<Button>("RailSettings"),
         ];
 
         ApplyAgentAutomationLandmarks();
@@ -558,6 +574,9 @@ public partial class MainWindow : Window
         if (_sidebarBorder is not null)
             _sidebarBorder.Width = vm.IsSidebarCollapsed ? 0 : _expandedSidebarWidth;
 
+        if (_contentArea is not null)
+            _contentArea.Margin = GetContentAreaMargin(vm.IsSidebarCollapsed);
+
         if (_sidebarResizeThumb is not null)
             _sidebarResizeThumb.IsVisible = !vm.IsSidebarCollapsed;
     }
@@ -593,6 +612,18 @@ public partial class MainWindow : Window
 
         var clampedWidth = ClampSidebarWidth(_expandedSidebarWidth);
         vm.DataStore.Data.Settings.SidebarWidth = clampedWidth;
+        _ = vm.DataStore.SaveAsync();
+    }
+
+    private void PersistSidebarCollapsed()
+    {
+        if (!IsPrimaryWindow)
+            return;
+
+        if (DataContext is not MainViewModel vm)
+            return;
+
+        vm.DataStore.Data.Settings.SidebarCollapsed = vm.IsSidebarCollapsed;
         _ = vm.DataStore.SaveAsync();
     }
 
@@ -994,6 +1025,7 @@ public partial class MainWindow : Window
                 else if (args.PropertyName == nameof(MainViewModel.IsSidebarCollapsed))
                 {
                     AnimateSidebarCollapse(vm.IsSidebarCollapsed);
+                    PersistSidebarCollapsed();
                 }
             };
 
@@ -1180,10 +1212,13 @@ public partial class MainWindow : Window
         var from = collapse ? GetCurrentSidebarWidth() : 0.0;
         var to = collapse ? 0.0 : _expandedSidebarWidth;
 
+        var easing = new SplineEasing(0.16, 1, 0.3, 1);
+        var duration = TimeSpan.FromMilliseconds(200);
+
         var anim = new Avalonia.Animation.Animation
         {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new SplineEasing(0.16, 1, 0.3, 1),
+            Duration = duration,
+            Easing = easing,
             FillMode = FillMode.Forward,
             Children =
             {
@@ -1200,18 +1235,60 @@ public partial class MainWindow : Window
             }
         };
 
+        // Inset the content area so the chat island keeps a margin from the window edge while the
+        // sidebar is collapsed, and so the floating toggle button sits in a gutter to its left
+        // instead of overlapping the chat title. Animated in sync with the width collapse.
+        var toMargin = GetContentAreaMargin(collapse);
+        Avalonia.Animation.Animation? marginAnim = null;
+        if (_contentArea is not null)
+        {
+            marginAnim = new Avalonia.Animation.Animation
+            {
+                Duration = duration,
+                Easing = easing,
+                FillMode = FillMode.Forward,
+                Children =
+                {
+                    new KeyFrame
+                    {
+                        Cue = new Cue(0),
+                        Setters = { new Setter(MarginProperty, _contentArea.Margin) }
+                    },
+                    new KeyFrame
+                    {
+                        Cue = new Cue(1),
+                        Setters = { new Setter(MarginProperty, toMargin) }
+                    },
+                }
+            };
+        }
+
         try
         {
-            await anim.RunAsync(_sidebarBorder, ct);
+            var widthTask = anim.RunAsync(_sidebarBorder, ct);
+            var marginTask = marginAnim is not null && _contentArea is not null
+                ? marginAnim.RunAsync(_contentArea, ct)
+                : Task.CompletedTask;
+            await Task.WhenAll(widthTask, marginTask);
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
 
         _sidebarBorder.Width = to;
+        if (_contentArea is not null)
+            _contentArea.Margin = toMargin;
 
         if (_sidebarResizeThumb is not null)
             _sidebarResizeThumb.IsVisible = !collapse;
+
+        // Nav-pill hover metrics can't be measured while the sidebar is collapsed (zero width).
+        // Once it's expanded again, run the initialization that was deferred at startup/collapse.
+        if (!collapse && _navHoverInitPending)
+            Dispatcher.UIThread.Post(InitializeNavHoverVisuals, DispatcherPriority.Render);
     }
+
+    private static Thickness GetContentAreaMargin(bool collapsed)
+        => collapsed ? new Thickness(54, 0, 6, 6) : new Thickness(0, 0, 6, 6);
 
     private void OnSidebarResizeThumbDragDelta(object? sender, VectorEventArgs e)
     {
@@ -1243,17 +1320,42 @@ public partial class MainWindow : Window
                 btn.Classes.Remove("active");
         }
 
+        for (int i = 0; i < _railNavButtons.Length; i++)
+        {
+            var btn = _railNavButtons[i];
+            if (btn is null) continue;
+
+            if (i == index)
+                btn.Classes.Add("active");
+            else
+                btn.Classes.Remove("active");
+        }
+
         if (_hoveredNavIndex >= 0)
             ApplyNavButtonLayout(_hoveredNavIndex);
     }
 
     private void InitializeNavHoverVisuals()
     {
+        // The nav pill and its buttons live inside the sidebar. While the sidebar is collapsed
+        // they report zero width, and the metric/lock helpers below would re-post themselves
+        // every frame waiting for a non-zero width — pegging the UI thread. Defer the whole
+        // initialization until the sidebar is expanded again (see AnimateSidebarCollapse).
+        if (IsSidebarCollapsedNow())
+        {
+            _navHoverInitPending = true;
+            return;
+        }
+
+        _navHoverInitPending = false;
         CaptureNavLayoutMetrics();
         InitNavLabelVisuals();
         LockNavPillWidth();
         ApplyNavButtonLayout(-1);
     }
+
+    private bool IsSidebarCollapsedNow()
+        => DataContext is MainViewModel { IsSidebarCollapsed: true };
 
     private void InitNavLabelVisuals()
     {
@@ -1276,7 +1378,10 @@ public partial class MainWindow : Window
 
         if (_navButtons.Any(static button => button?.Bounds.Width <= 0))
         {
-            Dispatcher.UIThread.Post(InitializeNavHoverVisuals, DispatcherPriority.Render);
+            if (IsSidebarCollapsedNow())
+                _navHoverInitPending = true;
+            else
+                Dispatcher.UIThread.Post(InitializeNavHoverVisuals, DispatcherPriority.Render);
             return;
         }
 
@@ -1330,7 +1435,10 @@ public partial class MainWindow : Window
         var width = _navPill.Bounds.Width;
         if (width <= 0)
         {
-            Dispatcher.UIThread.Post(LockNavPillWidth, DispatcherPriority.Render);
+            if (IsSidebarCollapsedNow())
+                _navHoverInitPending = true;
+            else
+                Dispatcher.UIThread.Post(LockNavPillWidth, DispatcherPriority.Render);
             return;
         }
 

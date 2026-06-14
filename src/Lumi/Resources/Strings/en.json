@@ -85,6 +85,8 @@
   "Sidebar_NewChatInNewWindow": "New Chat in New Window",
   "Sidebar_Search": "Search (Ctrl+K)",
   "Sidebar_Search_Short": "Search…",
+  "Sidebar_CollapseTooltip": "Collapse sidebar (Ctrl+B)",
+  "Sidebar_ExpandTooltip": "Expand sidebar (Ctrl+B)",
   "Sidebar_Jobs": "Background Jobs",
   "Sidebar_NewJobTooltip": "New background job",
   "Sidebar_Projects": "Projects",

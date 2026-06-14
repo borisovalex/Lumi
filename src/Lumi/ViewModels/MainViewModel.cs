@@ -124,6 +124,26 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void ToggleSidebar() => IsSidebarCollapsed = !IsSidebarCollapsed;
 
+    /// <summary>State-aware tooltip for the sidebar collapse/expand toggle.</summary>
+    public string SidebarToggleTooltip =>
+        IsSidebarCollapsed ? Loc.Sidebar_ExpandTooltip : Loc.Sidebar_CollapseTooltip;
+
+    /// <summary>
+    /// Whether the collapsed icon rail (quick nav shortcuts shown in place of the hidden sidebar)
+    /// should be visible. Only when onboarded and collapsed.
+    /// </summary>
+    public bool ShowSidebarRail => IsOnboarded && IsSidebarCollapsed;
+
+    partial void OnIsSidebarCollapsedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(SidebarToggleTooltip));
+        OnPropertyChanged(nameof(ShowSidebarRail));
+        // Persistence is handled by the primary window's view (see MainWindow.PersistSidebarCollapsed)
+        // so secondary windows don't clobber the saved layout preference.
+    }
+
+    partial void OnIsOnboardedChanged(bool value) => OnPropertyChanged(nameof(ShowSidebarRail));
+
     [ObservableProperty] private Guid? _activeChatId;
 
     // Sub-ViewModels
@@ -185,6 +205,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         var settings = _dataStore.Data.Settings;
         _isDarkTheme = settings.IsDarkTheme;
         _isCompactDensity = settings.IsCompactDensity;
+        _isSidebarCollapsed = settings.SidebarCollapsed;
         _userName = settings.UserName ?? "";
 #if DEBUG
         _isOnboarded = !forceOnboarding && (settings.IsOnboarded || skipOnboarding);

@@ -391,6 +391,7 @@ public class UserSettings
     public double? WindowLeft { get; set; }
     public double? WindowTop { get; set; }
     public double? SidebarWidth { get; set; }
+    public bool SidebarCollapsed { get; set; }
     public bool IsMaximized { get; set; }
 
     // ── Browser ──

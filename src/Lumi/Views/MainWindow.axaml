@@ -314,6 +314,98 @@
       </Setter>
     </Style>
 
+    <!-- ── Sidebar collapse / expand toggle ── -->
+    <Style Selector="Button.sidebar-toggle">
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.sidebar-toggle Panel#SidebarToggleGlyph">
+      <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.sidebar-toggle:pointerover Panel#SidebarToggleGlyph">
+      <Setter Property="RenderTransform" Value="scale(1.08)" />
+    </Style>
+    <Style Selector="Button.sidebar-toggle:pressed Panel#SidebarToggleGlyph">
+      <Setter Property="RenderTransform" Value="scale(0.94)" />
+    </Style>
+    <Style Selector="Button.sidebar-toggle Border#SidebarToggleFrame">
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="BorderBrush" Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.sidebar-toggle Border#SidebarTogglePanel">
+      <Setter Property="Transitions">
+        <Transitions>
+          <DoubleTransition Property="Opacity" Duration="0:0:0.24" Easing="CubicEaseOut" />
+          <DoubleTransition Property="Width" Duration="0:0:0.24" Easing="CubicEaseOut" />
+          <BrushTransition Property="Background" Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <!-- Collapsed: the little sidebar column inside the glyph empties out -->
+    <Style Selector="Button.sidebar-toggle.collapsed Border#SidebarTogglePanel">
+      <Setter Property="Opacity" Value="0" />
+      <Setter Property="Width" Value="2" />
+    </Style>
+    <Style Selector="Button.sidebar-toggle:pointerover Border#SidebarToggleFrame">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.TextPrimary}" />
+    </Style>
+    <Style Selector="Button.sidebar-toggle:pointerover Border#SidebarTogglePanel">
+      <Setter Property="Background" Value="{DynamicResource Brush.TextPrimary}" />
+    </Style>
+
+    <!-- ── Collapsed icon rail: compact nav shortcuts shown when the sidebar is collapsed ── -->
+    <Style Selector="Button.rail-nav-icon">
+      <Setter Property="Width" Value="34" />
+      <Setter Property="Height" Value="34" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="False" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="HorizontalContentAlignment" Value="Center" />
+      <Setter Property="VerticalContentAlignment" Value="Center" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Background" Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.rail-nav-icon PathIcon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.TextTertiary}" />
+      <Setter Property="Transitions">
+        <Transitions>
+          <BrushTransition Property="Foreground" Duration="0:0:0.16" />
+        </Transitions>
+      </Setter>
+    </Style>
+    <Style Selector="Button.rail-nav-icon:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface2}" />
+    </Style>
+    <Style Selector="Button.rail-nav-icon:pointerover PathIcon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}" />
+    </Style>
+    <Style Selector="Button.rail-nav-icon.active">
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
+    </Style>
+    <Style Selector="Button.rail-nav-icon.active:pointerover">
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtleHover}" />
+    </Style>
+    <Style Selector="Button.rail-nav-icon.active PathIcon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.AccentDefault}" />
+    </Style>
+
   </Window.Styles>
 
   <Border x:Name="WindowContentRoot">
@@ -333,10 +425,10 @@
         <DockPanel>
 
           <!-- ── Top: Title bar inset (respects window chrome) ── -->
-          <Border DockPanel.Dock="Top" IsHitTestVisible="False" Height="30" />
+          <Border DockPanel.Dock="Top" IsHitTestVisible="False" Height="38" />
 
-          <!-- ── Search button (opens command palette) ── -->
-          <Border DockPanel.Dock="Top" Margin="16,4,16,4">
+          <!-- ── Search button (opens command palette). Left margin leaves room for the sidebar toggle. ── -->
+          <Border DockPanel.Dock="Top" Margin="54,4,16,4">
             <Button Classes="subtle" HorizontalAlignment="Stretch"
                     HorizontalContentAlignment="Stretch"
                     CornerRadius="{DynamicResource Radius.Base}"
@@ -1297,7 +1389,92 @@
       </Border>
     </DockPanel>
 
-    <!-- Debug-only agent guide. Hidden in Release by MainViewModel. -->
+    <!-- ═══ Sidebar collapse / expand toggle (fixed top-left, below the title bar) ═══ -->
+    <Button x:Name="SidebarToggleButton"
+            Classes="subtle sidebar-toggle"
+            Classes.collapsed="{Binding IsSidebarCollapsed}"
+            Command="{Binding ToggleSidebarCommand}"
+            IsVisible="{Binding IsOnboarded}"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Top"
+            Margin="14,42,0,0"
+            Width="32" Height="30"
+            MinWidth="0" MinHeight="0"
+            Padding="0"
+            CornerRadius="8"
+            ZIndex="30"
+            ToolTip.Tip="{Binding SidebarToggleTooltip}">
+      <Panel x:Name="SidebarToggleGlyph" Width="18" Height="15">
+        <Border x:Name="SidebarToggleFrame"
+                BorderBrush="{DynamicResource Brush.TextSecondary}"
+                BorderThickness="1.6"
+                CornerRadius="4.5" />
+        <Border x:Name="SidebarTogglePanel"
+                Width="5"
+                HorizontalAlignment="Left"
+                Margin="1.6"
+                CornerRadius="2.5,0,0,2.5"
+                Background="{DynamicResource Brush.TextSecondary}" />
+      </Panel>
+    </Button>
+
+    <!-- ═══ Collapsed icon rail: quick nav shown in place of the hidden sidebar ═══ -->
+    <StackPanel x:Name="SidebarRail"
+                Orientation="Vertical"
+                Spacing="3"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Top"
+                Margin="13,84,0,0"
+                IsVisible="{Binding ShowSidebarRail}"
+                ZIndex="29">
+      <Button Classes="subtle rail-nav-icon" x:Name="RailChat"
+              Command="{Binding SetNavCommand}" CommandParameter="0"
+              ToolTip.Tip="{loc:Str NavLabel_Chats}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Chat}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailJobs"
+              Command="{Binding SetNavCommand}" CommandParameter="1"
+              ToolTip.Tip="{loc:Str NavLabel_Jobs}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Clock}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailProjects"
+              Command="{Binding SetNavCommand}" CommandParameter="2"
+              ToolTip.Tip="{loc:Str NavLabel_Projects}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Folder}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailSkills"
+              Command="{Binding SetNavCommand}" CommandParameter="3"
+              ToolTip.Tip="{loc:Str NavLabel_Skills}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Bolt}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailAgents"
+              Command="{Binding SetNavCommand}" CommandParameter="4"
+              ToolTip.Tip="{loc:Str NavLabel_Lumis}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Sparkle}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailMemories"
+              Command="{Binding SetNavCommand}" CommandParameter="5"
+              ToolTip.Tip="{loc:Str NavLabel_Memories}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Memory}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailMcpServers"
+              Command="{Binding SetNavCommand}" CommandParameter="6"
+              ToolTip.Tip="{loc:Str NavLabel_McpServers}" ToolTip.Placement="Right">
+        <PathIcon Data="{StaticResource Icon.Plug}" Width="17" Height="17" />
+      </Button>
+      <Button Classes="subtle rail-nav-icon" x:Name="RailSettings"
+              Command="{Binding SetNavCommand}" CommandParameter="7"
+              ToolTip.Tip="{loc:Str NavLabel_Settings}" ToolTip.Placement="Right">
+        <Panel>
+          <PathIcon Data="{StaticResource Icon.Gear}" Width="17" Height="17" />
+          <Border Width="7" Height="7" CornerRadius="4"
+                  Background="{DynamicResource Brush.AccentDefault}"
+                  HorizontalAlignment="Right" VerticalAlignment="Top"
+                  Margin="0,-1,-1,0"
+                  IsVisible="{Binding SettingsVM.ShouldShowUpdateBadge}" />
+        </Panel>
+      </Button>
+    </StackPanel>
     <Border x:Name="AgentDebugMap"
             IsVisible="{Binding IsAgentDebugMapVisible}"
             HorizontalAlignment="Right"

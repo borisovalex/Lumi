@@ -47,6 +47,7 @@ internal static class AppDataSnapshotFactory
                 WindowLeft = settings.WindowLeft,
                 WindowTop = settings.WindowTop,
                 SidebarWidth = settings.SidebarWidth,
+                SidebarCollapsed = settings.SidebarCollapsed,
                 IsMaximized = settings.IsMaximized,
                 HasImportedBrowserCookies = settings.HasImportedBrowserCookies,
             },

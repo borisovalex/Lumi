@@ -85,6 +85,8 @@
   "Sidebar_NewChatInNewWindow": "צ׳אט חדש בחלון חדש",
   "Sidebar_Search": "חיפוש (Ctrl+K)",
   "Sidebar_Search_Short": "חיפוש…",
+  "Sidebar_CollapseTooltip": "כיווץ הסרגל הצדדי (Ctrl+B)",
+  "Sidebar_ExpandTooltip": "הרחבת הסרגל הצדדי (Ctrl+B)",
   "Sidebar_Jobs": "משימות רקע",
   "Sidebar_NewJobTooltip": "משימת רקע חדשה",
   "Sidebar_Projects": "פרויקטים",
