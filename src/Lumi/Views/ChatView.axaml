@@ -100,6 +100,12 @@
     <Style Selector="Button#BrowserToggleButton.open PathIcon#BrowserToggleIcon">
       <Setter Property="Foreground" Value="{DynamicResource Brush.AccentDefault}" />
     </Style>
+    <Style Selector="Button#WorkspaceToggleButton.open">
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
+    </Style>
+    <Style Selector="Button#WorkspaceToggleButton.open PathIcon#WorkspaceToggleIcon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.AccentDefault}" />
+    </Style>
 
     <!-- Token usage badge hover -->
     <Style Selector="Border#TokenUsageBadge:pointerover">
@@ -1124,6 +1130,23 @@
                           Height="14"
                           Foreground="{DynamicResource Brush.TextSecondary}"
                           Data="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
+              </Button>
+
+              <Button x:Name="WorkspaceToggleButton"
+                      Classes="subtle"
+                      IsVisible="{Binding ShowWorkspaceToggle}"
+                      Classes.open="{Binding IsWorkspacePanelOpen}"
+                      Command="{Binding ToggleWorkspacePanelCommand}"
+                      ToolTip.Tip="Workspace"
+                      Width="30"
+                      Height="30"
+                      Padding="0"
+                      CornerRadius="7">
+                <PathIcon x:Name="WorkspaceToggleIcon"
+                          Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.TextSecondary}"
+                          Data="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" />
               </Button>
             </StackPanel>
 

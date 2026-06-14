@@ -888,6 +888,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// <summary>Raised when the view should rebuild DataTemplates (e.g. settings changed).</summary>
     public event Action? TranscriptRebuilt;
 
+    /// <summary>Raised when a Workspace activity item asks to scroll the transcript to a turn (by StableId).</summary>
+    public event Action<string>? WorkspaceJumpToTurnRequested;
+
+    /// <summary>Raised when the Workspace panel open/closed preference changes so the view re-evaluates visibility.</summary>
+    public event Action? WorkspacePanelPreferenceChanged;
+
     public ChatViewModel(DataStore dataStore, CopilotService copilotService)
     {
         _dataStore = dataStore;
@@ -975,6 +981,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // Refresh git status after turn completes
             if (IsCodingProject)
                 QueueRefreshCodingProjectState();
+            // Newly produced files / sources may have arrived this turn.
+            RebuildWorkspacePanel();
         }
     }
 
@@ -994,6 +1002,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         // Re-show it if this chat is still busy (e.g. switching to a streaming chat).
         if (IsBusy)
             _transcriptBuilder.ShowTypingIndicator(StatusText);
+
+        RebuildWorkspacePanel();
 
         TranscriptRebuilt?.Invoke();
     }

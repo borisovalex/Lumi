@@ -369,6 +369,13 @@ public class UserSettings
     public bool ExpandReasoningWhileStreaming { get; set; } = true;
     public bool AutoGenerateTitles { get; set; } = true;
 
+    /// <summary>
+    /// User preference for the companion Workspace panel. null = automatic (shows only on wide
+    /// layouts when the chat has artifacts); true = always open; false = always closed. Set by the
+    /// header toggle and persisted app-wide.
+    /// </summary>
+    public bool? WorkspacePanelOpen { get; set; }
+
     // ── AI & Models ──
     public string PreferredModel { get; set; } = "";
     public string ReasoningEffort { get; set; } = ""; // "", "low", "medium", "high", "xhigh"

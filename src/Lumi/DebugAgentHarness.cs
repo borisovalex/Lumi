@@ -47,10 +47,18 @@ public static class DebugAgentHarness
         var attachmentPath = Path.Combine(root, "fixture-attachment.md");
         var editedPath = Path.Combine(root, "FixtureWidget.cs");
         var createdPath = Path.Combine(root, "generated-fixture-output.md");
+        var comparisonPath = Path.Combine(root, "OLED-TV-Comparison.html");
+        var shortlistPath = Path.Combine(root, "TV-Shortlist.csv");
+        var dealSummaryPath = Path.Combine(root, "Deal-Summary.md");
+        var researchNotesPath = Path.Combine(root, "OLED-Research-Notes.md");
 
         File.WriteAllText(attachmentPath, "# Debug fixture attachment\n\nThis file exists so attachment chips can resolve size and icon metadata.\n");
         File.WriteAllText(editedPath, "public class FixtureWidget\n{\n    public string State => \"before\";\n}\n");
         File.WriteAllText(createdPath, "# Generated fixture output\n\nThis file is announced by the debug transcript fixture.\n");
+        File.WriteAllText(comparisonPath, "<!doctype html><meta charset=\"utf-8\"><title>65\\\" OLED TV Comparison</title>\n<h1>65\\\" OLED TV Comparison</h1>\n<p>Synthetic deliverable produced by the debug fixture so the Workspace rail has a real announced file.</p>\n");
+        File.WriteAllText(shortlistPath, "Model,Panel,Price,Rating\nLG C4,OLED evo,1799,9.1\nSamsung S90D,QD-OLED,1899,9.0\nSony Bravia 8,OLED,1999,8.8\n");
+        File.WriteAllText(dealSummaryPath, "# 65\\\" OLED Deal Summary\n\n- LG C4 - $1,799 (Best Buy)\n- Samsung S90D - $1,899\n- Sony Bravia 8 - $1,999\n");
+        File.WriteAllText(researchNotesPath, "# OLED research notes\n\nCreated by the debug fixture so the Workspace Changes tab shows a created file.\n");
 
         var codingSkill = dataStore.Data.Skills.FirstOrDefault(s =>
             s.Name.Equals("Code Helper", StringComparison.OrdinalIgnoreCase))
@@ -143,6 +151,14 @@ public static class DebugAgentHarness
 
         chat.Messages.Add(Tool("report_intent", JsonObject(
             JsonProperty("intent", JsonString("Exercising fixture"))), "Completed"));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("best 65-inch OLED TV 2026"))), "Completed", output: "Returned 8 results"));
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Comparing OLED panels"))), "Completed"));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("LG C4 vs Samsung S90D picture quality"))), "Completed", output: "Returned 6 results"));
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Summarizing the best deals"))), "Completed"));
         chat.Messages.Add(Tool("fetch_skill", JsonObject(
             JsonProperty("name", JsonString(skillRef.Name))), "Completed", output: $"Fetched skill: {skillRef.Name}"));
         chat.Messages.Add(Tool("powershell", JsonObject(
@@ -169,6 +185,9 @@ public static class DebugAgentHarness
             JsonProperty("filePath", JsonString(editedPath)),
             JsonProperty("oldString", JsonString("public class FixtureWidget")),
             JsonProperty("newString", JsonString("public partial class FixtureWidget"))), "Completed", output: "Updated FixtureWidget.cs"));
+        chat.Messages.Add(Tool("create", JsonObject(
+            JsonProperty("filePath", JsonString(researchNotesPath)),
+            JsonProperty("file_text", JsonString("# OLED research notes\n\n- Compared LG C4, Samsung S90D, Sony Bravia 8.\n- Tracked retailer pricing for 65-inch panels.\n"))), "Completed", output: "Created OLED-Research-Notes.md"));
 
         var subagentId = "debug-subagent-fixture";
         chat.Messages.Add(Tool("task", JsonObject(
@@ -204,6 +223,12 @@ public static class DebugAgentHarness
 
         chat.Messages.Add(Tool("announce_file", JsonObject(
             JsonProperty("filePath", JsonString(createdPath))), "Completed", output: createdPath));
+        chat.Messages.Add(Tool("announce_file", JsonObject(
+            JsonProperty("filePath", JsonString(comparisonPath))), "Completed", output: comparisonPath));
+        chat.Messages.Add(Tool("announce_file", JsonObject(
+            JsonProperty("filePath", JsonString(shortlistPath))), "Completed", output: shortlistPath));
+        chat.Messages.Add(Tool("announce_file", JsonObject(
+            JsonProperty("filePath", JsonString(dealSummaryPath))), "Completed", output: dealSummaryPath));
 
         var finalAssistant = Message("assistant", """
             The fixture turn includes:
@@ -221,6 +246,42 @@ public static class DebugAgentHarness
             Title = "Agent debug map",
             Snippet = "The debug map names stable controls and nav indices.",
             Url = "https://example.com/lumi-agent-debug-map"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "The 5 Best 65\" OLED TVs (early 2026)",
+            Snippet = "Hands-on rankings of this year's 65-inch OLED panels.",
+            Url = "https://www.rtings.com/tv/reviews/best/oled"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "LG C4 OLED review",
+            Snippet = "Full review of the LG C4 evo panel and gaming features.",
+            Url = "https://www.techradar.com/televisions/lg-c4-oled-review"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "Samsung S90D vs LG C4",
+            Snippet = "QD-OLED versus OLED evo head-to-head comparison.",
+            Url = "https://www.whathifi.com/features/samsung-s90d-vs-lg-c4"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "65-inch OLED TV deals",
+            Snippet = "Current retailer pricing on 65-inch OLED models.",
+            Url = "https://www.bestbuy.com/site/searchpage.jsp?st=65+oled"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "C4 vs G4 for gaming",
+            Snippet = "Community thread weighing the C4 against the brighter G4.",
+            Url = "https://www.reddit.com/r/OLED_Gaming/comments/lg-c4-vs-g4"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "Best OLED TV 2026",
+            Snippet = "Editor picks for the best OLED TVs to buy right now.",
+            Url = "https://www.tomsguide.com/best-picks/best-oled-tv"
         });
         chat.Messages.Add(finalAssistant);
 

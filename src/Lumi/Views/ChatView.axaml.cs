@@ -235,6 +235,7 @@ public partial class ChatView : UserControl
             vm.ClipboardPasteRequested += OnClipboardPasteRequested;
             vm.CopyToClipboardRequested += OnCopyToClipboardRequested;
             vm.FocusComposerRequested += FocusComposer;
+            vm.WorkspaceJumpToTurnRequested += OnWorkspaceJumpToTurnRequested;
             SubscribeToMountedTurns(vm.MountedTranscriptTurns);
             Dispatcher.UIThread.Post(EnsureTranscriptScrollViewer, DispatcherPriority.Loaded);
             QueueInitialTranscriptTailSyncIfNeeded(vm);
@@ -274,6 +275,7 @@ public partial class ChatView : UserControl
         _subscribedVm.ClipboardPasteRequested -= OnClipboardPasteRequested;
         _subscribedVm.CopyToClipboardRequested -= OnCopyToClipboardRequested;
         _subscribedVm.FocusComposerRequested -= FocusComposer;
+        _subscribedVm.WorkspaceJumpToTurnRequested -= OnWorkspaceJumpToTurnRequested;
         // Clear the realizing gate so a view detach mid-open can't leave the overlay stuck up on the VM:
         // a suspended OpenTranscriptAtLatestAsync won't reach its gate-clearing finally once _subscribedVm
         // is null / the sync version has been bumped below.
@@ -937,6 +939,42 @@ public partial class ChatView : UserControl
         return itemsHost is null
             ? Enumerable.Empty<TranscriptTurnControl>()
             : itemsHost.GetVisualDescendants().OfType<TranscriptTurnControl>();
+    }
+
+    /// <summary>
+    /// Scrolls the transcript to the turn an activity row in the Workspace panel points at. Mirrors the
+    /// in-chat search navigation: mount the target's page, force it to realize (mounted turns are lazy
+    /// height placeholders until flushed), settle at Background priority, then scroll so the turn lands
+    /// just below the header.
+    /// </summary>
+    private async void OnWorkspaceJumpToTurnRequested(string stableId)
+    {
+        if (_subscribedVm is null || _chatShell is null || _transcriptScrollViewer is null)
+            return;
+
+        var turn = _subscribedVm.TranscriptTurns.FirstOrDefault(t => t.StableId == stableId);
+        if (turn is null)
+            return;
+
+        _subscribedVm.MountTranscriptPageContainingTurn(turn);
+
+        await Dispatcher.UIThread.InvokeAsync(
+            () =>
+            {
+                if (FindRealizedTurnControl(stableId) is { } control)
+                    TranscriptRealizationScheduler.Instance.FlushControl(control);
+            },
+            DispatcherPriority.Loaded);
+
+        await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+
+        var target = FindRealizedTurnControl(stableId);
+        var point = target?.TranslatePoint(default, _transcriptScrollViewer);
+        if (target is null || point is null)
+            return;
+
+        var offset = Math.Max(0, _chatShell.VerticalOffset + point.Value.Y - 64);
+        _chatShell.ScrollToVerticalOffset(offset);
     }
 
     // ── File picker (requires View-level StorageProvider) ──

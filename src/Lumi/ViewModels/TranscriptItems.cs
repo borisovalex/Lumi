@@ -805,11 +805,19 @@ public partial class SourceItem : ObservableObject
     public string Domain { get; }
     public string Url { get; }
 
+    /// <summary>Single glyph shown in the source's favicon-style chip.</summary>
+    public string InitialLetter { get; }
+
+    /// <summary>Deterministic accent fill for the favicon-style chip (stable per domain).</summary>
+    public Avalonia.Media.IBrush AccentBrush { get; }
+
     public SourceItem(SearchSource source)
     {
         Title = source.Title;
         Url = source.Url;
         Domain = ExtractDomain(source.Url);
+        InitialLetter = ComputeInitial(Domain, Title);
+        AccentBrush = ComputeAccent(Domain);
     }
 
     [RelayCommand]
@@ -824,6 +832,42 @@ public partial class SourceItem : ObservableObject
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return uri.Host.Replace("www.", "");
         return url;
+    }
+
+    private static string ComputeInitial(string domain, string title)
+    {
+        var basis = !string.IsNullOrWhiteSpace(domain) ? domain : title;
+        foreach (var ch in basis)
+        {
+            if (char.IsLetterOrDigit(ch))
+                return char.ToUpperInvariant(ch).ToString();
+        }
+        return "?";
+    }
+
+    private static readonly Avalonia.Media.Color[] AccentPalette =
+    [
+        Avalonia.Media.Color.FromRgb(0x6E, 0x8B, 0xFF),
+        Avalonia.Media.Color.FromRgb(0x35, 0xC2, 0xA8),
+        Avalonia.Media.Color.FromRgb(0xF2, 0xA1, 0x4E),
+        Avalonia.Media.Color.FromRgb(0xF2, 0x6D, 0x8B),
+        Avalonia.Media.Color.FromRgb(0xA9, 0x7B, 0xFF),
+        Avalonia.Media.Color.FromRgb(0x4E, 0xB6, 0xF2),
+        Avalonia.Media.Color.FromRgb(0x5F, 0xCB, 0x7A),
+        Avalonia.Media.Color.FromRgb(0xFF, 0x8A, 0x5C),
+    ];
+
+    private static Avalonia.Media.IBrush ComputeAccent(string key)
+    {
+        // FNV-1a over the domain → stable index (process-independent, unlike GetHashCode).
+        uint hash = 2166136261;
+        foreach (var ch in key)
+        {
+            hash ^= ch;
+            hash *= 16777619;
+        }
+        var color = AccentPalette[(int)(hash % (uint)AccentPalette.Length)];
+        return new Avalonia.Media.SolidColorBrush(color);
     }
 }
 

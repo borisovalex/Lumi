@@ -1,9 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Markup.Xaml;
+using Avalonia.Media;
+using Avalonia.Styling;
 using Avalonia.VisualTree;
 using Lumi.Models;
 using Lumi.Services;
@@ -29,6 +35,18 @@ public partial class ChatWorkspaceView : UserControl, IDisposable
     private DataStore? _dataStore;
     private DataStore? _attachedDataStore;
     private ChatViewModel? _attachedChatViewModel;
+
+    private const double RailMinHostWidth = 1040;
+    private Border? _workspaceRail;
+    private ChatViewModel? _railViewModel;
+
+    // Open/close slide+fade animation state.
+    private const double RailSlideOffset = 34;
+    private static readonly TimeSpan RailShowDuration = TimeSpan.FromMilliseconds(290);
+    private static readonly TimeSpan RailHideDuration = TimeSpan.FromMilliseconds(190);
+
+    private CancellationTokenSource? _railAnimCts;
+    private bool? _railShown;
 
     public ChatWorkspaceView()
     {
@@ -135,6 +153,9 @@ public partial class ChatWorkspaceView : UserControl, IDisposable
         _chatView = this.FindControl<ChatView>("PageChat");
         _chatIsland = this.FindControl<Border>("ChatIsland");
         _chatIslandHighlight = this.FindControl<Border>("ChatIslandHighlight");
+        _workspaceRail = this.FindControl<Border>("WorkspaceRail");
+
+        SizeChanged += OnHostSizeChanged;
 
         AutomationProperties.SetName(this, "Page 0 Chat content grid");
         AutomationProperties.SetHelpText(this, "Stable Lumi chat workspace landmark for coding agents and MCP diagnostics.");
@@ -217,10 +238,210 @@ public partial class ChatWorkspaceView : UserControl, IDisposable
 
         _attachedDataStore = _dataStore;
         _attachedChatViewModel = chatViewModel;
+
+        AttachWorkspaceRail(chatViewModel);
+    }
+
+    private void OnHostSizeChanged(object? sender, SizeChangedEventArgs e) => UpdateRailVisibility();
+
+    private void AttachWorkspaceRail(ChatViewModel viewModel)
+    {
+        if (!ReferenceEquals(_railViewModel, viewModel))
+        {
+            if (_railViewModel is not null)
+            {
+                _railViewModel.WorkspaceContentChanged -= OnWorkspaceContentChanged;
+                _railViewModel.WorkspacePanelPreferenceChanged -= OnWorkspacePanelPreferenceChanged;
+            }
+
+            _railViewModel = viewModel;
+            _railViewModel.WorkspaceContentChanged += OnWorkspaceContentChanged;
+            _railViewModel.WorkspacePanelPreferenceChanged += OnWorkspacePanelPreferenceChanged;
+        }
+
+        UpdateRailVisibility();
+    }
+
+    private void DetachWorkspaceRail()
+    {
+        if (_railViewModel is not null)
+        {
+            _railViewModel.WorkspaceContentChanged -= OnWorkspaceContentChanged;
+            _railViewModel.WorkspacePanelPreferenceChanged -= OnWorkspacePanelPreferenceChanged;
+            _railViewModel = null;
+        }
+
+        _railShown = null;
+
+        if (_workspaceRail is not null)
+        {
+            _workspaceRail.IsVisible = false;
+            _workspaceRail.Opacity = 1;
+            _workspaceRail.RenderTransform = null;
+        }
+    }
+
+    private void OnWorkspaceContentChanged() => UpdateRailVisibility();
+
+    private void OnWorkspacePanelPreferenceChanged() => UpdateRailVisibility();
+
+    /// <summary>
+    /// Resolves the rail's effective visibility from the persisted tri-state preference and pushes it
+    /// back onto the view-model so the toggle button reflects state. <c>true</c>/<c>false</c> are explicit
+    /// user choices (work at any width); <c>null</c> is "auto" — show only when there's content and the
+    /// host is wide enough that stealing ~352px still leaves a comfortable reading column.
+    /// </summary>
+    private void UpdateRailVisibility()
+    {
+        if (_workspaceRail is null || _railViewModel is null)
+            return;
+
+        var preference = _dataStore?.Data.Settings.WorkspacePanelOpen;
+        var hasContent = _railViewModel.HasWorkspaceContent;
+        var wideEnough = Bounds.Width >= RailMinHostWidth;
+
+        var visible = preference switch
+        {
+            true => true,
+            false => false,
+            _ => hasContent && wideEnough,
+        };
+
+        _railViewModel.IsWorkspacePanelOpen = visible;
+        ApplyRailVisibility(visible);
+    }
+
+    /// <summary>
+    /// Drives the rail's open/close with a slide+fade. The very first resolution (initial load or a
+    /// chat switch) is applied instantly so the panel never animates just from navigating.
+    /// </summary>
+    private void ApplyRailVisibility(bool visible)
+    {
+        if (_workspaceRail is null)
+            return;
+
+        if (_railShown == visible)
+            return;
+
+        var firstResolve = _railShown is null;
+        _railShown = visible;
+
+        if (firstResolve)
+        {
+            DisposeCts(ref _railAnimCts);
+            _workspaceRail.Opacity = 1;
+            _workspaceRail.RenderTransform = null;
+            _workspaceRail.IsVisible = visible;
+            return;
+        }
+
+        _ = AnimateRailAsync(visible);
+    }
+
+    private async Task AnimateRailAsync(bool visible)
+    {
+        if (_workspaceRail is null)
+            return;
+
+        var token = ReplaceCts(ref _railAnimCts).Token;
+
+        if (visible)
+        {
+            _workspaceRail.RenderTransform = new TranslateTransform(RailSlideOffset, 0);
+            _workspaceRail.Opacity = 0;
+            _workspaceRail.IsVisible = true;
+
+            try
+            {
+                await CreateSlideFade(RailSlideOffset, 0, 0, 1, RailShowDuration, new CubicEaseOut())
+                    .RunAsync(_workspaceRail, token);
+            }
+            catch (OperationCanceledException) { return; }
+
+            if (token.IsCancellationRequested)
+                return;
+
+            _workspaceRail.Opacity = 1;
+            _workspaceRail.RenderTransform = null;
+        }
+        else
+        {
+            _workspaceRail.RenderTransform = new TranslateTransform(0, 0);
+
+            try
+            {
+                await CreateSlideFade(0, RailSlideOffset, 1, 0, RailHideDuration, new CubicEaseIn())
+                    .RunAsync(_workspaceRail, token);
+            }
+            catch (OperationCanceledException) { return; }
+
+            if (token.IsCancellationRequested)
+                return;
+
+            _workspaceRail.IsVisible = false;
+            _workspaceRail.Opacity = 1;
+            _workspaceRail.RenderTransform = null;
+        }
+    }
+
+    private static Animation CreateSlideFade(
+        double fromX, double toX, double fromOpacity, double toOpacity, TimeSpan duration, Easing easing)
+    {
+        return new Animation
+        {
+            Duration = duration,
+            Easing = easing,
+            FillMode = FillMode.Forward,
+            Children =
+            {
+                new KeyFrame
+                {
+                    Cue = new Cue(0),
+                    Setters =
+                    {
+                        new Setter(Visual.OpacityProperty, fromOpacity),
+                        new Setter(TranslateTransform.XProperty, fromX),
+                    }
+                },
+                new KeyFrame
+                {
+                    Cue = new Cue(1),
+                    Setters =
+                    {
+                        new Setter(Visual.OpacityProperty, toOpacity),
+                        new Setter(TranslateTransform.XProperty, toX),
+                    }
+                },
+            }
+        };
+    }
+
+    private static CancellationTokenSource ReplaceCts(ref CancellationTokenSource? source)
+    {
+        DisposeCts(ref source);
+        source = new CancellationTokenSource();
+        return source;
+    }
+
+    private static void DisposeCts(ref CancellationTokenSource? source)
+    {
+        if (source is null)
+            return;
+
+        try
+        {
+            source.Cancel();
+            source.Dispose();
+        }
+        catch (ObjectDisposedException) { }
+
+        source = null;
     }
 
     private void DisposePreviewPanel()
     {
+        DetachWorkspaceRail();
+        DisposeCts(ref _railAnimCts);
         _previewPanel?.Dispose();
         _previewPanel = null;
         _attachedDataStore = null;

@@ -1206,6 +1206,10 @@ public partial class ChatViewModel
                             _transcriptBuilder.CloseCurrentToolGroup();
                             _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
                             _transcriptBuilder.FlushPendingFileEdits();
+                            // FlushPendingFileEdits appends this turn's file-change summary *after*
+                            // the IsBusy=false rebuild already ran, so rebuild once more — otherwise
+                            // the Workspace Changes/Files tabs miss this turn's edits until the next one.
+                            RebuildWorkspacePanel();
                             ScrollToEndRequested?.Invoke();
                         }
 
