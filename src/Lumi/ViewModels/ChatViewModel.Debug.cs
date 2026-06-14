@@ -75,6 +75,14 @@ public partial class ChatViewModel
         RefreshProjectBadge();
         RefreshAgentBadge();
         RefreshComposerCatalogs();
+
+        // Seed representative suggestion chips so the post-turn suggestion row is inspectable in the
+        // fixture. SuggestionA is intentionally long enough to truncate at the chip MaxWidth, which
+        // exercises the hover tooltip that reveals the full suggestion text.
+        SuggestionA = "Walk me through exactly how the streaming token accumulator throttles UI updates during a very long assistant response";
+        SuggestionB = "Summarize the root cause";
+        SuggestionC = "Show the diff that fixed the freeze";
+
         ScrollToEndRequested?.Invoke();
     }
 

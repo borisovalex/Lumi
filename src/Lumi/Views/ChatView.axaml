@@ -1275,18 +1275,24 @@
         <Button Classes="transcript-suggestion" Margin="0,0,8,4"
                 Command="{Binding SelectSuggestionCommand}"
                 CommandParameter="{Binding SuggestionA}"
+                ToolTip.Tip="{Binding SuggestionA}"
+                ToolTip.ShowDelay="350"
                 IsVisible="{Binding SuggestionA, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
           <TextBlock Text="{Binding SuggestionA}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </Button>
         <Button Classes="transcript-suggestion" Margin="0,0,8,4"
                 Command="{Binding SelectSuggestionCommand}"
                 CommandParameter="{Binding SuggestionB}"
+                ToolTip.Tip="{Binding SuggestionB}"
+                ToolTip.ShowDelay="350"
                 IsVisible="{Binding SuggestionB, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
           <TextBlock Text="{Binding SuggestionB}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </Button>
         <Button Classes="transcript-suggestion" Margin="0,0,8,4"
                 Command="{Binding SelectSuggestionCommand}"
                 CommandParameter="{Binding SuggestionC}"
+                ToolTip.Tip="{Binding SuggestionC}"
+                ToolTip.ShowDelay="350"
                 IsVisible="{Binding SuggestionC, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
           <TextBlock Text="{Binding SuggestionC}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </Button>
