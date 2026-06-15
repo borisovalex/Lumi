@@ -186,6 +186,129 @@ public sealed class TranscriptPagingHeadlessTests
         }, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task TailTrackingAddThatTrimsHead_PreservesSurvivingTurnHosts()
+    {
+        // Reproduces the finish-writing freeze deterministically. While pinned to a full mounted
+        // window, a source change that advances the tail AND trims the head at the same time (the
+        // typing turn being removed / the final turn being added when the assistant stops writing)
+        // breaks the prefix/suffix reconcile at BOTH ends. The old diff then collapsed to "replace
+        // the whole mounted range", releasing every surviving turn's realized host — so each was
+        // re-realized, re-parsing its markdown and re-highlighting its code on the UI thread. The
+        // identity-based reconcile must keep surviving turns' hosts and release only the turn that
+        // truly left the window.
+        using var session = HeadlessTestSession.Start();
+
+        await session.Dispatch(() =>
+        {
+            var controller = new TranscriptWindowController(new TranscriptPagingOptions
+            {
+                MaxPageWeight = 1000,
+                MaxTurnsPerPage = 1,
+                MinInitialPages = 1,
+                MaxMountedPages = 3,
+            });
+            var source = CreateVisualTurns(6);
+            controller.BindTranscript(source, "tail-trim");
+            controller.ResetToLatest(2000, "tail-trim");
+            controller.UpdatePinnedState(true, 0, "tail-trim");
+
+            // Full mounted window tracking the tail: [t3, t4, t5].
+            Assert.Equal(
+                new[] { "turn:0003", "turn:0004", "turn:0005" },
+                controller.MountedTurns.Select(static turn => turn.StableId).ToArray());
+
+            // Stand in for "these mounted turns have already realized (parsed) their content".
+            var hostT3 = new StackPanel();
+            var hostT4 = new StackPanel();
+            var hostT5 = new StackPanel();
+            source[3].RealizedItemsHost = hostT3;
+            source[4].RealizedItemsHost = hostT4;
+            source[5].RealizedItemsHost = hostT5;
+
+            // Appending a turn while pinned to the full window advances the tail and trims the head
+            // in a single source change — the dual-end break. The reconcile runs synchronously here.
+            var newTurn = new TranscriptTurn("turn:0006");
+            newTurn.Items.Add(new VisualTranscriptItem("item:0006", 120, "Turn 6"));
+            source.Add(newTurn);
+
+            // Head trimmed, tail advanced: [t4, t5, t6].
+            Assert.Equal(
+                new[] { "turn:0004", "turn:0005", "turn:0006" },
+                controller.MountedTurns.Select(static turn => turn.StableId).ToArray());
+
+            // Surviving turns keep the exact same realized host (no tear-down, no re-parse). Under
+            // the old prefix/suffix diff these were released to null.
+            Assert.Same(hostT4, source[4].RealizedItemsHost);
+            Assert.Same(hostT5, source[5].RealizedItemsHost);
+
+            // The turn that genuinely left the mounted window is still released.
+            Assert.Null(source[3].RealizedItemsHost);
+
+            // Survivors are the very same turn objects (reference identity), in order.
+            Assert.Same(source[4], controller.MountedTurns[0]);
+            Assert.Same(source[5], controller.MountedTurns[1]);
+            Assert.Same(source[6], controller.MountedTurns[2]);
+
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task ReorderingMountedSourceTurns_DoesNotDuplicateOrReleaseHosts()
+    {
+        // Defensive: the reconcile must stay correct even if the source turns are reordered (a Move),
+        // which the insertion-only path would otherwise turn into a duplicate insert. No production
+        // path reorders turns today, but the reconcile must not depend on callers preserving order.
+        using var session = HeadlessTestSession.Start();
+
+        await session.Dispatch(() =>
+        {
+            var controller = new TranscriptWindowController(new TranscriptPagingOptions
+            {
+                MaxPageWeight = 1000,
+                MaxTurnsPerPage = 1,
+                MinInitialPages = 1,
+                MaxMountedPages = 3,
+            });
+            var source = CreateVisualTurns(6);
+            controller.BindTranscript(source, "reorder");
+            controller.ResetToLatest(2000, "reorder");
+            controller.UpdatePinnedState(true, 0, "reorder");
+
+            var turnT3 = source[3];
+            var turnT4 = source[4];
+            var turnT5 = source[5];
+            Assert.Equal(
+                new[] { turnT3, turnT4, turnT5 },
+                controller.MountedTurns.ToArray());
+
+            var hostT3 = new StackPanel();
+            var hostT4 = new StackPanel();
+            var hostT5 = new StackPanel();
+            turnT3.RealizedItemsHost = hostT3;
+            turnT4.RealizedItemsHost = hostT4;
+            turnT5.RealizedItemsHost = hostT5;
+
+            // Swap two mounted turns in the source. Desired mounted order becomes [t4, t3, t5].
+            source.Move(3, 4);
+
+            // Reconciled to the new order with NO duplication.
+            Assert.Equal(
+                new[] { turnT4, turnT3, turnT5 },
+                controller.MountedTurns.ToArray());
+            Assert.Equal(3, controller.MountedTurns.Count);
+            Assert.Equal(3, controller.MountedTurns.Distinct().Count());
+
+            // Every turn stayed mounted, so every host is preserved (none released, none rebuilt).
+            Assert.Same(hostT3, turnT3.RealizedItemsHost);
+            Assert.Same(hostT4, turnT4.RealizedItemsHost);
+            Assert.Same(hostT5, turnT5.RealizedItemsHost);
+
+            return Task.CompletedTask;
+        }, CancellationToken.None);
+    }
+
     private static async Task<(Window Window, StrataChatShell Shell, ScrollViewer ScrollViewer)> CreateHostAsync(TranscriptWindowController controller)
     {
         var transcript = new ItemsControl

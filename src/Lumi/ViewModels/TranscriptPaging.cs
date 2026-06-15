@@ -703,29 +703,60 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
 
     private void ReconcileMountedTurns(IReadOnlyList<TranscriptTurn> desiredTurns)
     {
-        var prefix = 0;
-        while (prefix < MountedTurns.Count && prefix < desiredTurns.Count && ReferenceEquals(MountedTurns[prefix], desiredTurns[prefix]))
-            prefix++;
+        // Reconcile by identity so a turn that stays mounted keeps its realized host — and therefore
+        // its already parsed markdown and highlighted code blocks — instead of being torn down and
+        // rebuilt from scratch.
+        //
+        // A prefix/suffix diff looks cheap but releases every turn in the "changed middle", even
+        // turns that remain desired and only shifted position. When an assistant message finishes,
+        // the typing turn is removed AND (while pinned to the tail) the head page can trim in the
+        // same source-collection change. That breaks the prefix (head shifted) and the suffix (old
+        // tail is the typing turn, new tail is the assistant turn) simultaneously, so the diff
+        // collapses to "replace the whole mounted range": it releases the just-finished assistant
+        // turn's host and re-realizes it, re-parsing the markdown and synchronously re-highlighting
+        // its code blocks on the UI thread — the multi-second finish-writing freeze. Releasing only
+        // turns that truly left the window keeps that work off the finalize path.
+        var desiredSet = new HashSet<TranscriptTurn>(desiredTurns, ReferenceEqualityComparer.Instance);
 
-        var currentSuffix = MountedTurns.Count - 1;
-        var desiredSuffix = desiredTurns.Count - 1;
-        while (currentSuffix >= prefix && desiredSuffix >= prefix && ReferenceEquals(MountedTurns[currentSuffix], desiredTurns[desiredSuffix]))
+        for (var i = MountedTurns.Count - 1; i >= 0; i--)
         {
-            currentSuffix--;
-            desiredSuffix--;
-        }
+            var turn = MountedTurns[i];
+            if (desiredSet.Contains(turn))
+                continue;
 
-        for (var i = currentSuffix; i >= prefix; i--)
-        {
-            var removed = MountedTurns[i];
             MountedTurns.RemoveAt(i);
             // The turn left the mounted window: tear down its retained realized host so its
             // controls/parsed markdown are released (bounds retention to mounted turns).
-            removed.ReleaseRealizedHost();
+            turn.ReleaseRealizedHost();
         }
 
-        for (var i = prefix; i <= desiredSuffix; i++)
-            MountedTurns.Insert(i, desiredTurns[i]);
+        // Bring MountedTurns to match desiredTurns by identity, reusing each surviving entry (and its
+        // realized host) in place. In every production path the survivors are already an in-order
+        // subsequence of desiredTurns (transcript turns keep chronological/source order and are never
+        // reordered), so this just inserts the missing turns. The move branch keeps the reconcile
+        // correct even if a desired turn is present but out of order — without it, a bare Insert would
+        // duplicate that turn — so the method never depends on callers preserving ordering.
+        for (var i = 0; i < desiredTurns.Count; i++)
+        {
+            var desired = desiredTurns[i];
+            if (i < MountedTurns.Count && ReferenceEquals(MountedTurns[i], desired))
+                continue;
+
+            var existingIndex = -1;
+            for (var j = i + 1; j < MountedTurns.Count; j++)
+            {
+                if (ReferenceEquals(MountedTurns[j], desired))
+                {
+                    existingIndex = j;
+                    break;
+                }
+            }
+
+            if (existingIndex >= 0)
+                MountedTurns.Move(existingIndex, i);
+            else
+                MountedTurns.Insert(i, desired);
+        }
     }
 
     private void ReleaseAllMountedHosts()
