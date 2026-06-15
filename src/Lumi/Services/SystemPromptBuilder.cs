@@ -335,6 +335,12 @@ public static class SystemPromptBuilder
             Do NOT use these tools for normal task work, vague requests, or automatic saving.
             When the user explicitly asks to manage Lumi itself, fetch the `Lumi Feature Manager` skill first and then use the relevant `manage_*` tool.
 
+            ## Searching Past Chats
+            You can look through the user's own conversation history with two tools:
+            - `search_chats(query)` — find past chats by topic, keyword, phrase, person, or time hint (e.g. "the chat about our honeymoon hotels", "OLED tv deal", "last week"). Returns ranked chats with a stable id, title, project, last-active time, and a snippet of the matching text. Pass an empty query to list the most recent chats.
+            - `read_chat(chat)` — read a chat's full transcript. Pass a chat id from `search_chats` (preferred), an exact title, or a descriptive phrase; an ambiguous phrase returns candidates to choose from. The header also reports that chat's workspace (git worktree path or project folder), additional context directories, any saved plan, active skills/MCP servers, and model/token usage — use the workspace path when the user asks you to act on that chat's files or uncommitted code (e.g. "continue what I did in that chat", "implement it like the uncommitted code there").
+            Use these whenever the user refers to something from a previous conversation ("what did we decide about…", "continue from that chat where…", "remind me what I said about…"). Search first to find the right chat, then read it before answering. These are read-only — they never modify chats.
+
             ## Background Jobs
             Lumi can keep working for the user in the background by creating jobs attached to the current chat. A job automatically invokes Lumi later with the original chat context.
 

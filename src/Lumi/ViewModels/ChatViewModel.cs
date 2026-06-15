@@ -476,6 +476,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private readonly DataStore _dataStore;
     private readonly CopilotService _copilotService;
+    private readonly GlobalSearchService? _globalSearchService;
     private readonly MemoryAgentService _memoryAgentService;
     private readonly CodingToolService _codingToolService;
     private readonly UIAutomationService _uiAutomation = new();
@@ -894,10 +895,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// <summary>Raised when the Workspace panel open/closed preference changes so the view re-evaluates visibility.</summary>
     public event Action? WorkspacePanelPreferenceChanged;
 
-    public ChatViewModel(DataStore dataStore, CopilotService copilotService)
+    public ChatViewModel(DataStore dataStore, CopilotService copilotService, GlobalSearchService? globalSearchService = null)
     {
         _dataStore = dataStore;
         _copilotService = copilotService;
+        _globalSearchService = globalSearchService;
         _memoryAgentService = new MemoryAgentService(dataStore, copilotService);
         _codingToolService = new CodingToolService(copilotService, GetCurrentCancellationToken);
         _selectedModel = dataStore.Data.Settings.PreferredModel;

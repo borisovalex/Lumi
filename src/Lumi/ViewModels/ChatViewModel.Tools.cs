@@ -55,6 +55,9 @@ public partial class ChatViewModel
     private readonly HashSet<Guid> _pendingSessionInvalidations = [];
     private LumiFeatureManager FeatureManager => _lumiFeatureManager ??= new LumiFeatureManager(_dataStore);
 
+    private ChatHistoryService? _chatHistoryService;
+    private ChatHistoryService ChatHistory => _chatHistoryService ??= new ChatHistoryService(_dataStore, _globalSearchService);
+
     private CancellationToken GetCurrentCancellationToken()
     {
         if (CurrentChat is { } chat && _ctsSources.TryGetValue(chat.Id, out var cts))
@@ -668,6 +671,28 @@ public partial class ChatViewModel
                 "manage_memories",
                 "List, create, update, or delete Lumi memories. Use this only when the user explicitly asks to manage memories directly.",
                 Lumi.Models.AppDataJsonContext.Default.Options),
+
+            AIFunctionFactory.Create(
+                async (
+                    [Description("What to look for: a topic, keyword, phrase, person, or time hint (e.g. 'honeymoon hotel deal', 'the OLED tv chat', 'last week'). Leave empty to list the most recently active chats.")] string? query = null,
+                    [Description("Maximum number of chats to return (1-25, default 8).")] int? limit = null) =>
+                {
+                    return await ChatHistory.SearchChatsAsync(query, limit, GetCurrentCancellationToken());
+                },
+                "search_chats",
+                "Search the user's past Lumi chats by topic, keyword, phrase, name, or time hint. Returns the most relevant conversations with a stable chat id, title, project, last-active time, and a snippet of the matching text. Use this whenever the user refers to a previous conversation ('the chat where we…', 'what did we decide about…') so you can then open it with read_chat. Pass an empty query to list the most recent chats."),
+
+            AIFunctionFactory.Create(
+                async (
+                    [Description("Which chat to read: a chat id from search_chats (preferred), an exact chat title, or a descriptive phrase to look up.")] string chat,
+                    [Description("Maximum number of most-recent messages to include (1-400, default 60).")] int? maxMessages = null,
+                    [Description("Include the assistant's internal reasoning text. Default false.")] bool includeReasoning = false,
+                    [Description("Include a short summary of tool calls made in the chat. Default true.")] bool includeToolCalls = true) =>
+                {
+                    return await ChatHistory.ReadChatAsync(chat, maxMessages, includeReasoning, includeToolCalls, GetCurrentCancellationToken());
+                },
+                "read_chat",
+                "Read the full transcript of one of the user's past chats so you can recall exactly what was discussed. Accepts a chat id (preferred — get it from search_chats), an exact title, or a descriptive phrase (it will search and either open the clear match or return candidates to pick from). Returns a clean, role-labelled transcript windowed to the most recent messages. The header also reports the chat's workspace (git worktree path or project folder), additional context directories, any saved plan, active skills/MCP servers, and model/token usage — use the workspace path when the user wants you to act on that chat's files or uncommitted code (e.g. 'implement it like the uncommitted code in that chat'). Use after search_chats, or directly when the user names a specific chat."),
         ];
     }
 

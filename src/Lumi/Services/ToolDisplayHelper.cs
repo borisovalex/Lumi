@@ -53,6 +53,7 @@ public static partial class ToolDisplayHelper
         "manage_lumis" => "✦",
         "manage_mcps" => "🔌",
         "manage_memories" => "🧠",
+        "search_chats" or "read_chat" => "💬",
         "code_review" => "🔍",
         "generate_tests" => "🧪",
         "explain_code" => "📖",
@@ -79,6 +80,7 @@ public static partial class ToolDisplayHelper
         => toolName is "view" or "read_file" or "read"
             or "grep" or "glob"
             or "recall_memory"
+            or "search_chats" or "read_chat"
             or "report_intent"
             or "announce_file" or "fetch_skill"
             or "ui_list_windows" or "ui_read"
@@ -182,6 +184,13 @@ public static partial class ToolDisplayHelper
                 return ("Managing MCP servers", ExtractJsonField(argsJson, "action"));
             case "manage_memories":
                 return ("Managing memories", ExtractJsonField(argsJson, "action"));
+            case "search_chats":
+            {
+                var query = ExtractJsonField(argsJson, "query");
+                return ("Searching chats", string.IsNullOrWhiteSpace(query) ? "recent chats" : query);
+            }
+            case "read_chat":
+                return ("Reading chat", ExtractJsonField(argsJson, "chat"));
             case "ask_question":
                 return (Loc.Tool_AskingQuestion, null);
             case "ui_inspect":

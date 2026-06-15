@@ -27,6 +27,7 @@ public partial class App : Application
     private BackgroundJobService? _backgroundJobService;
     private ChatSurfaceRegistry? _chatSurfaceRegistry;
     private ChatSessionStore? _chatSessionStore;
+    private GlobalSearchService? _globalSearchService;
     private readonly List<MainWindow> _windows = [];
     private int _secondaryWindowSequence;
     private MainViewModel? _mainViewModel;
@@ -57,7 +58,12 @@ public partial class App : Application
             _updateService = updateService;
             updateService.Initialize();
             _chatSurfaceRegistry = new ChatSurfaceRegistry();
-            _chatSessionStore = new ChatSessionStore(dataStore, copilotService, _chatSurfaceRegistry);
+            _globalSearchService = new GlobalSearchService(
+                () => dataStore.Data,
+                dataStore.GetChatSearchSnapshot,
+                releaseChatSnapshot: dataStore.EvictChatSearchSnapshot,
+                chatFileTimestampProvider: dataStore.GetChatFileTimestamp);
+            _chatSessionStore = new ChatSessionStore(dataStore, copilotService, _chatSurfaceRegistry, _globalSearchService);
             var vm = CreateMainViewModel(
                 forceOnboarding: Program.ForceOnboarding,
                 startBackgroundJobs: true
@@ -249,7 +255,8 @@ public partial class App : Application
             _backgroundJobService,
             startBackgroundJobs,
             _chatSurfaceRegistry,
-            _chatSessionStore
+            _chatSessionStore,
+            _globalSearchService
 #if DEBUG
             , openAgentDebugHarness,
             skipOnboarding
