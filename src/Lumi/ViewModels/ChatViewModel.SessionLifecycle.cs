@@ -95,6 +95,17 @@ public partial class ChatViewModel
         return added ? target : null;
     }
 
+    /// <summary>
+    /// Whether sub-agent output suppression is currently active for a chat. Driven SOLELY by
+    /// genuine nested sub-agent execution (<c>subagent.started</c>/<c>subagent.completed</c>,
+    /// tracked by <see cref="ChatRuntimeState.ActiveSubagentExecutionDepth"/>). The
+    /// <c>subagent.selected</c>/<c>subagent.deselected</c> events must NOT feed into this — the
+    /// CLI emits them only for the top-level configured agent (config.Agent), so gating on them
+    /// dropped the entire main turn whenever a Lumi agent was selected.
+    /// </summary>
+    internal static bool SubagentOutputIsActive(ChatRuntimeState runtime)
+        => Volatile.Read(ref runtime.ActiveSubagentExecutionDepth) > 0;
+
     /// <summary>Subscribes to events on a CopilotSession. Each subscription captures its own
     /// streaming state via closures and always updates the Chat model. UI updates are gated
     /// on _activeSession so only the displayed chat's events touch the UI.</summary>
@@ -123,7 +134,6 @@ public partial class ChatViewModel
         var completedToolOutputsByCallId = new Dictionary<string, string>(StringComparer.Ordinal);
         StreamingTextAccumulator? assistantStream = null;
         StreamingTextAccumulator? reasoningStream = null;
-        var activeSubagentSelectionDepth = 0;
         var subagentStateGate = new object();
         var activeSubagentToolCallIds = new List<string>();
         var subagentAssistantStreams = new Dictionary<string, StreamingTextAccumulator>(StringComparer.Ordinal);
@@ -244,8 +254,7 @@ public partial class ChatViewModel
 
 
         bool IsSubagentOutputActive()
-            => Volatile.Read(ref activeSubagentSelectionDepth) > 0
-               || Volatile.Read(ref runtime.ActiveSubagentExecutionDepth) > 0;
+            => SubagentOutputIsActive(runtime);
 
         static string? GetSubagentToolCallIdFromParent(string? parentToolCallId)
             => string.IsNullOrWhiteSpace(parentToolCallId) ? null : parentToolCallId;
@@ -449,7 +458,6 @@ public partial class ChatViewModel
 
         void ResetSubagentOutputState()
         {
-            Volatile.Write(ref activeSubagentSelectionDepth, 0);
             Volatile.Write(ref runtime.ActiveSubagentExecutionDepth, 0);
             List<StreamingTextAccumulator> streamsToDispose = [];
             lock (subagentStateGate)
@@ -1520,17 +1528,17 @@ public partial class ChatViewModel
                     break;
 
                 case SubagentSelectedEvent:
-                    Interlocked.Increment(ref activeSubagentSelectionDepth);
-                    break;
-
                 case SubagentDeselectedEvent:
-                    if (Volatile.Read(ref activeSubagentSelectionDepth) > 0)
-                        Interlocked.Decrement(ref activeSubagentSelectionDepth);
-                    if (!IsSubagentOutputActive())
-                    {
-                        lock (subagentStateGate)
-                            mostRecentSubagentToolCallId = null;
-                    }
+                    // Intentionally ignored for output routing. The CLI emits
+                    // subagent.selected/deselected ONLY for the top-level configured agent
+                    // (config.Agent) — once per session, with no tool call id and no matching
+                    // subagent.started/completed. They describe the MAIN agent persona, not a
+                    // nested sub-agent, so they must never gate output suppression: doing so
+                    // dropped the entire turn whenever a Lumi agent was selected, and again
+                    // after removing the agent (the resumed session still re-emits selected for
+                    // its original agent). Genuine nested sub-agents are bracketed by
+                    // subagent.started/subagent.completed (with a tool call id) and are handled
+                    // via ActiveSubagentExecutionDepth + tool-call-id routing.
                     break;
 
                 case SubagentStartedEvent subStart:
