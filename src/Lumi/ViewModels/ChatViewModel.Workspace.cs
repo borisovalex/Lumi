@@ -30,6 +30,15 @@ public partial class ChatViewModel
     private readonly List<WorkspaceActivityItem> _allActivities = [];
     private readonly List<FileChangeItem> _allChanges = [];
 
+    // Reverse index (activity seed → owning turn StableId), rebuilt with the panel. The activity
+    // timeline uses it to resolve each row's transcript jump target in O(1). Without it, every
+    // activity rescans all turns and their items (allocating interpolated id strings per compare),
+    // which is quadratic and froze the UI for many seconds when opening very large chats.
+    private readonly Dictionary<string, string> _activitySeedToTurnId = new(StringComparer.Ordinal);
+
+    private static readonly string[] TurnSeedPrefixes = { "turn:tool:", "turn:question:", "turn:message:" };
+    private static readonly string[] ItemSeedPrefixes = { "tool:", "subagent:", "question:", "message:error:" };
+
     // ── Displayed (search-filtered) collections the view binds to ──
     public ObservableCollection<FileAttachmentItem> WorkspaceDeliverables { get; } = [];
     public ObservableCollection<SourceItem> WorkspaceSources { get; } = [];
@@ -159,6 +168,8 @@ public partial class ChatViewModel
         var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sources = new List<SourceItem>();
         var activities = new List<WorkspaceActivityItem>();
+
+        BuildActivitySeedIndex();
 
         for (var i = 0; i < Messages.Count; i++)
         {
@@ -338,6 +349,7 @@ public partial class ChatViewModel
     /// Finds the transcript turn an activity row should scroll to. For tool calls that render an item
     /// (e.g. web_search) this is the turn that hosts it; for label-only intents we fall forward to the
     /// next tool action's turn — the place that intent corresponds to. Returns null when unresolved.
+    /// Resolution is an O(1) lookup against the seed index built by <see cref="BuildActivitySeedIndex"/>.
     /// </summary>
     private string? ResolveActivityTurn(int messageIndex)
     {
@@ -352,50 +364,65 @@ public partial class ChatViewModel
             var seed = !string.IsNullOrEmpty(message.QuestionId) ? message.QuestionId
                 : !string.IsNullOrEmpty(message.ToolCallId) ? message.ToolCallId
                 : message.Id.ToString();
-            var turn = TranscriptTurns.FirstOrDefault(t => TurnContainsActivitySeed(t, seed));
-            if (turn is not null)
-                return turn.StableId;
+            if (_activitySeedToTurnId.TryGetValue(seed, out var turnStableId))
+                return turnStableId;
         }
 
         return null;
     }
 
     /// <summary>
-    /// True when <paramref name="turn"/> renders the item identified by <paramref name="seed"/>. Activities
-    /// map to several item kinds, each with its own StableId scheme: tools (<c>tool:</c>), delegated
-    /// subagents (<c>subagent:</c>), questions (<c>question:</c>) and error bubbles (<c>message:error:</c>).
+    /// Builds the reverse map from activity <c>seed</c> to the owning turn's <see cref="TranscriptTurn.StableId"/>.
+    /// Each turn is visited once and every id it renders (its own StableId plus its items' and grouped tool
+    /// calls' StableIds) is decomposed into the seed an activity would search for. The first turn that owns a
+    /// seed wins, mirroring the original first-match-in-order scan. This replaces a per-activity rescan of all
+    /// turns/items that was quadratic and froze the UI for seconds on very large chats.
     /// </summary>
-    private static bool TurnContainsActivitySeed(TranscriptTurn turn, string seed)
+    private void BuildActivitySeedIndex()
     {
-        if (turn.StableId == $"turn:tool:{seed}"
-            || turn.StableId == $"turn:question:{seed}"
-            || turn.StableId == $"turn:message:{seed}")
+        _activitySeedToTurnId.Clear();
+
+        foreach (var turn in TranscriptTurns)
         {
-            return true;
+            var turnStableId = turn.StableId;
+            RegisterSeeds(turnStableId, TurnSeedPrefixes, turnStableId);
+
+            foreach (var item in turn.Items)
+            {
+                RegisterSeeds(item.StableId, ItemSeedPrefixes, turnStableId);
+
+                switch (item)
+                {
+                    case ToolGroupItem group:
+                        foreach (var toolCall in group.ToolCalls)
+                            RegisterSeeds(toolCall.StableId, ItemSeedPrefixes, turnStableId);
+                        break;
+                    case SingleToolItem single:
+                        RegisterSeeds(single.Inner.StableId, ItemSeedPrefixes, turnStableId);
+                        break;
+                }
+            }
         }
-
-        return turn.Items.Any(item => ItemMatchesActivitySeed(item, seed));
     }
 
-    private static bool ItemMatchesActivitySeed(TranscriptItem item, string seed)
+    /// <summary>
+    /// If <paramref name="stableId"/> starts with one of the activity <paramref name="prefixes"/>, records the
+    /// remainder (the seed) as owned by <paramref name="turnStableId"/>, keeping the first owner seen.
+    /// </summary>
+    private void RegisterSeeds(string? stableId, string[] prefixes, string turnStableId)
     {
-        if (StableIdMatchesSeed(item.StableId, seed))
-            return true;
+        if (string.IsNullOrEmpty(stableId))
+            return;
 
-        return item switch
+        foreach (var prefix in prefixes)
         {
-            ToolGroupItem group => group.ToolCalls.Any(tc => StableIdMatchesSeed(tc.StableId, seed)),
-            SingleToolItem single => StableIdMatchesSeed(single.Inner.StableId, seed),
-            _ => false,
-        };
+            if (stableId.Length > prefix.Length && stableId.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                _activitySeedToTurnId.TryAdd(stableId.Substring(prefix.Length), turnStableId);
+                return;
+            }
+        }
     }
-
-    private static bool StableIdMatchesSeed(string? stableId, string seed)
-        => !string.IsNullOrEmpty(stableId)
-           && (stableId == $"tool:{seed}"
-               || stableId == $"subagent:{seed}"
-               || stableId == $"question:{seed}"
-               || stableId == $"message:error:{seed}");
 
     private void EnsureValidSelectedTab()
     {
