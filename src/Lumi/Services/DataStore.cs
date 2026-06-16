@@ -388,7 +388,7 @@ public class DataStore
 
             var messages = loadedMessageSnapshots.TryGetValue(chat.Id, out var loadedMessages)
                 ? loadedMessages
-                : await ReadChatMessagesForSuggestionHistoryAsync(chat, cancellationToken).ConfigureAwait(false);
+                : await ReadPersistedChatMessagesFromFileAsync(chat, cancellationToken).ConfigureAwait(false);
 
             foreach (var message in messages)
             {
@@ -412,7 +412,25 @@ public class DataStore
             .ToList();
     }
 
-    private async Task<IReadOnlyList<ChatMessage>> ReadChatMessagesForSuggestionHistoryAsync(
+    /// <summary>
+    /// Returns a chat's full message history without permanently materializing a cold chat.
+    /// Loaded chats return their in-memory messages; cold chats are read from their per-chat file
+    /// and returned without populating <see cref="Chat.Messages"/>, so reading history for tooling
+    /// or search does not bloat memory or change the chat's loaded/cold state.
+    /// </summary>
+    public async Task<IReadOnlyList<ChatMessage>> ReadChatMessagesAsync(
+        Chat chat,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(chat);
+
+        if (chat.Messages.Count > 0)
+            return chat.Messages.ToList();
+
+        return await ReadPersistedChatMessagesFromFileAsync(chat, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<ChatMessage>> ReadPersistedChatMessagesFromFileAsync(
         Chat chat,
         CancellationToken cancellationToken)
     {
@@ -468,7 +486,10 @@ public class DataStore
         ArgumentNullException.ThrowIfNull(chat);
 
         if (chat.Messages.Count > 0)
-            return CreateLoadedChatSearchSnapshot(chat.Messages);
+            // Copy once before indexing: callers (global search index, search_chats) run on
+            // background threads while the UI thread appends/removes messages, so iterating the
+            // live list would risk ArgumentOutOfRangeException / torn reads.
+            return CreateLoadedChatSearchSnapshot(chat.Messages.ToArray());
 
         var chatFile = Path.Combine(ChatsDir, $"{chat.Id}.json");
         if (!File.Exists(chatFile))

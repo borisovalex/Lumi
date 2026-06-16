@@ -16,6 +16,7 @@ public sealed class ChatSessionStore : IDisposable
     private readonly DataStore _dataStore;
     private readonly CopilotService _copilotService;
     private readonly ChatSurfaceRegistry _registry;
+    private readonly GlobalSearchService? _globalSearchService;
     private readonly Func<ChatViewModel, Chat, Task> _loadChatAsync;
     private readonly int _maxIdleCachedSurfaces;
     private readonly Dictionary<Guid, ChatViewModel> _sessionsByChatId = [];
@@ -28,8 +29,9 @@ public sealed class ChatSessionStore : IDisposable
     public ChatSessionStore(
         DataStore dataStore,
         CopilotService copilotService,
-        ChatSurfaceRegistry registry)
-        : this(dataStore, copilotService, registry, static (surface, chat) => surface.LoadChatAsync(chat))
+        ChatSurfaceRegistry registry,
+        GlobalSearchService? globalSearchService = null)
+        : this(dataStore, copilotService, registry, static (surface, chat) => surface.LoadChatAsync(chat), globalSearchService: globalSearchService)
     {
     }
 
@@ -38,7 +40,8 @@ public sealed class ChatSessionStore : IDisposable
         CopilotService copilotService,
         ChatSurfaceRegistry registry,
         Func<ChatViewModel, Chat, Task> loadChatAsync,
-        int maxIdleCachedSurfaces = DefaultMaxIdleCachedSurfaces)
+        int maxIdleCachedSurfaces = DefaultMaxIdleCachedSurfaces,
+        GlobalSearchService? globalSearchService = null)
     {
         if (maxIdleCachedSurfaces < 0)
             throw new ArgumentOutOfRangeException(nameof(maxIdleCachedSurfaces));
@@ -46,6 +49,7 @@ public sealed class ChatSessionStore : IDisposable
         _dataStore = dataStore;
         _copilotService = copilotService;
         _registry = registry;
+        _globalSearchService = globalSearchService;
         _loadChatAsync = loadChatAsync;
         _maxIdleCachedSurfaces = maxIdleCachedSurfaces;
     }
@@ -176,7 +180,7 @@ public sealed class ChatSessionStore : IDisposable
 
     private ChatViewModel CreateTrackedSurface(Action<ChatViewModel>? configure = null)
     {
-        var surface = new ChatViewModel(_dataStore, _copilotService)
+        var surface = new ChatViewModel(_dataStore, _copilotService, _globalSearchService)
         {
             SendWithEnter = _dataStore.Data.Settings.SendWithEnter
         };

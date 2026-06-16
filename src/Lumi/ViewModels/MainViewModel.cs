@@ -187,7 +187,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         BackgroundJobService? backgroundJobService = null,
         bool startBackgroundJobs = true,
         ChatSurfaceRegistry? chatSurfaceRegistry = null,
-        ChatSessionStore? chatSessionStore = null
+        ChatSessionStore? chatSessionStore = null,
+        GlobalSearchService? globalSearchService = null
 #if DEBUG
         , bool openAgentDebugHarness = false,
         bool skipOnboarding = false
@@ -199,7 +200,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _settingsBrowserService = new BrowserService();
         _chatSurfaceRegistry = chatSurfaceRegistry ?? new ChatSurfaceRegistry();
         _ownsChatSurfaceRegistry = chatSurfaceRegistry is null;
-        _chatSessionStore = chatSessionStore ?? new ChatSessionStore(dataStore, copilotService, _chatSurfaceRegistry);
+        _globalSearchService = globalSearchService ?? new GlobalSearchService(
+            () => _dataStore.Data,
+            _dataStore.GetChatSearchSnapshot,
+            releaseChatSnapshot: _dataStore.EvictChatSearchSnapshot,
+            chatFileTimestampProvider: _dataStore.GetChatFileTimestamp);
+        _chatSessionStore = chatSessionStore ?? new ChatSessionStore(dataStore, copilotService, _chatSurfaceRegistry, _globalSearchService);
         _ownsChatSessionStore = chatSessionStore is null;
 
         var settings = _dataStore.Data.Settings;
@@ -253,11 +259,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SettingsVM = new SettingsViewModel(dataStore, copilotService, _settingsBrowserService, updateService);
         SettingsVM.LoginVM = LoginVM;
         SearchOverlayVM = new SearchOverlayViewModel(
-            _globalSearchService = new GlobalSearchService(
-                () => _dataStore.Data,
-                _dataStore.GetChatSearchSnapshot,
-                releaseChatSnapshot: _dataStore.EvictChatSearchSnapshot,
-                chatFileTimestampProvider: _dataStore.GetChatFileTimestamp),
+            _globalSearchService,
             () => SelectedNavIndex);
 
         _dataStore.ChatContentChanged += OnDataStoreChatContentChanged;

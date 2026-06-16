@@ -97,6 +97,37 @@ public sealed class ChatViewModelAgentRoutingTests
     }
 
     [Fact]
+    public void SubagentOutputIsActive_FalseWhenNoNestedSubagentExecuting()
+    {
+        // Regression: selecting a Lumi agent makes the CLI emit subagent.selected for the
+        // top-level configured agent (no nested execution). Output suppression must be driven
+        // ONLY by genuine nested sub-agent execution, so with ActiveSubagentExecutionDepth == 0
+        // the main turn must NOT be suppressed — otherwise the whole reply is dropped.
+        var runtime = new ChatRuntimeState
+        {
+            Chat = new Chat { Title = "top-level agent" },
+            ActiveSubagentExecutionDepth = 0
+        };
+
+        Assert.False(ChatViewModel.SubagentOutputIsActive(runtime));
+    }
+
+    [Fact]
+    public void SubagentOutputIsActive_TrueWhileNestedSubagentExecuting()
+    {
+        // Genuine nested sub-agents are bracketed by subagent.started/completed which drive
+        // ActiveSubagentExecutionDepth; their output must still be routed away from the main
+        // transcript.
+        var runtime = new ChatRuntimeState
+        {
+            Chat = new Chat { Title = "nested subagent" },
+            ActiveSubagentExecutionDepth = 1
+        };
+
+        Assert.True(ChatViewModel.SubagentOutputIsActive(runtime));
+    }
+
+    [Fact]
     public void ResolveSelectedModelForChat_DoesNotUseVisibleChatSelectionForHiddenChat()
     {
         var targetChat = new Chat { Id = Guid.NewGuid(), Title = "Job chat" };
