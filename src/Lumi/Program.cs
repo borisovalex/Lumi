@@ -88,7 +88,7 @@ class Program
 
     private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        if (!IsAvaloniaTextSelectionHandleBoundsFailure(e.Exception))
+        if (!IsAvaloniaTextSelectionBoundsFailure(e.Exception))
             return;
 
         System.Diagnostics.Trace.TraceWarning(
@@ -96,20 +96,31 @@ class Program
         e.Handled = true;
     }
 
-    private static bool IsAvaloniaTextSelectionHandleBoundsFailure(Exception exception)
+    internal static bool IsAvaloniaTextSelectionBoundsFailure(Exception exception)
     {
         for (var current = exception; current is not null; current = current.InnerException)
         {
             if (current is InvalidOperationException
                 && string.Equals(current.Message, "Covered length must be greater than zero.", StringComparison.Ordinal)
-                && current.StackTrace?.Contains("TextSelectionHandleCanvas", StringComparison.Ordinal) == true
-                && current.StackTrace?.Contains("HitTestTextRange", StringComparison.Ordinal) == true)
+                && IsAvaloniaTextSelectionStack(current.StackTrace))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static bool IsAvaloniaTextSelectionStack(string? stackTrace)
+    {
+        if (string.IsNullOrEmpty(stackTrace)
+            || !stackTrace.Contains("HitTestTextRange", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return stackTrace.Contains("TextSelectionHandleCanvas", StringComparison.Ordinal)
+            || stackTrace.Contains("SelectableTextBlock.RenderTextLayout", StringComparison.Ordinal);
     }
 
 #if DEBUG
