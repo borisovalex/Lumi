@@ -129,6 +129,12 @@ public static class DebugAgentHarness
             | Markdown | rendered |
             | Sources | visible below |
             | Model label | visible after turn |
+
+            The two-option comparison control (StrataFork) should switch when either tab is clicked:
+
+            ```comparison
+            {"optionA":{"title":"LG C4","content":"- OLED evo panel\n- Excellent for gaming\n- **$1,799**"},"optionB":{"title":"Samsung S90D","content":"- QD-OLED panel\n- Brighter highlights\n- **$1,899**"}}
+            ```
             """);
         firstAssistant.Author = "Lumi";
         firstAssistant.Model = "gpt-5.5";
