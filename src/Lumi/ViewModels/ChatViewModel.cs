@@ -2218,7 +2218,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             var chat = new Chat
             {
-                Title = prompt.Length > 40 ? prompt[..40].Trim() + "…" : prompt,
+                Title = BuildProvisionalChatTitle(prompt),
                 AgentId = ActiveAgent?.Id,
                 ProjectId = _pendingProjectId ?? ActiveProjectFilterId,
                 ActiveSkillIds = new List<Guid>(ActiveSkillIds),
@@ -3133,26 +3133,39 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private async Task GenerateTitleForChatAsync(Chat chat, string firstUserMessage, string? expectedCurrentTitle)
     {
-        try
+        // Title generation runs concurrently with the main send over the shared Copilot client.
+        // A large/heavy first message is more likely to stall the pipeline or trigger a transport
+        // reconnect that invalidates the title's in-flight lightweight session, leaving the chat
+        // stuck on its provisional truncated title. Retry a few times (with backoff) so a transient
+        // failure or a mid-flight reconnect recovers onto a fresh client instead of silently giving up.
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var generatedTitle = await _copilotService.GenerateTitleAsync(firstUserMessage).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(generatedTitle))
-                return;
-
-            Dispatcher.UIThread.Post(() =>
+            try
             {
-                if (!_dataStore.Data.Settings.AutoGenerateTitles)
-                    return;
+                var generatedTitle = await _copilotService.GenerateTitleAsync(firstUserMessage).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(generatedTitle))
+                {
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (!_dataStore.Data.Settings.AutoGenerateTitles)
+                            return;
 
-                if (!_dataStore.Data.Chats.Any(c => c.Id == chat.Id))
-                    return;
+                        if (!_dataStore.Data.Chats.Any(c => c.Id == chat.Id))
+                            return;
 
-                ApplyChatTitle(chat, generatedTitle, expectedCurrentTitle);
-            });
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[Lumi] Title generation failed: {ex.Message}");
+                        ApplyChatTitle(chat, generatedTitle, expectedCurrentTitle);
+                    });
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Lumi] Title generation attempt {attempt}/{maxAttempts} failed: {ex.Message}");
+            }
+
+            if (attempt < maxAttempts)
+                await Task.Delay(TimeSpan.FromSeconds(2 * attempt)).ConfigureAwait(false);
         }
     }
 
@@ -3174,6 +3187,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (HasPersistedChatFile(chat) && _dataStore.Data.Settings.AutoSaveChats)
             _ = SaveIndexAsync();
         ChatTitleChanged?.Invoke(chat.Id, chat.Title);
+    }
+
+    private static string BuildProvisionalChatTitle(string prompt)
+    {
+        if (prompt.Length <= 40)
+            return prompt;
+
+        var end = 40;
+        // Avoid splitting a surrogate pair when truncating (would leave a lone surrogate).
+        if (char.IsHighSurrogate(prompt[end - 1]))
+            end--;
+        return prompt[..end].Trim() + "…";
     }
 
     private static string? NormalizeChatTitle(string? title)

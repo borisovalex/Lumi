@@ -1162,7 +1162,7 @@ public class CopilotService : IAsyncDisposable
             {
                 var result = await session.SendAndWaitAsync(
                     new MessageOptions { Prompt = "title:" },
-                    TimeSpan.FromSeconds(15), innerCt).ConfigureAwait(false);
+                    TimeSpan.FromSeconds(40), innerCt).ConfigureAwait(false);
                 return result?.Data?.Content;
             },
             ct).ConfigureAwait(false);
@@ -1170,8 +1170,18 @@ public class CopilotService : IAsyncDisposable
         return rawTitle?.Trim().Trim('"', '\'', '.', '!');
     }
 
-    private static string Truncate(string text, int maxLength) =>
-        text.Length <= maxLength ? text : text[..maxLength];
+    private static string Truncate(string text, int maxLength)
+    {
+        if (text.Length <= maxLength)
+            return text;
+
+        var end = maxLength;
+        // Avoid cutting through a surrogate pair, which would leave a lone surrogate
+        // (malformed UTF-16) that can slow down or corrupt the title request.
+        if (char.IsHighSurrogate(text[end - 1]))
+            end--;
+        return text[..end];
+    }
 
     private const string SuggestionSystemPrompt =
         "You generate follow-up suggestions for a chat assistant. Propose exactly 3 short messages the user would naturally send next, grounded in the CURRENT conversation. " +
