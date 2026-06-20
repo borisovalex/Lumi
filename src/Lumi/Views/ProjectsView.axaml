@@ -1,4 +1,5 @@
 <UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:sa="using:StrataTheme.Animation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:Lumi.ViewModels"
              xmlns:models="using:Lumi.Models"
@@ -23,7 +24,7 @@
       <Setter Property="Transitions">
         <Transitions>
           <DoubleTransition Property="Opacity" Duration="0:0:0.12" />
-          <BrushTransition Property="Background" Duration="0:0:0.12" />
+          <sa:PremultipliedBrushTransition Property="Background" Duration="0:0:0.12" />
           <BrushTransition Property="BorderBrush" Duration="0:0:0.12" />
         </Transitions>
       </Setter>
@@ -33,7 +34,7 @@
       <Setter Property="Transitions">
         <Transitions>
           <DoubleTransition Property="Opacity" Duration="0:0:0.12" />
-          <BrushTransition Property="Background" Duration="0:0:0.12" />
+          <sa:PremultipliedBrushTransition Property="Background" Duration="0:0:0.12" />
         </Transitions>
       </Setter>
     </Style>

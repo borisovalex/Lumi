@@ -1,4 +1,5 @@
 <Window xmlns="https://github.com/avaloniaui"
+        xmlns:sa="using:StrataTheme.Animation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:Lumi.ViewModels"
         xmlns:views="using:Lumi.Views"
@@ -347,7 +348,7 @@
         <Transitions>
           <DoubleTransition Property="Opacity" Duration="0:0:0.24" Easing="CubicEaseOut" />
           <DoubleTransition Property="Width" Duration="0:0:0.24" Easing="CubicEaseOut" />
-          <BrushTransition Property="Background" Duration="0:0:0.16" />
+          <sa:PremultipliedBrushTransition Property="Background" Duration="0:0:0.16" />
         </Transitions>
       </Setter>
     </Style>
@@ -378,7 +379,7 @@
       <Setter Property="VerticalContentAlignment" Value="Center" />
       <Setter Property="Transitions">
         <Transitions>
-          <BrushTransition Property="Background" Duration="0:0:0.16" />
+          <sa:PremultipliedBrushTransition Property="Background" Duration="0:0:0.16" />
         </Transitions>
       </Setter>
     </Style>
