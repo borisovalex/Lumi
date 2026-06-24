@@ -142,6 +142,7 @@ public partial class ChatWorkspaceView : UserControl, IDisposable
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
     {
         DisposePreviewPanel();
+        DisposePresence();
         base.OnDetachedFromVisualTree(e);
     }
 
@@ -246,10 +247,23 @@ public partial class ChatWorkspaceView : UserControl, IDisposable
         _attachedDataStore = _dataStore;
         _attachedChatViewModel = chatViewModel;
 
-        // Inject the single decoupled glow layer behind the whole workspace grid and let it observe
-        // the view-model. The grid (and its translucent islands) never reference the glow.
-        _presenceController = new PresenceController(contentGrid);
-        _presenceController.Attach(chatViewModel);
+        // Persistent ambient field: created ONCE for the lifetime of this (reused) workspace grid and
+        // RE-POINTED at the new surface on a chat switch. ChatWorkspaceView is a single named element in
+        // the shell whose DataContext is rebound when ChatVM swaps (each chat owns its own surface), so
+        // the grid — and the glow living in it — survive the swap. Disposing + recreating the controller
+        // here (as the preview panel below does) would destroy the welcome glow and spawn a fresh one
+        // already at the chat state, so the field could never visibly GLIDE from the hero down to the
+        // composer — it would just appear there. Keeping the SAME field and repointing it is what lets
+        // the presence travel from welcome to an opened chat.
+        if (_presenceController is null)
+        {
+            _presenceController = new PresenceController(contentGrid);
+            _presenceController.Attach(chatViewModel);
+        }
+        else
+        {
+            _presenceController.Repoint(chatViewModel);
+        }
 
         AttachWorkspaceRail(chatViewModel);
     }
@@ -454,11 +468,18 @@ public partial class ChatWorkspaceView : UserControl, IDisposable
     {
         DetachWorkspaceRail();
         DisposeCts(ref _railAnimCts);
-        _presenceController?.Dispose();
-        _presenceController = null;
+        // The presence controller is intentionally NOT disposed here: it persists across chat-surface
+        // swaps (this method runs on every DataContext rebind) and is torn down only when the view
+        // genuinely leaves the visual tree — see DisposePresence / OnDetachedFromVisualTree.
         _previewPanel?.Dispose();
         _previewPanel = null;
         _attachedDataStore = null;
         _attachedChatViewModel = null;
+    }
+
+    private void DisposePresence()
+    {
+        _presenceController?.Dispose();
+        _presenceController = null;
     }
 }

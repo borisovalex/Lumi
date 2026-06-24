@@ -50,6 +50,20 @@ public sealed class PresenceController : IDisposable
     private DispatcherTimer? _focusTimer;
     private DateTime _focusSettleUntil;
 
+    // One-shot deferral for the welcome -> existing-chat hand-off. Opening a chat with history
+    // triggers a heavy transcript rebuild that briefly STALLS the UI thread. The focus glide is a
+    // render-thread spring whose live state is read off a wall-clock; if it is armed into that stall
+    // the render commit is delayed while the clock advances, so the follow timer's re-aims evaluate
+    // the spring as already settled and seed a teleport -> the descent snaps instead of pouring down.
+    // (Other chat-opens move well because they have no comparable focus travel.) So we hold the bright
+    // welcome Halo lit at the hero and DEFER the hand-off until a Background tick arrives on-schedule
+    // (UI thread idle again) with the composer realized -> the glide is then armed in the clear.
+    private DispatcherTimer? _armTimer;
+    private bool _armPending;
+    private DateTime _armDeadline;
+    private DateTime _armLastTick;
+    private int _armReadyTicks;
+
     // Focus-target controls, found lazily in the host's visual tree (no production hooks needed).
     private Border? _welcomeOrb;
     private ItemsControl? _transcript;
@@ -122,6 +136,109 @@ public sealed class PresenceController : IDisposable
         UpdatePresence();
     }
 
+    /// <summary>
+    /// Re-point the SAME persistent field at a different chat surface. The app swaps the entire
+    /// <see cref="ChatViewModel"/> instance on a chat open (each chat gets its own surface), so the
+    /// host view re-creates its preview panel — but the glow must NOT be torn down with it. Unlike
+    /// <see cref="Attach"/> this preserves <see cref="_lastObservedChat"/>, so the welcome(null) ->
+    /// existing transition is still recognised across the surface swap and the one continuous field
+    /// GLIDES from the hero down to the composer, instead of the welcome glow being destroyed and a
+    /// fresh one reborn already at the composer (which reads as "it doesn't move").
+    /// </summary>
+    public void Repoint(ChatViewModel vm)
+    {
+        ArgumentNullException.ThrowIfNull(vm);
+        if (ReferenceEquals(_vm, vm))
+            return;
+
+        // Swap observers WITHOUT going through Detach() — Detach nulls _lastObservedChat, which would
+        // erase the "came from welcome" signal the transition below depends on.
+        if (_vm is not null)
+        {
+            _vm.PropertyChanged -= OnVmPropertyChanged;
+            _vm.QuestionAsked -= OnQuestionAsked;
+            _vm.WorkspaceContentChanged -= OnWorkspaceContentChanged;
+        }
+        CancelDeferredArm();
+
+        _vm = vm;
+        vm.PropertyChanged += OnVmPropertyChanged;
+        vm.QuestionAsked += OnQuestionAsked;
+        vm.WorkspaceContentChanged += OnWorkspaceContentChanged;
+
+        // Re-seed the edge-trackers from the new surface so subsequent send/finish/split/error
+        // gestures fire correctly — but deliberately leave _lastObservedChat pointing at what the
+        // field was last showing, so EvaluateChatChange can read the real delta.
+        _wasBusy = vm.IsBusy;
+        _wasWorking = vm.IsBusy || vm.IsStreaming;
+        _lastHadErrors = vm.HasErrorActivities;
+
+        _companionPoint = null;
+        _lastSplitOpen = AnyIslandOpen(vm);
+        if (_lastSplitOpen)
+        {
+            ReaimCompanion(vm);
+            ArmCompanionSettle();
+        }
+        else
+        {
+            _presence.Merge();
+        }
+
+        EvaluateChatChange(vm.CurrentChat);
+    }
+
+    /// <summary>
+    /// Drive the field from a change of displayed chat. Shared by the in-surface property change and
+    /// the cross-surface <see cref="Repoint"/> so both treat a welcome -> existing hand-off identically.
+    /// </summary>
+    private void EvaluateChatChange(Chat? current)
+    {
+        if (_vm is not { } vm)
+            return;
+        if (ReferenceEquals(current, _lastObservedChat))
+            return;
+
+        var fromWelcome = _lastObservedChat is null;
+        _lastObservedChat = current;
+
+        // Any in-flight deferred arm is stale the moment the chat changes again.
+        CancelDeferredArm();
+
+        _attentionPending = false;
+        if (current is { Messages.Count: > 0 })
+        {
+            // Existing chat: a load rebuild follows and replaces the workspace collections,
+            // so re-baseline from current state and consume that one rebuild.
+            SeedWorkspaceBaseline(vm);
+            _suppressNextRebuild = true;
+
+            if (fromWelcome)
+            {
+                // welcome -> existing is the ONE chat-open that pairs a big intended focus move
+                // (hero -> composer) with that heavy rebuild. Keep the welcome Halo lit and DEFER
+                // the hand-off until the load drains; then the bright pool RIDES the focus glide
+                // DOWN in the clear (see StrataPresence.UpdateHalo) instead of snapping mid-stall.
+                BeginDeferredArm();
+                return;
+            }
+            // existing -> existing rests at the composer in both chats (no big move), so even
+            // though a rebuild follows there is nothing to desync — render immediately.
+        }
+        else
+        {
+            // New/empty chat (or welcome): no load rebuild follows, so baseline at zero and
+            // don't suppress — that keeps the very first produced file/source/edit's breath.
+            _deliverableCount = 0;
+            _changeCount = 0;
+            _sourceCount = 0;
+            _suppressNextRebuild = false;
+            if (current is { Messages.Count: 0 })
+                _presence.Pulse(PresencePulse.Awaken);
+        }
+        UpdatePresence();
+    }
+
     /// <summary>Stop observing the current view-model (the field stays, at rest).</summary>
     public void Detach()
     {
@@ -135,6 +252,7 @@ public sealed class PresenceController : IDisposable
         _lastObservedChat = null;
         _companionPoint = null;
         _focusTimer?.Stop();
+        CancelDeferredArm();
     }
 
     public void Dispose()
@@ -142,6 +260,8 @@ public sealed class PresenceController : IDisposable
         Detach();
         _focusTimer?.Stop();
         _focusTimer = null;
+        _armTimer?.Stop();
+        _armTimer = null;
         _host.Children.Remove(_presence);
         _presence.Dispose();
     }
@@ -159,41 +279,8 @@ public sealed class PresenceController : IDisposable
         switch (e.PropertyName)
         {
             case nameof(ChatViewModel.CurrentChat):
-            {
-                var current = vm.CurrentChat;
-                if (ReferenceEquals(current, _lastObservedChat))
-                    break;
-                var fromWelcome = _lastObservedChat is null;
-                _lastObservedChat = current;
-
-                _attentionPending = false;
-                if (current is { Messages.Count: > 0 })
-                {
-                    // Existing chat: a load rebuild follows and replaces the workspace collections,
-                    // so re-baseline from current state and consume that one rebuild.
-                    SeedWorkspaceBaseline(vm);
-                    _suppressNextRebuild = true;
-                    // Coming from the welcome canvas, hand the presence off into the conversation:
-                    // a soft "arrival" swell rides the focus glide down from the Lumi mark, so the
-                    // new-chat → existing-chat change reads as the light *travelling and settling*
-                    // here, not an instant swap.
-                    if (fromWelcome)
-                        _presence.Pulse(PresencePulse.Settle);
-                }
-                else
-                {
-                    // New/empty chat (or welcome): no load rebuild follows, so baseline at zero and
-                    // don't suppress — that keeps the very first produced file/source/edit's breath.
-                    _deliverableCount = 0;
-                    _changeCount = 0;
-                    _sourceCount = 0;
-                    _suppressNextRebuild = false;
-                    if (current is { Messages.Count: 0 })
-                        _presence.Pulse(PresencePulse.Awaken);
-                }
-                UpdatePresence();
+                EvaluateChatChange(vm.CurrentChat);
                 break;
-            }
 
             case nameof(ChatViewModel.IsBusy):
             {
@@ -205,9 +292,9 @@ public sealed class PresenceController : IDisposable
                     _attentionPending = false;
                 }
                 _wasBusy = busy;
-                // Lift BEFORE UpdatePresence re-aims the focus: the gate reads the field's resting
-                // position (still at the composer) to tell a send-in-existing-chat from the welcome canvas.
-                MaybeLiftOnWorkStart();
+                // Fire the felt vertical edge gesture BEFORE UpdatePresence re-aims the focus: the gate
+                // reads the field's resting position to tell a send/finish-in-existing-chat from welcome.
+                UpdateWorkEdge();
                 UpdatePresence();
                 break;
             }
@@ -217,7 +304,7 @@ public sealed class PresenceController : IDisposable
                 // Streaming resuming means a pending question was answered.
                 if (vm.IsStreaming)
                     _attentionPending = false;
-                MaybeLiftOnWorkStart();
+                UpdateWorkEdge();
                 UpdatePresence();
                 break;
             }
@@ -254,20 +341,33 @@ public sealed class PresenceController : IDisposable
     }
 
     /// <summary>
-    /// The instant Lumi takes a turn (work begins) in an <i>existing</i> chat — where the field is
-    /// resting low at the composer — lift the whole presence up off the composer so the send reads as
-    /// the glow rising into the conversation. Gated on the field actually sitting low (≈ the composer),
-    /// so it never fires on the welcome canvas, whose luminance is centred high on the Lumi mark. The
-    /// sustained new height is carried by <see cref="UpdateFocusTarget"/> retargeting to the active turn;
-    /// this is the felt "lift-off" kick on top of it. Edge-tracked so a turn lifts exactly once.
+    /// Drives the felt vertical "move" at the edges of a turn in an <i>existing</i> chat:
+    /// <list type="bullet">
+    /// <item>On the <b>rising</b> edge (work begins) — where the field rests low at the composer — lift
+    /// the whole presence UP off the composer so the send reads as the glow rising into the conversation.</item>
+    /// <item>On the <b>falling</b> edge (turn finishes) — where the field sits high at the active answer —
+    /// pour it back DOWN to settle at the composer (the mirror of the lift), so completing reads as the
+    /// light descending home.</item>
+    /// </list>
+    /// Each gesture is gated on the field actually being where the move starts (low ≈ composer for the
+    /// lift, high ≈ answer for the descent), so neither fires on the welcome canvas (whose luminance is
+    /// centred high on the Lumi mark) nor when the field is already at rest. The sustained new height is
+    /// carried by <see cref="UpdateFocusTarget"/>; this is the felt kick on top of it. Edge-tracked via
+    /// <see cref="_wasWorking"/> so each transition fires exactly once, and called BEFORE
+    /// <see cref="UpdatePresence"/> so the gate reads the field's pre-move resting position.
     /// </summary>
-    private void MaybeLiftOnWorkStart()
+    private void UpdateWorkEdge()
     {
         if (_vm is not { } vm)
             return;
         var working = vm.IsBusy || vm.IsStreaming;
-        if (working && !_wasWorking && vm.CurrentChat is not null && _presence.FocusPoint.Y >= 0.58)
-            _presence.Lift();
+        if (vm.CurrentChat is not null)
+        {
+            if (working && !_wasWorking && _presence.FocusPoint.Y >= 0.58)
+                _presence.Lift();
+            else if (!working && _wasWorking && _presence.FocusPoint.Y < 0.58)
+                _presence.Descend();
+        }
         _wasWorking = working;
     }
 
@@ -391,6 +491,9 @@ public sealed class PresenceController : IDisposable
         if (_vm is not { } vm)
             return;
 
+        // Any state we render here supersedes a pending welcome -> existing deferral (this is also the
+        // path the deferred arm itself takes once the load drains), so clear it and proceed.
+        CancelDeferredArm();
         PresenceState state;
         if (vm.CurrentChat is null)
             state = PresenceState.Dormant;
@@ -427,6 +530,11 @@ public sealed class PresenceController : IDisposable
     private void UpdateFocusTarget()
     {
         if (_vm is not { } vm)
+            return;
+
+        // While a welcome -> existing hand-off is deferred, keep the welcome luminance pooled at the
+        // hero; the focus glide is armed (once) when the load drains, never re-aimed into the stall.
+        if (_armPending)
             return;
 
         var working = vm.IsBusy || vm.IsStreaming || _attentionPending;
@@ -570,7 +678,88 @@ public sealed class PresenceController : IDisposable
         return timer;
     }
 
-    // ── Focus-target lookups in the host visual tree (no production hooks) ────────────
+    // ── Deferred welcome -> existing-chat arm (glide in the clear, after the load drains) ─────
+
+    /// <summary>
+    /// Hold the welcome luminance and arm the new -> existing descent only once the chat-open's heavy
+    /// transcript rebuild has drained off the UI thread, so the render-thread focus spring is armed in
+    /// the clear (its wall-clock baseline matches the render commit) and pours down smoothly.
+    /// </summary>
+    private void BeginDeferredArm()
+    {
+        _armPending = true;
+        _armReadyTicks = 0;
+        _armLastTick = DateTime.UtcNow;
+        // Safety cap: never let the hand-off get stuck behind a pathologically long rebuild.
+        _armDeadline = DateTime.UtcNow + TimeSpan.FromMilliseconds(1200);
+
+        _armTimer ??= CreateArmTimer();
+        if (!_armTimer.IsEnabled)
+            _armTimer.Start();
+    }
+
+    private void CancelDeferredArm()
+    {
+        _armPending = false;
+        _armReadyTicks = 0;
+        _armTimer?.Stop();
+    }
+
+    private DispatcherTimer CreateArmTimer()
+    {
+        // Background priority: a tick only fires when nothing higher-priority is queued, so a run of
+        // on-schedule ticks is direct evidence the UI thread has idle headroom again (rebuild drained).
+        var timer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(50),
+        };
+        timer.Tick += (_, _) =>
+        {
+            if (!_armPending)
+            {
+                _armTimer?.Stop();
+                return;
+            }
+
+            var now = DateTime.UtcNow;
+            var gap = (now - _armLastTick).TotalMilliseconds;
+            _armLastTick = now;
+
+            // The composer realizes as part of the chat view's layout — its presence (with real bounds)
+            // confirms the canvas the descent aims at actually exists yet.
+            var composerReady = _vm is not null
+                && TryGetControlFocus("ComposerContainer", 0.28, 0.16, 0.86) is not null;
+
+            // Two consecutive on-schedule ticks (~100ms of calm) with the composer laid out means the
+            // load has genuinely drained — a single lucky gap mid-rebuild won't trip it.
+            if (gap <= 130 && composerReady)
+                _armReadyTicks++;
+            else
+                _armReadyTicks = 0;
+
+            if (_armReadyTicks >= 2 || now >= _armDeadline)
+                CompleteDeferredArm();
+        };
+        return timer;
+    }
+
+    /// <summary>
+    /// Fires the welcome -> existing descent once the load has drained: a whole-field <see cref="StrataPresence.Descend"/>
+    /// impulse (the felt downward "pour" — the SAME punchy gesture the send/finish edges use, so this reads as
+    /// a real position-to-position move, not just the slower partial focus glide) followed by
+    /// <see cref="UpdatePresence"/> which re-aims the focus to the composer and rides the Halo down. The
+    /// impulse is a fixed render-thread keyframe animation, so unlike the velocity-preserving focus spring it
+    /// is immune to any residual UI-thread stall — the motion shows even if the rebuild over-ran the deadline.
+    /// </summary>
+    private void CompleteDeferredArm()
+    {
+        // Fire the felt impulse BEFORE UpdatePresence re-aims the focus (matching the work-edge gesture order),
+        // so the punch reads off the field's resting welcome position.
+        _presence.Descend();
+        // Renders Idle + extinguishes the Halo (ride-down) + aims the focus at the composer, and
+        // CancelDeferredArm (called inside) stops the arm timer — the descent is now armed in the clear.
+        UpdatePresence();
+    }
 
     private Border? ResolveWelcomeOrb()
     {
