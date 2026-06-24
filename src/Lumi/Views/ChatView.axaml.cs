@@ -855,8 +855,7 @@ public partial class ChatView : UserControl
     {
         if (_tailRecoveryQueued
             || _subscribedVm is not { CurrentChat: not null, IsBusy: false, IsLoadingChat: false }
-            || _chatShell is null
-            || _chatShell.IsPinnedToBottom)
+            || _chatShell is null)
         {
             return;
         }
@@ -876,9 +875,29 @@ public partial class ChatView : UserControl
         }
 
         if (_subscribedVm is not { CurrentChat: not null, IsBusy: false, IsLoadingChat: false } viewModel
-            || _chatShell is null
-            || _chatShell.IsPinnedToBottom)
+            || _chatShell is null)
         {
+            return;
+        }
+
+        // While the user is following the tail, the just-completed assistant turn must end up
+        // mounted and visible. The paging controller mounts a streamed tail turn only when the
+        // distance-based IsPinnedToBottom is true, but that flips false transiently as a turn grows
+        // past its placeholder height (StrataChatShell re-pins on the next layout pass). A turn
+        // appended during that window is never mounted, so the response stays invisible until a chat
+        // switch rebuilds the transcript. Force-mount the latest tail and snap to the end — the
+        // completion-time counterpart to the EnsureLatestMounted done on user-send. Gate on
+        // IsFollowingTail (intent) rather than IsPinnedToBottom (distance) so the transient-unpinned
+        // window is still covered; a deliberate scroll-away keeps the anchored, non-disruptive path.
+        if (_chatShell.IsFollowingTail)
+        {
+            if (viewModel.EnsureLatestTranscriptMounted())
+            {
+                await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
+                SyncTranscriptPinnedState();
+                Dispatcher.UIThread.Post(() => _chatShell?.ScrollToEnd(), DispatcherPriority.Loaded);
+            }
+
             return;
         }
 

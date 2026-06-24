@@ -538,6 +538,49 @@ public sealed class TranscriptPagingTests
     }
 
     [Fact]
+    public void CompletedTurnAppendedWhileTransientlyUnpinned_IsRecoveredByEnsureLatestMounted()
+    {
+        // Guards the controller-level mounting primitive that the "response invisible until I switch
+        // chats" fix relies on (the view gate that *calls* this primitive lives in ChatView and is
+        // exercised manually — it can't be driven deterministically in the headless harness without a
+        // shell/controller desync artifact). The bug: while the user follows the tail, a streamed turn
+        // can grow past its placeholder height and momentarily report IsPinnedToBottom == false before
+        // the shell re-pins; if the final assistant turn is appended during that window,
+        // OnSourceTurnsCollectionChanged skips mounting it (shouldTrackLatestTail requires
+        // IsPinnedToBottom). This asserts the recovery primitive — EnsureLatestMounted, which the view
+        // now invokes on completion while following the tail — brings such a stranded tail turn back
+        // into the mounted window. If this regresses, the fix cannot surface the response.
+        var controller = new TranscriptWindowController(new TranscriptPagingOptions
+        {
+            MaxPageWeight = 4,
+            MaxTurnsPerPage = 1,
+            MinInitialPages = 1,
+            MaxMountedPages = 3,
+        });
+        var source = CreateTurns(5, measuredHeightFactory: _ => 120);
+
+        controller.BindTranscript(source, "transient-unpinned");
+        controller.ResetToLatest(200, "transient-unpinned");
+
+        // Distance-based unpin while the user is still following the tail (transient layout growth).
+        controller.UpdatePinnedState(false, 240, "transient-unpinned");
+
+        // The final assistant turn lands during the transient-unpinned window.
+        source.Add(CreateTurn(5, measuredHeight: 120));
+
+        // Bug: the new turn is not auto-mounted by the streaming-time collection-changed path.
+        Assert.DoesNotContain(controller.MountedTurns, turn => turn.StableId == "turn:0005");
+
+        // Fix: the view force-mounts the latest tail (EnsureLatestMounted) while following the tail,
+        // regardless of the transient pin state, so the response becomes visible without a chat switch.
+        var changed = controller.EnsureLatestMounted("assistant-completed");
+
+        Assert.True(changed);
+        Assert.Equal("turn:0005", controller.MountedTurns[^1].StableId);
+        Assert.True(controller.CaptureSnapshot().MountedPageCount <= 3);
+    }
+
+    [Fact]
     public void UserSendsMessageAfterScrollUp_NewTurnIsMountedViaEnsureLatest()
     {
         var controller = new TranscriptWindowController(new TranscriptPagingOptions
