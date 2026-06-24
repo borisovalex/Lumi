@@ -468,34 +468,78 @@ public class CopilotService : IAsyncDisposable
         return (long)Math.Round(tokens.Value);
     }
 
-    /// <summary>Returns the cheapest/fastest model ID from the cached model list.
-    /// Uses billing multiplier as a proxy for speed — lower cost ≈ faster/lighter.
-    /// Falls back to models whose name suggests a lightweight tier (e.g. "mini", "flash").</summary>
+    /// <summary>Known fast, low-latency models preferred for lightweight background work
+    /// (chat titles and follow-up suggestions), in priority order. The first one the
+    /// signed-in account can actually access wins; if none are available we fall back to a
+    /// cost-based heuristic. gpt-5.4-mini leads because it is fast and produces good
+    /// lightweight output.</summary>
+    internal static readonly string[] PreferredFastModelIds =
+    {
+        "gpt-5.4-mini",
+        "gpt-5-mini",
+        "gemini-3.5-flash",
+        "claude-haiku-4.5",
+    };
+
+    /// <summary>Returns the model ID to use for fast/lightweight sessions (titles, suggestions).
+    /// Prefers a known fast model (<see cref="PreferredFastModelIds"/>) when the account has
+    /// access; otherwise uses the lowest billing multiplier as a proxy for speed, then a
+    /// lightweight-sounding name (e.g. "mini", "flash"), then the first available model.</summary>
     public async Task<string?> GetFastestModelIdAsync(CancellationToken ct = default)
     {
         if (_fastestModelId is not null) return _fastestModelId;
         try
         {
             var models = await GetModelsAsync(ct);
-
-            // Primary: lowest billing multiplier
-            _fastestModelId = models
-                .Where(m => m.Billing is not null)
-                .OrderBy(m => m.Billing!.Multiplier)
-                .FirstOrDefault()?.Id;
-
-            // Fallback: pick a model whose name hints at a lightweight tier
-            _fastestModelId ??= models
-                .FirstOrDefault(m =>
-                    m.Id.Contains("mini", StringComparison.OrdinalIgnoreCase) ||
-                    m.Id.Contains("flash", StringComparison.OrdinalIgnoreCase) ||
-                    m.Id.Contains("haiku", StringComparison.OrdinalIgnoreCase))?.Id;
-
-            // Last resort: just use the first available model
-            _fastestModelId ??= models.FirstOrDefault()?.Id;
+            var candidates = models
+                .Where(m => !string.IsNullOrWhiteSpace(m.Id))
+                .Select(m => (m.Id, Multiplier: m.Billing is null ? (double?)null : Convert.ToDouble(m.Billing.Multiplier)))
+                .ToList();
+            _fastestModelId = SelectFastestModelId(candidates, PreferredFastModelIds);
         }
         catch { /* best effort — fall back to default model */ }
         return _fastestModelId;
+    }
+
+    /// <summary>Pure selection logic for <see cref="GetFastestModelIdAsync"/>, separated so it
+    /// can be unit-tested without a live connection. <paramref name="models"/> is the available
+    /// model list (id + optional billing multiplier); <paramref name="preferredIds"/> is the
+    /// priority allowlist of known-fast models.</summary>
+    internal static string? SelectFastestModelId(
+        IReadOnlyList<(string Id, double? Multiplier)> models,
+        IReadOnlyList<string> preferredIds)
+    {
+        if (models is null || models.Count == 0)
+            return null;
+
+        // Preferred: first known-fast model the account can access, in priority order.
+        foreach (var preferred in preferredIds)
+        {
+            var match = models.FirstOrDefault(m =>
+                string.Equals(m.Id, preferred, StringComparison.OrdinalIgnoreCase));
+            if (match.Id is not null)
+                return match.Id;
+        }
+
+        // Lowest billing multiplier — cheapest ≈ lightest/fastest.
+        var cheapest = models
+            .Where(m => m.Multiplier is not null)
+            .OrderBy(m => m.Multiplier!.Value)
+            .Select(m => m.Id)
+            .FirstOrDefault();
+        if (cheapest is not null)
+            return cheapest;
+
+        // Name hints at a lightweight tier.
+        var lightweight = models.FirstOrDefault(m =>
+            m.Id.Contains("mini", StringComparison.OrdinalIgnoreCase) ||
+            m.Id.Contains("flash", StringComparison.OrdinalIgnoreCase) ||
+            m.Id.Contains("haiku", StringComparison.OrdinalIgnoreCase)).Id;
+        if (lightweight is not null)
+            return lightweight;
+
+        // Last resort: first available model.
+        return models[0].Id;
     }
 
     /// <summary>Creates a new Copilot session with the given configuration.</summary>
