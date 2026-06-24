@@ -1319,13 +1319,21 @@ public partial class ChatViewModel
             var changes = await changesTask;
             var worktrees = await worktreesTask;
 
-            // Exclude the main repo worktree (it's the "Local" option)
-            // Normalize paths to handle forward/backward slash differences from git output
+            // Exclude the main repo worktree (it's the "Local" option). git reports the main
+            // worktree as the repository root, which differs from the project working directory
+            // when that directory is a subfolder — so exclude by git root, not just project dir.
+            // Normalize paths to handle forward/backward slash differences from git output.
             static string NormalizePath(string p) =>
                 Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var normalizedProjectDir = NormalizePath(projectDir);
+            var gitRoot = GitService.FindRepoRoot(projectDir);
+            var normalizedGitRoot = gitRoot is not null ? NormalizePath(gitRoot) : normalizedProjectDir;
             worktrees.RemoveAll(w =>
-                string.Equals(NormalizePath(w.Path), normalizedProjectDir, StringComparison.OrdinalIgnoreCase));
+            {
+                var normalizedWorktree = NormalizePath(w.Path);
+                return string.Equals(normalizedWorktree, normalizedProjectDir, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(normalizedWorktree, normalizedGitRoot, StringComparison.OrdinalIgnoreCase);
+            });
 
             // A newer refresh was started while we were awaiting — discard these stale results.
             if (version != Volatile.Read(ref _gitRefreshVersion))

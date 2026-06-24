@@ -454,33 +454,34 @@ public partial class ChatViewModel
     /// </summary>
     private string GetEffectiveWorkingDirectory()
     {
-        // If worktree mode is active, use the worktree path
-        if (IsWorktreeMode && WorktreePath is { Length: > 0 } wt && Directory.Exists(wt))
-            return wt;
-
         var pid = CurrentChat?.ProjectId ?? _pendingProjectId ?? ActiveProjectFilterId;
-        if (pid.HasValue)
-        {
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == pid.Value);
-            if (project is { WorkingDirectory: { Length: > 0 } dir } && Directory.Exists(dir))
-                return dir;
-        }
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var worktreePath = IsWorktreeMode ? WorktreePath : null;
+        return ResolveEffectiveWorkingDirectory(pid, worktreePath);
     }
 
     private string GetEffectiveWorkingDirectory(Chat chat)
+        => ResolveEffectiveWorkingDirectory(chat.ProjectId, chat.WorktreePath);
+
+    /// <summary>
+    /// Shared resolution for the directory a chat actually runs in. When a worktree is active the
+    /// stored path is the worktree <em>root</em>; this maps the project's subpath into the worktree
+    /// so <c>.github</c> instructions, skills/agents, MCP config, and the SDK working directory all
+    /// resolve from the same folder they would in local mode (critical when the project working
+    /// directory is a subfolder of the git root, e.g. a monorepo app).
+    /// </summary>
+    private string ResolveEffectiveWorkingDirectory(Guid? projectId, string? worktreePath)
     {
-        if (chat.WorktreePath is { Length: > 0 } wt && Directory.Exists(wt))
-            return wt;
+        var project = projectId.HasValue
+            ? _dataStore.Data.Projects.FirstOrDefault(p => p.Id == projectId.Value)
+            : null;
+        var projectDir = project is { WorkingDirectory: { Length: > 0 } dir } && Directory.Exists(dir)
+            ? dir
+            : null;
 
-        if (chat.ProjectId.HasValue)
-        {
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == chat.ProjectId.Value);
-            if (project is { WorkingDirectory: { Length: > 0 } dir } && Directory.Exists(dir))
-                return dir;
-        }
+        if (worktreePath is { Length: > 0 } wt && Directory.Exists(wt))
+            return GitService.ResolveWorktreeWorkingDirectory(wt, projectDir);
 
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return projectDir ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     }
 
     private Project? GetCurrentProject()

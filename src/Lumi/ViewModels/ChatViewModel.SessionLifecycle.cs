@@ -2016,19 +2016,7 @@ public partial class ChatViewModel
     }
 
     private string GetEffectiveWorkingDirectoryForChat(Chat chat)
-    {
-        if (chat.WorktreePath is { Length: > 0 } worktreePath && Directory.Exists(worktreePath))
-            return worktreePath;
-
-        if (chat.ProjectId.HasValue)
-        {
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == chat.ProjectId.Value);
-            if (project is { WorkingDirectory: { Length: > 0 } workingDirectory } && Directory.Exists(workingDirectory))
-                return workingDirectory;
-        }
-
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    }
+        => ResolveEffectiveWorkingDirectory(chat.ProjectId, chat.WorktreePath);
 
     private static string BuildWorkspaceFileChangedPayloadJson(
         string filePath,

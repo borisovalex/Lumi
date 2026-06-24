@@ -32,6 +32,90 @@ public static class GitService
         return false;
     }
 
+    /// <summary>
+    /// Walks up from <paramref name="dir"/> to find the repository root — the directory that
+    /// contains a <c>.git</c> folder (normal checkout) or a <c>.git</c> file (linked worktree /
+    /// submodule). Returns <c>null</c> when the path is not inside a git repository. This is the
+    /// synchronous counterpart to <c>git rev-parse --show-toplevel</c> and is safe to call on hot
+    /// paths because it only stats a handful of parent directories.
+    /// </summary>
+    public static string? FindRepoRoot(string? dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir))
+            return null;
+
+        DirectoryInfo? d;
+        try
+        {
+            d = new DirectoryInfo(dir);
+        }
+        catch
+        {
+            return null;
+        }
+
+        while (d is not null)
+        {
+            if (Directory.Exists(Path.Combine(d.FullName, ".git")) || File.Exists(Path.Combine(d.FullName, ".git")))
+                return d.FullName;
+            d = d.Parent;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Maps a project working directory into the equivalent location inside a worktree. A git
+    /// worktree mirrors the whole repository tree, so when the project working directory is a
+    /// subfolder of the repo (e.g. <c>apps/web</c>), the effective directory inside the worktree
+    /// is that same subpath under the worktree root (<c>&lt;worktreeRoot&gt;/apps/web</c>). This keeps
+    /// <c>.github</c> context, skills/agents discovery, MCP config, and the SDK working directory
+    /// resolving exactly as they do in local mode. Falls back to the worktree root when the project
+    /// directory is the repo root, when no mapping can be determined, or when the mapped path does
+    /// not exist on disk.
+    /// </summary>
+    public static string ResolveWorktreeWorkingDirectory(string worktreeRoot, string? projectDir)
+    {
+        if (string.IsNullOrWhiteSpace(worktreeRoot) || string.IsNullOrWhiteSpace(projectDir))
+            return worktreeRoot;
+
+        var gitRoot = FindRepoRoot(projectDir);
+        if (gitRoot is null)
+            return worktreeRoot;
+
+        string relative;
+        try
+        {
+            relative = Path.GetRelativePath(gitRoot, projectDir);
+        }
+        catch
+        {
+            return worktreeRoot;
+        }
+
+        // Project dir == git root, the relative path escapes the repo, or it is absolute:
+        // there is no meaningful subpath to map, so the worktree root is the effective dir.
+        if (string.IsNullOrEmpty(relative)
+            || relative == "."
+            || relative.StartsWith("..", StringComparison.Ordinal)
+            || Path.IsPathRooted(relative))
+        {
+            return worktreeRoot;
+        }
+
+        string candidate;
+        try
+        {
+            candidate = Path.GetFullPath(Path.Combine(worktreeRoot, relative));
+        }
+        catch
+        {
+            return worktreeRoot;
+        }
+
+        return Directory.Exists(candidate) ? candidate : worktreeRoot;
+    }
+
     /// <summary>Gets the current branch name, or null if not a git repo.</summary>
     public static async Task<string?> GetCurrentBranchAsync(string dir)
     {
@@ -148,32 +232,40 @@ public static class GitService
         return await RunGitAsync(dir, "diff --stat --stat-width=60").ConfigureAwait(false);
     }
 
-    /// <summary>Creates a git worktree as a sibling directory to the repo. Returns the worktree path.</summary>
+    /// <summary>Creates a git worktree as a sibling directory to the repository root. Returns the
+    /// worktree root path. When <paramref name="repoDir"/> is a subfolder of the repo, the worktree
+    /// is still anchored to the repository root so it lands beside the main checkout (never nested
+    /// inside it). Callers map the project subpath into the worktree via
+    /// <see cref="ResolveWorktreeWorkingDirectory"/>.</summary>
     public static async Task<string?> CreateWorktreeAsync(string repoDir, string branchName)
     {
-        // Place worktree as sibling: E:\Git\Lumi → E:\Git\Lumi-worktree-abc123
-        var trimmedRepoDir = repoDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var repoName = Path.GetFileName(trimmedRepoDir);
+        // Anchor to the repository root so the worktree is a sibling of the main checkout even when
+        // the project working directory is a subfolder (e.g. a monorepo app). Without this the
+        // worktree would be created beside the subfolder — nested inside the repo — which breaks
+        // git and loses the project's context layout.
+        var gitRoot = FindRepoRoot(repoDir) ?? repoDir;
+        var trimmedRoot = gitRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var repoName = Path.GetFileName(trimmedRoot);
         var safeBranch = branchName.Replace('/', '-').Replace('\\', '-');
-        var parentDir = Path.GetDirectoryName(trimmedRepoDir);
+        var parentDir = Path.GetDirectoryName(trimmedRoot);
         if (parentDir is null) return null;
 
         var worktreePath = Path.Combine(parentDir, $"{repoName}-wt-{safeBranch}");
         if (Directory.Exists(worktreePath))
             return worktreePath; // Already exists
 
-        // Try creating with a new branch first
-        var result = await RunGitAsync(repoDir, $"worktree add \"{worktreePath}\" -b \"{branchName}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
+        // Try creating with a new branch first. Run from the repo root so paths stay predictable.
+        var result = await RunGitAsync(gitRoot, $"worktree add \"{worktreePath}\" -b \"{branchName}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
         if (result is not null && Directory.Exists(worktreePath))
             return worktreePath;
 
         // Branch may already exist — try attaching to it
-        result = await RunGitAsync(repoDir, $"worktree add \"{worktreePath}\" \"{branchName}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
+        result = await RunGitAsync(gitRoot, $"worktree add \"{worktreePath}\" \"{branchName}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
         if (result is not null && Directory.Exists(worktreePath))
             return worktreePath;
 
         // Last resort — create with detached HEAD
-        result = await RunGitAsync(repoDir, $"worktree add --detach \"{worktreePath}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
+        result = await RunGitAsync(gitRoot, $"worktree add --detach \"{worktreePath}\"", WorktreeGitCommandTimeout).ConfigureAwait(false);
         if (result is not null && Directory.Exists(worktreePath))
             return worktreePath;
 
@@ -256,13 +348,26 @@ public static class GitService
         return results;
     }
 
+    // Serializes git invocations process-wide. Running multiple redirected git processes
+    // concurrently is unsafe on Windows: Process.Start marks the stdout/stderr pipe write
+    // handles inheritable while it launches the child, and the Git-for-Windows launcher
+    // (cmd\git.exe) re-execs the real git (mingw64\bin\git.exe) as a grandchild outside the
+    // .NET start lock. That grandchild can inherit a *sibling* git's pipe write handle, so the
+    // sibling's pipe never reaches EOF and ReadToEndAsync hangs forever (observed: refresh
+    // triad branch+status+worktree-list leaving orphaned 0-CPU git processes). Running one git
+    // pipeline at a time closes the handle-inheritance window.
+    private static readonly SemaphoreSlim GitInvocationGate = new(1, 1);
+
     private static async Task<string?> RunGitAsync(string workDir, string args, TimeSpan? timeout = null)
     {
+        var effectiveTimeout = timeout ?? DefaultGitCommandTimeout;
+        await GitInvocationGate.WaitAsync().ConfigureAwait(false);
         try
         {
             var psi = new ProcessStartInfo("git", args)
             {
                 WorkingDirectory = workDir,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -272,24 +377,30 @@ public static class GitService
             using var proc = Process.Start(psi);
             if (proc is null) return null;
 
+            // Close stdin immediately so git can never block waiting on input (e.g. a
+            // credential or config prompt); it should fail fast instead of hanging.
+            try { proc.StandardInput.Close(); } catch { /* stdin may already be gone */ }
+
             var stdoutTask = proc.StandardOutput.ReadToEndAsync();
             var stderrTask = proc.StandardError.ReadToEndAsync();
-            using var timeoutCts = new CancellationTokenSource(timeout ?? DefaultGitCommandTimeout);
+            using var timeoutCts = new CancellationTokenSource(effectiveTimeout);
 
             try
             {
                 await proc.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+                // Bound the output drain by the same deadline. The process having exited does
+                // NOT guarantee the pipes reach EOF — a leaked/inherited write handle in a
+                // grandchild can keep them open, and an unbounded read would hang forever.
+                await Task.WhenAll(stdoutTask, stderrTask).WaitAsync(timeoutCts.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
                 TryKillProcessTree(proc);
                 await WaitForExitQuietlyAsync(proc, TimedOutGitCleanupTimeout).ConfigureAwait(false);
                 await DrainOutputQuietlyAsync(stdoutTask, stderrTask, TimedOutGitCleanupTimeout).ConfigureAwait(false);
-                System.Diagnostics.Debug.WriteLine($"[Lumi] Git command timed out after {(timeout ?? DefaultGitCommandTimeout).TotalSeconds:N0}s: git {args}");
+                System.Diagnostics.Debug.WriteLine($"[Lumi] Git command timed out after {effectiveTimeout.TotalSeconds:N0}s: git {args}");
                 return null;
             }
-
-            await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
 
             var output = stdoutTask.Result;
             return proc.ExitCode == 0 ? output : null;
@@ -298,6 +409,10 @@ public static class GitService
         {
             System.Diagnostics.Debug.WriteLine($"[Lumi] Git command failed: git {args} ({ex.Message})");
             return null;
+        }
+        finally
+        {
+            GitInvocationGate.Release();
         }
     }
 

@@ -1005,10 +1005,94 @@ public sealed class ChatViewModelLeakTests
         var vm = new ChatViewModel(dataStore, new CopilotService());
         vm.SetActiveAgent(activeAgent);
 
-        var configs = InvokePrivate<List<CustomAgentConfig>>(vm, "BuildCustomAgents");
+        var configs = InvokePrivate<List<CustomAgentConfig>>(vm, "BuildCustomAgents", new object[] { null! });
 
         Assert.Contains(configs, cfg => cfg.Name == activeAgent.Name);
         Assert.Contains(configs, cfg => cfg.Name == otherAgent.Name);
+    }
+
+    [Fact]
+    public void BuildCustomAgents_RegistersDiscoveredExternalAgentsAsDelegatableSubagents()
+    {
+        var dataStore = CreateDataStore();
+        dataStore.Data.Agents.Add(new LumiAgent
+        {
+            Name = "Lumi agent",
+            Description = "Built-in persona",
+            SystemPrompt = "You are a Lumi agent."
+        });
+
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+
+        var catalog = new ProjectContextCatalogSnapshot(
+            new[] { new CopilotSkillDefinition("SomeSkill", "desc", "content", @"C:\repo\.github\skills\some\SKILL.md") },
+            new[]
+            {
+                new CopilotAgentDefinition("WebReviewer", "Reviews web app code", "You review TypeScript code.", @"C:\repo\.github\agents\reviewer\AGENT.md"),
+                new CopilotAgentDefinition("Lumi agent", "External duplicate", "External duplicate body.", @"C:\repo\.github\agents\dup\AGENT.md"),
+                new CopilotAgentDefinition("Blank", "No body", "   ", @"C:\repo\.github\agents\blank\AGENT.md"),
+            },
+            Array.Empty<ProjectContextMcpServerDefinition>());
+
+        var configs = InvokePrivate<List<CustomAgentConfig>>(vm, "BuildCustomAgents", new object[] { catalog });
+
+        // External .github/agents agent becomes a delegatable subagent using its AGENT.md body as the prompt.
+        var webReviewer = configs.Single(cfg => cfg.Name == "WebReviewer");
+        Assert.Equal("You review TypeScript code.", webReviewer.Prompt);
+        Assert.Equal("Reviews web app code", webReviewer.Description);
+
+        // Lumi's own agent wins a name collision; the external duplicate is not added.
+        var lumiMatches = configs.Where(cfg => cfg.Name == "Lumi agent").ToList();
+        Assert.Single(lumiMatches);
+        Assert.Equal("You are a Lumi agent.", lumiMatches[0].Prompt);
+
+        // External agents with blank content are skipped.
+        Assert.DoesNotContain(configs, cfg => cfg.Name == "Blank");
+    }
+
+    [Fact]
+    public void AppendAvailableExternalSkillsToPrompt_OmitsSkillsLoadedThroughNativeSkillDirectories()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+
+        var nativeSkillsRoot = Path.Combine(@"C:\repo\apps\web", ".github", "skills");
+        var projectSkill = new CopilotSkillDefinition(
+            "Greeter",
+            "Greet the user by name.",
+            "Greet the user by name.",
+            Path.Combine(nativeSkillsRoot, "greeter", "SKILL.md"));
+        var globalSkill = new CopilotSkillDefinition(
+            "Global Skill",
+            "A user-global skill.",
+            "Global body.",
+            Path.Combine(@"C:\Users\me", ".copilot", "skills", "global", "SKILL.md"));
+        // A loose `<name>.md` directly under the skills root is discovered by Lumi but is NOT
+        // loaded by the native skill tool (which only reads SKILL.md), so it must stay advertised.
+        var looseSkill = new CopilotSkillDefinition(
+            "Loose Skill",
+            "A loose markdown skill.",
+            "Loose body.",
+            Path.Combine(nativeSkillsRoot, "loose.md"));
+
+        var prompt = InvokePrivate<string>(
+            vm,
+            "AppendAvailableExternalSkillsToPrompt",
+            "BASE PROMPT",
+            new[] { projectSkill, globalSkill, looseSkill },
+            Array.Empty<string>(),
+            new[] { nativeSkillsRoot });
+
+        // The project skill is loaded through the native skill tool, so it must not be re-advertised
+        // through the deferred fetch_skill fallback.
+        Assert.DoesNotContain("Greeter", prompt, StringComparison.Ordinal);
+
+        // Skills outside the native skill directories still appear in the fetch_skill advertisement.
+        Assert.Contains("Global Skill", prompt, StringComparison.Ordinal);
+        // A loose `.md` under the native directory is not natively loadable, so it stays advertised.
+        Assert.Contains("Loose Skill", prompt, StringComparison.Ordinal);
+        Assert.Contains("fetch_skill", prompt, StringComparison.Ordinal);
+        Assert.StartsWith("BASE PROMPT", prompt, StringComparison.Ordinal);
     }
 
     [Fact]

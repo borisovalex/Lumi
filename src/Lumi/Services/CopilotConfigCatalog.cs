@@ -98,6 +98,36 @@ public static class CopilotConfigCatalog
     public static CopilotAgentDefinition? FindAgent(string workDir, string name, string? copilotRootOverride = null)
         => Discover(workDir, copilotRootOverride).FindAgent(name);
 
+    /// <summary>
+    /// Returns the workspace-level skill root directories (<c>&lt;workDir&gt;/.github/skills</c>)
+    /// that exist for the given working directories. These roots each contain
+    /// <c>&lt;name&gt;/SKILL.md</c> skill folders and are exactly what the native Copilot skill
+    /// discovery accepts as additional skill directories. The CLI's built-in discovery anchors
+    /// skill lookup at the project/git root, so skills living under a subfolder <c>.github</c>
+    /// (e.g. a monorepo app) are invisible to it; surfacing these roots through
+    /// <c>config.SkillDirectories</c> lets such skills load through the always-present native
+    /// skill tool instead of a deferred fallback.
+    /// </summary>
+    public static IReadOnlyList<string> GetWorkspaceSkillDirectories(IReadOnlyList<string> workDirs)
+    {
+        var directories = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var workDir in NormalizeWorkDirectories(workDirs))
+        {
+            var githubDir = GetGitHubDirectory(workDir);
+            if (githubDir is null)
+                continue;
+
+            foreach (var skillDir in GetExistingDirectories(githubDir, "skills"))
+            {
+                if (seen.Add(skillDir))
+                    directories.Add(skillDir);
+            }
+        }
+
+        return directories;
+    }
+
     private static IReadOnlyList<TDefinition> DiscoverDefinitions<TDefinition>(
         IReadOnlyList<CopilotCatalogSource> sources,
         Func<CopilotCatalogSource, IReadOnlyList<string>> selectDirectories,

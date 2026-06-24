@@ -1256,7 +1256,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             : null;
         var systemPrompt = SystemPromptBuilder.Build(
             _dataStore.Data.Settings, activeAgent, project, allSkills, activeSkills, memories, _dataStore.SnapshotBackgroundJobs());
-        systemPrompt = AppendAvailableExternalSkillsToPrompt(systemPrompt, externalSkills, chat.ActiveExternalSkillNames);
+        systemPrompt = AppendAvailableExternalSkillsToPrompt(systemPrompt, externalSkills, chat.ActiveExternalSkillNames, projectContextCatalog.SkillDirectories);
 
         var sdkAgentName = GetSessionSdkAgentName(chat, CurrentChat, SelectedSdkAgentName);
         var externalAgent = activeAgent is null
@@ -1265,7 +1265,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var skillDirTask = SyncSkillDirectoryAsync(chat.ActiveSkillIds, ct);
         var mcpServers = BuildMcpServers(workDir, projectContextCatalog, chat, activeAgent);
 
-        var customAgents = BuildCustomAgents();
+        var customAgents = BuildCustomAgents(projectContextCatalog);
         var customTools = BuildCustomTools(chat.Id, activeAgent, projectContextCatalog);
         if (!string.IsNullOrWhiteSpace(externalAgent?.Content))
             systemPrompt = (systemPrompt ?? "") + "\n\n--- Active Agent: " + externalAgent.Name + " ---\n" + externalAgent.Content;
@@ -1274,6 +1274,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var dir = await skillDirTask;
         if (!string.IsNullOrWhiteSpace(dir))
             skillDirs.Add(dir);
+
+        // Surface workspace .github/skills (including monorepo subfolders the CLI's git-root-anchored
+        // discovery would miss) to the native skill tool, so they load directly instead of via the
+        // deferred fetch_skill fallback.
+        foreach (var nativeSkillDir in projectContextCatalog.SkillDirectories)
+        {
+            if (!skillDirs.Contains(nativeSkillDir, StringComparer.OrdinalIgnoreCase))
+                skillDirs.Add(nativeSkillDir);
+        }
 
         var selectedModel = ResolveSelectedModelForChat(chat);
         var persistedEffort = ResolvePersistedReasoningEffortForChat(chat, selectedModel);
@@ -2290,10 +2299,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                         WorktreePath = path;
                         targetChat.WorktreePath = path;
 
-                        // Rebase attachment paths before persisting so the saved
-                        // chat has the corrected worktree paths from the start.
+                        // Rebase attachment paths before persisting so the saved chat has the
+                        // corrected worktree paths from the start. Rebase onto the mapped project
+                        // subfolder inside the worktree (not the worktree root) so paths stay valid
+                        // when the project working directory is a subfolder of the git root.
                         if (attachments is { Count: > 0 } && userMsg is not null)
-                            RebaseAttachmentPaths(attachments, userMsg, projectDir, path);
+                        {
+                            var effectiveWorktreeDir = GitService.ResolveWorktreeWorkingDirectory(path, projectDir);
+                            RebaseAttachmentPaths(attachments, userMsg, projectDir, effectiveWorktreeDir);
+                        }
 
                         QueueSaveChat(targetChat, saveIndex: false);
                     }
@@ -2319,7 +2333,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (!needsWorktreeCreation && WorktreePath is { Length: > 0 } wtPath && attachments is { Count: > 0 } && userMsg is not null)
         {
             var projDir = GetProjectWorkingDirectory();
-            RebaseAttachmentPaths(attachments, userMsg, projDir, wtPath);
+            var effectiveWorktreeDir = GitService.ResolveWorktreeWorkingDirectory(wtPath, projDir);
+            RebaseAttachmentPaths(attachments, userMsg, projDir, effectiveWorktreeDir);
         }
 
         if (createdChat)

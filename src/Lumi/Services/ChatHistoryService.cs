@@ -443,8 +443,13 @@ public sealed class ChatHistoryService
 
     private static string? DescribeWorkspace(Chat chat, Project? project)
     {
-        var worktree = chat.WorktreePath is { Length: > 0 } w ? w : null;
         var projectDir = project?.WorkingDirectory is { Length: > 0 } pd ? pd : null;
+
+        // The stored worktree path is the worktree root; map it to the project's subpath so the
+        // reported location matches where the chat actually runs (GetEffectiveWorkingDirectoryForChat).
+        var worktree = chat.WorktreePath is { Length: > 0 } w
+            ? GitService.ResolveWorktreeWorkingDirectory(w, projectDir)
+            : null;
 
         // Mirror GetEffectiveWorkingDirectoryForChat: an existing worktree wins, otherwise the chat
         // effectively runs from the project working directory. Only report a stale path when neither

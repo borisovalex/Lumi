@@ -291,6 +291,21 @@ public sealed class CopilotConfigCatalogTests
             Assert.Contains(catalog.Skills, skill => skill.Name == "Primary Skill");
             Assert.Contains(catalog.Agents, agent => agent.Name == "Additional Agent");
 
+            // Workspace .github/skills roots are surfaced for native skill loading; folders without a
+            // skills directory are not included.
+            Assert.Contains(
+                catalog.SkillDirectories,
+                directory => string.Equals(
+                    directory,
+                    Path.Combine(primaryWorkDir, ".github", "skills"),
+                    StringComparison.OrdinalIgnoreCase));
+            Assert.DoesNotContain(
+                catalog.SkillDirectories,
+                directory => string.Equals(
+                    directory,
+                    Path.Combine(additionalDir, ".github", "skills"),
+                    StringComparison.OrdinalIgnoreCase));
+
             var shared = Assert.Single(catalog.McpServers, server => server.Name == "shared");
             var sharedConfig = Assert.IsType<McpStdioServerConfig>(shared.Config);
             Assert.Equal("primary-command", sharedConfig.Command);
@@ -302,6 +317,43 @@ public sealed class CopilotConfigCatalogTests
             Assert.Equal("https://example.com/mcp", additionalConfig.Url);
             var diagnostic = Assert.Single(catalog.Diagnostics);
             Assert.Contains("duplicate MCP server 'shared'", diagnostic.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+                Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void GetWorkspaceSkillDirectories_ReturnsExistingGithubSkillRootsWithoutDuplicates()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-skilldirs-test-{Guid.NewGuid():N}");
+        var withSkills = Path.Combine(tempRoot, "with");
+        var withoutSkills = Path.Combine(tempRoot, "without");
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(withSkills, ".github", "skills", "greeter"));
+            File.WriteAllText(
+                Path.Combine(withSkills, ".github", "skills", "greeter", "SKILL.md"),
+                """
+                ---
+                name: Greeter
+                description: Greet the user by name.
+                ---
+
+                Greet the user by name.
+                """);
+            Directory.CreateDirectory(Path.Combine(withoutSkills, ".github", "agents"));
+
+            // Duplicate working directory entries must collapse to a single root.
+            var result = CopilotConfigCatalog.GetWorkspaceSkillDirectories(
+                new[] { withSkills, withoutSkills, withSkills });
+
+            var expected = Path.Combine(withSkills, ".github", "skills");
+            Assert.Single(result);
+            Assert.Equal(expected, result[0], ignoreCase: true);
         }
         finally
         {

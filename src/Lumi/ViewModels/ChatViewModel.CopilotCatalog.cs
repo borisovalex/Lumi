@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Lumi.Models;
@@ -151,7 +152,8 @@ public partial class ChatViewModel
     private string AppendAvailableExternalSkillsToPrompt(
         string? systemPrompt,
         IReadOnlyList<CopilotSkillDefinition> externalSkills,
-        IReadOnlyCollection<string> activeExternalSkillNames)
+        IReadOnlyCollection<string> activeExternalSkillNames,
+        IReadOnlyCollection<string> nativeSkillDirectories)
     {
         if (externalSkills.Count == 0)
             return systemPrompt ?? string.Empty;
@@ -161,6 +163,7 @@ public partial class ChatViewModel
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var promptSkills = externalSkills
             .Where(skill => !internalSkillNames.Contains(skill.Name))
+            .Where(skill => !IsSkillUnderNativeDirectory(skill, nativeSkillDirectories))
             .ToList();
         if (promptSkills.Count == 0)
             return systemPrompt ?? string.Empty;
@@ -190,5 +193,55 @@ public partial class ChatViewModel
         }
 
         return builder.ToString();
+    }
+
+    /// <summary>
+    /// True when a discovered skill lives under one of the workspace skill directories that are
+    /// passed to the native skill tool. Such skills are loaded natively, so advertising them again
+    /// through the deferred <c>fetch_skill</c> fallback would be redundant.
+    /// </summary>
+    private static bool IsSkillUnderNativeDirectory(
+        CopilotSkillDefinition skill,
+        IReadOnlyCollection<string> nativeSkillDirectories)
+    {
+        if (nativeSkillDirectories.Count == 0 || string.IsNullOrWhiteSpace(skill.FilePath))
+            return false;
+
+        // The native skill loader only discovers nested `<name>/SKILL.md` files. Lumi also
+        // discovers loose `*.md` files placed directly under a skills directory, which the native
+        // tool will NOT load. Suppressing those from the fetch_skill advertisement would make them
+        // unreachable, so only treat canonical SKILL.md skills as natively loaded.
+        if (!string.Equals(Path.GetFileName(skill.FilePath), "SKILL.md", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        foreach (var directory in nativeSkillDirectories)
+        {
+            if (PathIsUnder(skill.FilePath, directory))
+                return true;
+        }
+
+        return false;
+    }
+
+    private static bool PathIsUnder(string path, string directory)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(directory))
+            return false;
+
+        string fullPath;
+        string fullDirectory;
+        try
+        {
+            fullPath = Path.GetFullPath(path);
+            fullDirectory = Path.GetFullPath(directory)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+
+        return fullPath.StartsWith(fullDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+            || fullPath.StartsWith(fullDirectory + Path.AltDirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 }

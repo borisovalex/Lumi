@@ -20,9 +20,10 @@ namespace Lumi.ViewModels;
 /// </summary>
 public partial class ChatViewModel
 {
-    private List<CustomAgentConfig> BuildCustomAgents()
+    private List<CustomAgentConfig> BuildCustomAgents(ProjectContextCatalogSnapshot? projectContextCatalog = null)
     {
         var agents = new List<CustomAgentConfig>();
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var agent in _dataStore.Data.Agents)
         {
             var agentConfig = new CustomAgentConfig
@@ -37,7 +38,32 @@ public partial class ChatViewModel
                 agentConfig.Tools = [.. ToolDisplayHelper.ToRuntimeToolNames(agent.ToolNames)];
 
             agents.Add(agentConfig);
+            seenNames.Add(agent.Name);
         }
+
+        // Register discovered project-scoped Copilot agents (e.g. .github/agents/*/AGENT.md) as
+        // delegatable subagents, matching the GitHub Copilot CLI which exposes .github/agents in
+        // the Task tool's custom-agent roster. Without this they could only be picked as the active
+        // persona, never delegated to. Lumi's own agents win on a name collision.
+        if (projectContextCatalog is not null)
+        {
+            foreach (var external in projectContextCatalog.Agents)
+            {
+                if (string.IsNullOrWhiteSpace(external.Name)
+                    || string.IsNullOrWhiteSpace(external.Content)
+                    || !seenNames.Add(external.Name))
+                    continue;
+
+                agents.Add(new CustomAgentConfig
+                {
+                    Name = external.Name,
+                    DisplayName = external.Name,
+                    Description = external.Description,
+                    Prompt = external.Content,
+                });
+            }
+        }
+
         return agents;
     }
 

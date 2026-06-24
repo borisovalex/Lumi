@@ -24,11 +24,13 @@ public sealed class ProjectContextCatalogSnapshot
         IReadOnlyList<CopilotSkillDefinition> skills,
         IReadOnlyList<CopilotAgentDefinition> agents,
         IReadOnlyList<ProjectContextMcpServerDefinition> mcpServers,
+        IReadOnlyList<string>? skillDirectories = null,
         IReadOnlyList<ProjectContextCatalogDiagnostic>? diagnostics = null)
     {
         Skills = skills.ToArray();
         Agents = agents.ToArray();
         McpServers = mcpServers.ToArray();
+        SkillDirectories = skillDirectories?.ToArray() ?? [];
         Diagnostics = diagnostics?.ToArray() ?? [];
         _skillsByName = BuildFirstByName(Skills, static skill => skill.Name);
         _agentsByName = BuildFirstByName(Agents, static agent => agent.Name);
@@ -39,6 +41,13 @@ public sealed class ProjectContextCatalogSnapshot
     public IReadOnlyList<CopilotAgentDefinition> Agents { get; }
 
     public IReadOnlyList<ProjectContextMcpServerDefinition> McpServers { get; }
+
+    /// <summary>
+    /// Workspace <c>.github/skills</c> root directories discovered from the effective working
+    /// directory (including monorepo subfolders). Passed to <c>config.SkillDirectories</c> so the
+    /// native Copilot skill tool can load these skills directly instead of via a deferred fallback.
+    /// </summary>
+    public IReadOnlyList<string> SkillDirectories { get; }
 
     public IReadOnlyList<ProjectContextCatalogDiagnostic> Diagnostics { get; }
 
@@ -98,11 +107,13 @@ public static class ProjectContextCatalog
     {
         var contextDirectories = ProjectContextDirectoryHelper.GetExistingContextDirectories(effectiveWorkingDirectory, project);
         var copilotCatalog = CopilotConfigCatalog.Discover(contextDirectories, copilotRootOverride);
+        var skillDirectories = CopilotConfigCatalog.GetWorkspaceSkillDirectories(contextDirectories);
         var mcpCatalog = DiscoverMcpServers(contextDirectories);
         return new ProjectContextCatalogSnapshot(
             copilotCatalog.Skills,
             copilotCatalog.Agents,
             mcpCatalog.Servers,
+            skillDirectories,
             mcpCatalog.Diagnostics);
     }
 
