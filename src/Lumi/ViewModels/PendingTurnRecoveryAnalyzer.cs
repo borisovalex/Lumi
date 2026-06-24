@@ -92,11 +92,13 @@ internal static class PendingTurnRecoveryAnalyzer
 
                 case AssistantMessageEvent assistantMessage:
                     InvalidateAssistantTurnEnd();
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required to detect sub-agent assistant messages.
                     if (string.IsNullOrWhiteSpace(assistantMessage.Data.ParentToolCallId)
                         && !string.IsNullOrWhiteSpace(assistantMessage.Data.Content))
                     {
                         assistantMessages.Add(new RecoveredAssistantMessage(assistantMessage.Data.Content));
                     }
+#pragma warning restore CS0618
                     break;
 
                 case AssistantTurnEndEvent:

@@ -1303,6 +1303,7 @@ public sealed class ChatViewModelLeakTests
             }
         };
 
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; test fixture mirrors the runtime sub-agent payload.
     private static AssistantMessageEvent CreateAssistantMessageEvent(
         string messageId,
         string content,
@@ -1316,6 +1317,7 @@ public sealed class ChatViewModelLeakTests
                 ParentToolCallId = parentToolCallId
             }
         };
+#pragma warning restore CS0618
 
     private sealed class CountingDisposable : IDisposable
     {

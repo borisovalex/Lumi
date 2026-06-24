@@ -46,8 +46,8 @@ public class ModelSelectionHelperTests
         var claudeTiers = ModelSelectionHelper.GetContextWindowTiers("CLAUDE-SONNET-4.6", longContextModelIds);
         var unsupportedTiers = ModelSelectionHelper.GetContextWindowTiers("gpt-5.5", longContextModelIds);
 
-        Assert.Equal(["Default", "Long"], gptTiers);
-        Assert.Equal(["Default", "Long"], claudeTiers);
+        Assert.Equal(["Default", "Long"], gptTiers!);
+        Assert.Equal(["Default", "Long"], claudeTiers!);
         Assert.Null(unsupportedTiers);
     }
 

@@ -279,7 +279,7 @@ public sealed class UiResponsivenessReport
         var categories = new JsonArray();
         foreach (var category in Categories)
         {
-            categories.Add(new JsonObject
+            categories.Add((JsonNode)new JsonObject
             {
                 ["category"] = category.Category,
                 ["actionCount"] = category.ActionCount,
@@ -295,7 +295,7 @@ public sealed class UiResponsivenessReport
         var actions = new JsonArray();
         foreach (var action in Actions)
         {
-            actions.Add(new JsonObject
+            actions.Add((JsonNode)new JsonObject
             {
                 ["actionId"] = action.ActionId,
                 ["category"] = action.Category,

@@ -406,8 +406,8 @@ public sealed class CopilotConfigCatalogTests
             var local = Assert.IsType<McpStdioServerConfig>(
                 Assert.Single(catalog.McpServers, server => server.Name == "agentic-investigation-runner").Config);
             Assert.Equal("pwsh", local.Command);
-            Assert.Equal($"{workDir}/src/Tools/AgenticInvestigationRunner/run-mcp.ps1", local.Args[3]);
-            Assert.Equal("sherlock-diagnostics", local.Args[4]);
+            Assert.Equal($"{workDir}/src/Tools/AgenticInvestigationRunner/run-mcp.ps1", local.Args![3]);
+            Assert.Equal("sherlock-diagnostics", local.Args![4]);
             Assert.NotNull(local.Env);
             Assert.Equal("test-token", local.Env!["RUNNER_TOKEN"]);
 

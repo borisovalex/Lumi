@@ -615,9 +615,11 @@ public partial class ChatViewModel
                     break;
 
                 case AssistantMessageDeltaEvent delta:
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent stream routing.
                     var activeSubagentToolCallIdForAssistantDelta =
                         GetSubagentToolCallIdFromParent(delta.Data.ParentToolCallId)
                         ?? GetCurrentSubagentOutputToolCallId();
+#pragma warning restore CS0618
                     if (!string.IsNullOrWhiteSpace(activeSubagentToolCallIdForAssistantDelta))
                     {
                         GetOrCreateSubagentStream(
@@ -634,9 +636,11 @@ public partial class ChatViewModel
                     break;
 
                 case AssistantMessageEvent msg:
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent stream routing.
                     var activeSubagentToolCallIdForAssistantMessage =
                         GetSubagentToolCallIdFromParent(msg.Data.ParentToolCallId)
                         ?? GetCurrentSubagentOutputToolCallId();
+#pragma warning restore CS0618
                     if (!string.IsNullOrWhiteSpace(activeSubagentToolCallIdForAssistantMessage))
                     {
                         var subagentAssistantStream = GetSubagentStream(
@@ -821,6 +825,7 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                     var startToolCallId = toolStart.Data.ToolCallId;
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent tool grouping.
                     toolParentById[startToolCallId] = toolStart.Data.ParentToolCallId;
                     if (toolStart.Data.ToolName == "powershell")
                     {
@@ -863,6 +868,7 @@ public partial class ChatViewModel
                     else
                     {
                         toolMsg.ParentToolCallId = toolStart.Data.ParentToolCallId;
+#pragma warning restore CS0618
                         toolMsg.ToolName = toolStart.Data.ToolName;
                         toolMsg.ToolStatus = toolStatus;
                         if (toolStatus == "Failed")
@@ -953,7 +959,9 @@ public partial class ChatViewModel
                         completedToolOutputsByCallId.Remove(toolEnd.Data.ToolCallId);
                     Dispatcher.UIThread.Post(() =>
                     {
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent tool grouping.
                     toolParentById[toolEnd.Data.ToolCallId] = toolEnd.Data.ParentToolCallId;
+#pragma warning restore CS0618
 
                     var success = toolEnd.Data.Success == true;
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == toolEnd.Data.ToolCallId);

@@ -136,7 +136,7 @@ public static class McpSessionPlanner
                 var clone = new McpStdioServerConfig
                 {
                     Command = local.Command,
-                    Args = local.Args.ToList(),
+                    Args = local.Args?.ToList() ?? new List<string>(),
                     WorkingDirectory = string.IsNullOrWhiteSpace(local.WorkingDirectory) ? contextServer.SourceDirectory : local.WorkingDirectory,
                     Tools = NormalizeTools(local.Tools),
                     Timeout = local.Timeout

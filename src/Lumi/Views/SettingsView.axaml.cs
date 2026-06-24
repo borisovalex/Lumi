@@ -33,7 +33,9 @@ public partial class SettingsView : UserControl
     private TextBlock? _debugTransparencyValue;
     private StrataSetting? _debugFpsOverlaySetting;
     private ToggleSwitch? _debugFpsOverlayToggle;
+#if DEBUG
     private TopLevel? _topLevel;
+#endif
     private bool _isRecordingHotkey;
     private bool _hotkeyRecordingCooldown;
     private Interactive? _hotkeyEventSource;
