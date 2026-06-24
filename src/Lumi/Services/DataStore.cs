@@ -381,10 +381,25 @@ public class DataStore
         if (maxMessages <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxMessages), "Message limit must be greater than zero.");
 
-        var history = new List<UserPromptHistoryItem>();
-        foreach (var chat in _data.Chats)
+        // Visit newest chats first so we can stop once the newest `maxMessages` prompts are found,
+        // instead of reading every cold chat file from disk on each call. A chat's messages are never
+        // newer than its UpdatedAt, so once the running top-`maxMessages` set is full and a chat's
+        // UpdatedAt is older than the oldest kept prompt, no remaining (older) chat can contribute.
+        var orderedChats = SnapshotChatsByRecency();
+
+        // Min-heap keyed by timestamp ticks; keeps only the newest `maxMessages` prompts seen so far.
+        var topPrompts = new PriorityQueue<UserPromptHistoryItem, long>();
+
+        foreach (var chat in orderedChats)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (topPrompts.Count >= maxMessages
+                && topPrompts.TryPeek(out _, out var oldestKeptTicks)
+                && chat.UpdatedAt.UtcTicks <= oldestKeptTicks)
+            {
+                break;
+            }
 
             var messages = loadedMessageSnapshots.TryGetValue(chat.Id, out var loadedMessages)
                 ? loadedMessages
@@ -398,18 +413,41 @@ public class DataStore
                     continue;
                 }
 
-                history.Add(new UserPromptHistoryItem(
-                    chat.Id,
-                    message.Id,
-                    message.Content,
-                    message.Timestamp));
+                topPrompts.Enqueue(
+                    new UserPromptHistoryItem(chat.Id, message.Id, message.Content, message.Timestamp),
+                    message.Timestamp.UtcTicks);
+
+                if (topPrompts.Count > maxMessages)
+                    topPrompts.Dequeue();
             }
         }
 
-        return history
+        return topPrompts.UnorderedItems
+            .Select(static entry => entry.Element)
             .OrderByDescending(static item => item.Timestamp)
-            .Take(maxMessages)
             .ToList();
+    }
+
+    /// <summary>Takes a recency-ordered snapshot of the chat list. <see cref="_data"/>.Chats is a plain
+    /// <see cref="List{T}"/> mutated on the UI thread, while this scan can run on a background thread, so a
+    /// concurrent add/remove can throw <see cref="InvalidOperationException"/> mid-enumeration. Retrying a
+    /// few times yields a consistent snapshot without locking the UI thread's collection.</summary>
+    private List<Chat> SnapshotChatsByRecency()
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return _data.Chats
+                    .OrderByDescending(static chat => chat.UpdatedAt)
+                    .ToList();
+            }
+            catch (InvalidOperationException) when (attempt < maxAttempts)
+            {
+                // Collection was modified during enumeration; retry with a fresh pass.
+            }
+        }
     }
 
     /// <summary>
