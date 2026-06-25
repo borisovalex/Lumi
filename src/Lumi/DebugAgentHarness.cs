@@ -130,6 +130,14 @@ public static class DebugAgentHarness
             | Sources | visible below |
             | Model label | visible after turn |
 
+            A wide table wraps to fit, then switches to a horizontal scrollbar with readable columns when there are too many columns to fit:
+
+            | Column A | Column B | Column C | Column D | Column E | Column F | Column G | Column H |
+            | --- | --- | --- | --- | --- | --- | --- | --- |
+            | Markdown rendering pipeline | rendered correctly | full fidelity incl. tables | Strata Markdown | verified | passing now | extra column | last column here |
+            | Sources visible below | visible below message | search source chips appear | ChatView | in progress | still good | another value | trailing value |
+            | Model label visibility | visible after turn | the model name label renders | ChatViewModel | pending | confirmed ok | one more | the very end |
+
             The two-option comparison control (StrataFork) should switch when either tab is clicked:
 
             ```comparison
