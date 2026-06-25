@@ -72,6 +72,10 @@ public sealed class PresenceController : IDisposable
     // The companion pool's current normalized island anchor (null when merged into the chat).
     private Point? _companionPoint;
 
+    // Coalesces the bursty SizeChanged stream from a window resize/maximize into a single deferred
+    // focus/companion resync (at most one Background post in flight at a time).
+    private bool _resyncQueued;
+
     public PresenceController(Grid host)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -94,6 +98,12 @@ public sealed class PresenceController : IDisposable
 
         // Inject as the bottom-most layer so the translucent islands composite over it.
         _host.Children.Insert(0, _presence);
+
+        // A window resize/maximize re-lays out every surface, so the normalized focus point and the
+        // companion island anchor (both derived from live control bounds) go stale. Re-derive them when
+        // the field's size changes so the glow re-centres for the new window size instead of clinging to
+        // its old-proportion placement.
+        _presence.SizeChanged += OnPresenceSizeChanged;
     }
 
     /// <summary>The glow visual the controller owns (exposed for diagnostics/automation only).</summary>
@@ -258,12 +268,55 @@ public sealed class PresenceController : IDisposable
     public void Dispose()
     {
         Detach();
+        _presence.SizeChanged -= OnPresenceSizeChanged;
         _focusTimer?.Stop();
         _focusTimer = null;
         _armTimer?.Stop();
         _armTimer = null;
         _host.Children.Remove(_presence);
         _presence.Dispose();
+    }
+
+    /// <summary>
+    /// A window resize/maximize re-lays out every surface, so the normalized <see cref="StrataPresence.FocusPoint"/>
+    /// and the companion island anchor — both derived from live control bounds against the field's own bounds —
+    /// no longer describe the same on-screen spot (a fixed-width rail column makes the composer's normalized X/Y
+    /// drift as the window grows). Re-derive both once the layout pass settles. The recompute is deferred to
+    /// <see cref="DispatcherPriority.Background"/> so the sibling controls (composer, islands) have taken their
+    /// NEW bounds before we read them, and coalesced via <see cref="_resyncQueued"/> so a drag-resize's burst of
+    /// size changes collapses into one resync. The re-derived focus is applied as a rigid SNAP
+    /// (<see cref="StrataPresence.ResyncFocus"/>), not a spring, so the FocusPoint refinement adds no jitter on
+    /// top of the drag. This is belt-and-braces: the field's structural placement on resize is handled inside
+    /// <see cref="StrataPresence"/> (its <c>ArrangeOverride</c> arranges each lobe host AT its focal target, so
+    /// the resize arrange writes the focal Offset and the field can never collapse to centre even if this
+    /// Background recompute is starved by a continuous drag). This recompute only refines the normalized target
+    /// to track the re-proportioned composer, applied the next time Background gets a slice.
+    /// </summary>
+    private void OnPresenceSizeChanged(object? sender, SizeChangedEventArgs e)
+    {
+        if (_resyncQueued)
+            return;
+        _resyncQueued = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            // try/finally + clear-last: an exception can't strand the flag (which would permanently disable
+            // resize re-aim), and were the recompute to provoke another SizeChanged mid-flight the still-set
+            // flag suppresses a re-entrant post. (UpdateFocusTarget/ReaimCompanion only read control bounds
+            // and write FocusPoint/companion offsets — none change the presence's own size — so this is
+            // defensive, not a real re-entrancy path.)
+            try
+            {
+                if (_vm is { } vm)
+                {
+                    UpdateFocusTarget(snap: true);
+                    ReaimCompanion(vm);
+                }
+            }
+            finally
+            {
+                _resyncQueued = false;
+            }
+        }, DispatcherPriority.Background);
     }
 
     private static bool AnyIslandOpen(ChatViewModel vm)
@@ -527,7 +580,7 @@ public sealed class PresenceController : IDisposable
     /// user types. The new→existing and busy→idle changes therefore read as the light gliding *down*
     /// into the conversation. (The companion pool, not this focal point, leans into an open island.)
     /// </summary>
-    private void UpdateFocusTarget()
+    private void UpdateFocusTarget(bool snap = false)
     {
         if (_vm is not { } vm)
             return;
@@ -540,6 +593,11 @@ public sealed class PresenceController : IDisposable
         var working = vm.IsBusy || vm.IsStreaming || _attentionPending;
 
         double x = 0.5, y = 0.5;
+        // Whether a REAL control anchor (composer / live turn / welcome mark) backed this target, vs a
+        // hardcoded centre fallback used only before anything is realized. On a resize re-aim we refuse
+        // to snap to the fallback: a transiently-unresolved composer (read mid-relayout) must not yank an
+        // established focus to screen-centre — that was the "resize jumps the orb to the middle" glitch.
+        var anchored = false;
         if (vm.CurrentChat is null)
         {
             // New chat: pool in the middle of the hero, gathered toward the suggestion chips (where
@@ -550,9 +608,10 @@ public sealed class PresenceController : IDisposable
             {
                 x = o.X * 0.4 + s.X * 0.6;
                 y = o.Y * 0.4 + s.Y * 0.6;
+                anchored = true;
             }
-            else if (suggestions is { } s2) { x = s2.X; y = s2.Y; }
-            else if (orb is { } o2) { x = o2.X; y = o2.Y; }
+            else if (suggestions is { } s2) { x = s2.X; y = s2.Y; anchored = true; }
+            else if (orb is { } o2) { x = o2.X; y = o2.Y; anchored = true; }
             else { x = 0.5; y = 0.5; }
             y = Math.Clamp(y, 0.30, 0.74);
         }
@@ -560,12 +619,14 @@ public sealed class PresenceController : IDisposable
         {
             x = active.X;
             y = active.Y;
+            anchored = true;
         }
         else if (!working && TryGetControlFocus("ComposerContainer", 0.28, 0.16, 0.86) is { } composer)
         {
             // Idle in an existing chat: settle low, at the composer, illuminating upward.
             x = composer.X;
             y = composer.Y;
+            anchored = true;
         }
         else
         {
@@ -575,7 +636,22 @@ public sealed class PresenceController : IDisposable
             y = working ? 0.44 : 0.80;
         }
 
+        // A resize re-aim that found no live anchor leaves the established focus untouched (see above):
+        // better to hold the last good spot for a frame than to flash the field to centre.
+        if (snap && !anchored)
+            return;
+
         var target = new Point(Math.Clamp(x, 0.0, 1.0), Math.Clamp(y, 0.0, 1.0));
+
+        if (snap)
+        {
+            // Resize: re-pin rigidly (no spring) so the field tracks the re-laid-out canvas without lag
+            // or the spring's deferred-completion revert-to-centre. No dedup — the underlying pixels moved
+            // even when the normalized point barely did, and the resize arrange clobbered the base Offset.
+            _presence.ResyncFocus(target);
+            return;
+        }
+
         var cur = _presence.FocusPoint;
         // Dedup micro-moves so the follow timer never restarts the glide in place. While working we
         // use a tighter threshold so the gaze visibly tracks the live answer as it grows.
