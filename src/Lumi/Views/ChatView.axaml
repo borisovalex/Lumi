@@ -1409,9 +1409,10 @@
             <TextBlock Text="{Binding GitChangesLabel}" FontSize="10" Foreground="{DynamicResource Brush.TextSecondary}" />
           </StackPanel>
         </Button>
-        <Border Background="{DynamicResource Brush.Surface2}" CornerRadius="4" Padding="5,1"
+        <Border Background="{DynamicResource Brush.Surface2}" CornerRadius="4" Padding="5,0"
+                Height="20" VerticalAlignment="Center"
                 IsVisible="{Binding IsRefreshingGitStatus}">
-          <StackPanel Orientation="Horizontal" Spacing="4">
+          <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
             <Border x:Name="GitRefreshDot" Width="6" Height="6" CornerRadius="3"
                     Background="{DynamicResource Brush.AccentDefault}" VerticalAlignment="Center">
               <Border.Styles>
@@ -1426,7 +1427,8 @@
               </Border.Styles>
             </Border>
             <TextBlock Text="{loc:Str Git_Refreshing}" FontSize="10"
-                       Foreground="{DynamicResource Brush.TextSecondary}" />
+                       Foreground="{DynamicResource Brush.TextSecondary}"
+                       VerticalAlignment="Center" />
           </StackPanel>
         </Border>
         <Button Classes="subtle" Padding="2,1" MinHeight="0" Height="20" Width="20" CornerRadius="4"
