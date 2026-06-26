@@ -4,6 +4,26 @@
              x:Class="Lumi.App"
              RequestedThemeVariant="Dark">
 
+  <Application.Resources>
+    <ResourceDictionary>
+      <!-- Lumi-local override of Strata's glass-surface token. The presence field sits BEHIND the
+           translucent islands, so the island fill is the only readability substrate between the chat
+           text and whatever is on the desktop behind the (transparent) window. Strata's stock opacity
+           is tuned for benign backdrops; over a bright/busy backdrop (white docs etc.) it lets too much
+           through and text gets hard to read. We firm the islands up here (less transparency) — and the
+           presence light is boosted in PresenceController to keep blooming through the thicker glass.
+           Dark is Lumi's default; HighContrast intentionally falls through to Strata's already-solid value. -->
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="Brush.Surface1Glass" Color="{DynamicResource Color.Surface1}" Opacity="0.72" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="Brush.Surface1Glass" Color="{DynamicResource Color.Surface1}" Opacity="0.78" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
   <Application.Styles>
     <SimpleTheme />
     <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Simple.xaml" />

@@ -10,6 +10,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using Avalonia;
+using Avalonia.Animation;
+using Avalonia.Animation.Easings;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Controls.Documents;
@@ -43,6 +45,16 @@ public partial class ChatView : UserControl
     private Panel? _dropOverlay;
     private ItemsControl? _transcript;
     private ScrollViewer? _transcriptScrollViewer;
+
+    // Transcript "materialize" reveal (replaces the old opaque loading slab): while a chat loads or
+    // its turns are still realizing, the transcript is hidden instantly so the turn-growth + scroll
+    // re-pin settle is never seen; once settled it gently fades and rises back into place, so the
+    // load gap shows Lumi's real presence-lit surface and the content reads as composing in.
+    private Transitions? _transcriptRevealTransitions;
+    private static readonly Avalonia.Media.Transformation.TransformOperations _transcriptHiddenTransform =
+        Avalonia.Media.Transformation.TransformOperations.Parse("translateY(10px)");
+    private static readonly Avalonia.Media.Transformation.TransformOperations _transcriptShownTransform =
+        Avalonia.Media.Transformation.TransformOperations.Parse("translateY(0px)");
 
     private ChatViewModel? _subscribedVm;
     private Chat? _lastObservedCurrentChat;
@@ -243,6 +255,9 @@ public partial class ChatView : UserControl
             SubscribeToMountedTurns(vm.MountedTranscriptTurns);
             Dispatcher.UIThread.Post(EnsureTranscriptScrollViewer, DispatcherPriority.Loaded);
             QueueInitialTranscriptTailSyncIfNeeded(vm);
+            // Match the transcript's materialize state to the new surface: if it's already loading or
+            // about to realize, start hidden so it composes in rather than flashing placeholders.
+            SetTranscriptMaterialized(!vm.IsChatSurfaceLoading);
         }
 
         QueueWorktreeToggleHighlightUpdate();
@@ -621,6 +636,9 @@ public partial class ChatView : UserControl
                 _chatShell?.EnterFollowTailMode();
         }
 
+        if (e.PropertyName == nameof(ChatViewModel.IsChatSurfaceLoading))
+            SetTranscriptMaterialized(!(_subscribedVm?.IsChatSurfaceLoading ?? false));
+
         if (e.PropertyName == nameof(ChatViewModel.IsWorktreeMode))
             QueueWorktreeToggleHighlightUpdate();
 
@@ -629,6 +647,47 @@ public partial class ChatView : UserControl
             var busy = _subscribedVm?.IsBusy ?? false;
             if (!busy)
                 QueueCompletedAssistantTailRecovery();
+        }
+    }
+
+    /// <summary>
+    /// Drives the transcript's load "materialize". On load/realize start the transcript is hidden
+    /// instantly (transitions dropped) so the under-cover turn growth + scroll re-pin is never visible;
+    /// once the surface is ready it fades and rises gently back into place. This replaces the old
+    /// opaque loading slab — the load gap now shows the real translucent, presence-lit chat surface.
+    /// </summary>
+    private void SetTranscriptMaterialized(bool ready)
+    {
+        if (_transcript is null)
+            return;
+
+        if (ready)
+        {
+            _transcriptRevealTransitions ??= new Transitions
+            {
+                new DoubleTransition
+                {
+                    Property = Visual.OpacityProperty,
+                    Duration = TimeSpan.FromMilliseconds(240),
+                    Easing = new CubicEaseOut(),
+                },
+                new TransformOperationsTransition
+                {
+                    Property = Visual.RenderTransformProperty,
+                    Duration = TimeSpan.FromMilliseconds(320),
+                    Easing = new CubicEaseOut(),
+                },
+            };
+            _transcript.Transitions = _transcriptRevealTransitions;
+            _transcript.Opacity = 1;
+            _transcript.RenderTransform = _transcriptShownTransform;
+        }
+        else
+        {
+            // Instant hide: drop transitions so the clear can't animate and reveal the swap mid-fade.
+            _transcript.Transitions = null;
+            _transcript.Opacity = 0;
+            _transcript.RenderTransform = _transcriptHiddenTransform;
         }
     }
 

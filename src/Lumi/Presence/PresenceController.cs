@@ -85,9 +85,11 @@ public sealed class PresenceController : IDisposable
             Name = "Presence",
             IsHitTestVisible = false,
             ZIndex = 0,
-            // Brightness is carried by StrataPresence's intrinsic Gain; Intensity stays neutral
-            // here and is the fine ± lever (it now reads through the glassy chat surfaces).
-            Intensity = 1.0,
+            // Brightness is carried by StrataPresence's intrinsic Gain; Intensity is the consumer-facing
+            // fine multiplier on top of it. The islands the field sits behind were firmed up (less
+            // transparent — see App.axaml's Surface1Glass override) for readability over bright backdrops,
+            // so we lift Intensity above neutral to keep the glow blooming clearly through the thicker glass.
+            Intensity = 1.35,
         };
 
         // One continuous field spanning every column: behind the chat island, the seam, the
