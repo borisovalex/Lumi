@@ -948,13 +948,21 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
             if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add && args.NewItems is not null)
             {
+                var shouldRefreshWorkspaceMessages = false;
                 foreach (ChatMessageViewModel msgVm in args.NewItems)
+                {
                     _transcriptBuilder.ProcessMessageToTranscript(msgVm);
+                    shouldRefreshWorkspaceMessages |= IsWorkspaceUserMessage(msgVm);
+                }
+
+                if (shouldRefreshWorkspaceMessages)
+                    RebuildWorkspacePanel();
             }
             else if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
             {
                 TranscriptTurns.Clear();
                 _transcriptBuilder.ResetState();
+                RebuildWorkspacePanel();
             }
         };
 

@@ -11,10 +11,10 @@ using Lumi.Services;
 namespace Lumi.ViewModels;
 
 /// <summary>
-/// Companion "Workspace" panel data: a first-class, tabbed, searchable index of everything Lumi
-/// produced or referenced in the current chat — deliverable files, web sources, an activity timeline
-/// (intents + searches) that can jump to the transcript, and the files it changed. Aggregated from
-/// the chat's messages so the transcript stays a clean conversation while these stay glanceable.
+/// Companion "Workspace" panel data: a first-class, tabbed, searchable index of the current chat's
+/// key landmarks — user messages, deliverable files, web sources, an activity timeline (intents +
+/// searches) that can jump to the transcript, and the files Lumi changed. Aggregated from the chat's
+/// messages so the transcript stays a clean conversation while these stay glanceable.
 /// </summary>
 public partial class ChatViewModel
 {
@@ -23,12 +23,14 @@ public partial class ChatViewModel
     public const int WorkspaceTabSources = 1;
     public const int WorkspaceTabActivity = 2;
     public const int WorkspaceTabChanges = 3;
+    public const int WorkspaceTabMessages = 4;
 
     // ── Backing (unfiltered) sets ──
     private readonly List<FileAttachmentItem> _allDeliverables = [];
     private readonly List<SourceItem> _allSources = [];
     private readonly List<WorkspaceActivityItem> _allActivities = [];
     private readonly List<FileChangeItem> _allChanges = [];
+    private readonly List<WorkspaceUserMessageItem> _allUserMessages = [];
 
     // Reverse index (activity seed → owning turn StableId), rebuilt with the panel. The activity
     // timeline uses it to resolve each row's transcript jump target in O(1). Without it, every
@@ -44,6 +46,7 @@ public partial class ChatViewModel
     public ObservableCollection<SourceItem> WorkspaceSources { get; } = [];
     public ObservableCollection<WorkspaceActivityItem> WorkspaceActivities { get; } = [];
     public ObservableCollection<FileChangeItem> WorkspaceChanges { get; } = [];
+    public ObservableCollection<WorkspaceUserMessageItem> WorkspaceUserMessages { get; } = [];
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasWorkspaceContent))]
@@ -61,14 +64,19 @@ public partial class ChatViewModel
     [NotifyPropertyChangedFor(nameof(HasWorkspaceContent))]
     private bool _hasWorkspaceChanges;
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasWorkspaceContent))]
+    private bool _hasWorkspaceUserMessages;
+
     [ObservableProperty] private string _workspaceDeliverablesCountLabel = "0";
     [ObservableProperty] private string _workspaceSourcesCountLabel = "0";
     [ObservableProperty] private string _workspaceActivitiesCountLabel = "0";
     [ObservableProperty] private string _workspaceChangesCountLabel = "0";
+    [ObservableProperty] private string _workspaceUserMessagesCountLabel = "0";
 
     /// <summary>True when the panel has anything worth showing.</summary>
     public bool HasWorkspaceContent =>
-        HasWorkspaceDeliverables || HasWorkspaceSources || HasWorkspaceActivities || HasWorkspaceChanges;
+        HasWorkspaceDeliverables || HasWorkspaceSources || HasWorkspaceActivities || HasWorkspaceChanges || HasWorkspaceUserMessages;
 
     // ── Active tab ──
     [ObservableProperty]
@@ -76,12 +84,14 @@ public partial class ChatViewModel
     [NotifyPropertyChangedFor(nameof(IsSourcesTabSelected))]
     [NotifyPropertyChangedFor(nameof(IsActivityTabSelected))]
     [NotifyPropertyChangedFor(nameof(IsChangesTabSelected))]
+    [NotifyPropertyChangedFor(nameof(IsMessagesTabSelected))]
     private int _workspaceSelectedTab = WorkspaceTabDeliverables;
 
     public bool IsDeliverablesTabSelected => WorkspaceSelectedTab == WorkspaceTabDeliverables;
     public bool IsSourcesTabSelected => WorkspaceSelectedTab == WorkspaceTabSources;
     public bool IsActivityTabSelected => WorkspaceSelectedTab == WorkspaceTabActivity;
     public bool IsChangesTabSelected => WorkspaceSelectedTab == WorkspaceTabChanges;
+    public bool IsMessagesTabSelected => WorkspaceSelectedTab == WorkspaceTabMessages;
 
     partial void OnWorkspaceSelectedTabChanged(int value) => UpdateWorkspaceSearchState();
 
@@ -168,12 +178,16 @@ public partial class ChatViewModel
         var seenSources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sources = new List<SourceItem>();
         var activities = new List<WorkspaceActivityItem>();
+        var userMessages = new List<WorkspaceUserMessageItem>();
 
         BuildActivitySeedIndex();
 
         for (var i = 0; i < Messages.Count; i++)
         {
-            var message = Messages[i].Message;
+            var messageVm = Messages[i];
+            var message = messageVm.Message;
+
+            TryAppendUserMessage(userMessages, messageVm);
 
             if (string.Equals(message.ToolName, "announce_file", StringComparison.OrdinalIgnoreCase))
             {
@@ -202,16 +216,19 @@ public partial class ChatViewModel
         ReplaceAll(_allSources, sources);
         ReplaceAll(_allActivities, activities);
         ReplaceAll(_allChanges, changes);
+        ReplaceAll(_allUserMessages, userMessages);
 
         HasWorkspaceDeliverables = _allDeliverables.Count > 0;
         HasWorkspaceSources = _allSources.Count > 0;
         HasWorkspaceActivities = _allActivities.Count > 0;
         HasWorkspaceChanges = _allChanges.Count > 0;
+        HasWorkspaceUserMessages = _allUserMessages.Count > 0;
 
         WorkspaceDeliverablesCountLabel = _allDeliverables.Count.ToString();
         WorkspaceSourcesCountLabel = _allSources.Count.ToString();
         WorkspaceActivitiesCountLabel = _allActivities.Count.ToString();
         WorkspaceChangesCountLabel = _allChanges.Count.ToString();
+        WorkspaceUserMessagesCountLabel = _allUserMessages.Count.ToString();
 
         RecomputeActivityKindAvailability();
         EnsureValidSelectedTab();
@@ -219,6 +236,30 @@ public partial class ChatViewModel
 
         WorkspaceContentChanged?.Invoke();
     }
+
+    private static bool IsWorkspaceUserMessage(ChatMessageViewModel message)
+        => string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase)
+           && !JobWakeItem.IsJobWakeMessage(message);
+
+    private void TryAppendUserMessage(List<WorkspaceUserMessageItem> userMessages, ChatMessageViewModel message)
+    {
+        if (!IsWorkspaceUserMessage(message))
+            return;
+
+        userMessages.Add(new WorkspaceUserMessageItem(
+            userMessages.Count + 1,
+            message.Content,
+            message.TimestampText,
+            message.Message.Attachments.Count,
+            message.Message.ActiveSkills.Count,
+            ResolveMessageTurn(message.Message.Id),
+            RaiseWorkspaceJump));
+    }
+
+    private string? ResolveMessageTurn(Guid messageId)
+        => _activitySeedToTurnId.TryGetValue(messageId.ToString(), out var turnStableId)
+            ? turnStableId
+            : null;
 
     /// <summary>Tracks which activity kinds exist so the view shows only the relevant filter chips.</summary>
     private void RecomputeActivityKindAvailability()
@@ -429,7 +470,7 @@ public partial class ChatViewModel
         if (TabHasContent(WorkspaceSelectedTab))
             return;
 
-        foreach (var tab in new[] { WorkspaceTabDeliverables, WorkspaceTabSources, WorkspaceTabActivity, WorkspaceTabChanges })
+        foreach (var tab in new[] { WorkspaceTabDeliverables, WorkspaceTabSources, WorkspaceTabMessages, WorkspaceTabActivity, WorkspaceTabChanges })
         {
             if (TabHasContent(tab))
             {
@@ -445,6 +486,7 @@ public partial class ChatViewModel
     {
         WorkspaceTabDeliverables => HasWorkspaceDeliverables,
         WorkspaceTabSources => HasWorkspaceSources,
+        WorkspaceTabMessages => HasWorkspaceUserMessages,
         WorkspaceTabActivity => HasWorkspaceActivities,
         WorkspaceTabChanges => HasWorkspaceChanges,
         _ => false,
@@ -461,6 +503,9 @@ public partial class ChatViewModel
         ReplaceAll(WorkspaceSources, hasQuery
             ? _allSources.Where(s => Contains(s.Title, q) || Contains(s.Domain, q) || Contains(s.Url, q)).ToList()
             : _allSources);
+        ReplaceAll(WorkspaceUserMessages, hasQuery
+            ? _allUserMessages.Where(m => Contains(m.Preview, q) || Contains(m.MetaText, q) || Contains(m.NumberLabel, q)).ToList()
+            : _allUserMessages);
         var activitySource = WorkspaceActivityFilter == ActivityFilterAll
             ? (IEnumerable<WorkspaceActivityItem>)_allActivities
             : _allActivities.Where(a => (int)a.Kind == WorkspaceActivityFilter);
@@ -486,6 +531,7 @@ public partial class ChatViewModel
         {
             WorkspaceTabDeliverables => WorkspaceDeliverables.Count == 0,
             WorkspaceTabSources => WorkspaceSources.Count == 0,
+            WorkspaceTabMessages => WorkspaceUserMessages.Count == 0,
             WorkspaceTabActivity => WorkspaceActivities.Count == 0,
             WorkspaceTabChanges => WorkspaceChanges.Count == 0,
             _ => false,
@@ -500,6 +546,79 @@ public partial class ChatViewModel
         target.Clear();
         foreach (var item in desired)
             target.Add(item);
+    }
+}
+
+/// <summary>A single user prompt indexed in the Workspace panel so long chats can jump between asks.</summary>
+public partial class WorkspaceUserMessageItem : ObservableObject
+{
+    private readonly Action<string?>? _jumpAction;
+
+    public int Number { get; }
+    public string NumberLabel { get; }
+    public string Preview { get; }
+    public string MetaText { get; }
+    public string? TargetTurnStableId { get; }
+    public bool CanJump => !string.IsNullOrEmpty(TargetTurnStableId);
+
+    public WorkspaceUserMessageItem(
+        int number,
+        string content,
+        string timestampText,
+        int attachmentCount,
+        int skillCount,
+        string? targetTurnStableId,
+        Action<string?>? jumpAction)
+    {
+        Number = number;
+        NumberLabel = $"#{number}";
+        Preview = BuildPreview(content, attachmentCount);
+        MetaText = BuildMetaText(timestampText, attachmentCount, skillCount);
+        TargetTurnStableId = targetTurnStableId;
+        _jumpAction = jumpAction;
+    }
+
+    private static string BuildPreview(string content, int attachmentCount)
+    {
+        var preview = CollapseWhitespace(content);
+        if (!string.IsNullOrEmpty(preview))
+            return preview.Length > 150 ? preview[..150] + "…" : preview;
+
+        return attachmentCount > 0
+            ? Pluralize(attachmentCount, "attached file", "attached files")
+            : "Empty message";
+    }
+
+    private static string BuildMetaText(string timestampText, int attachmentCount, int skillCount)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(timestampText))
+            parts.Add(timestampText);
+        if (attachmentCount > 0)
+            parts.Add(Pluralize(attachmentCount, "file", "files"));
+        if (skillCount > 0)
+            parts.Add(Pluralize(skillCount, "skill", "skills"));
+
+        return parts.Count > 0 ? string.Join(" · ", parts) : "User message";
+    }
+
+    private static string CollapseWhitespace(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+            return "";
+
+        var parts = text.Split([' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        return string.Join(' ', parts);
+    }
+
+    private static string Pluralize(int count, string singular, string plural)
+        => count == 1 ? $"1 {singular}" : $"{count} {plural}";
+
+    [RelayCommand]
+    private void Jump()
+    {
+        if (CanJump)
+            _jumpAction?.Invoke(TargetTurnStableId);
     }
 }
 

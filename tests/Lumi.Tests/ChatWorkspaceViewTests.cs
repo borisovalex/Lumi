@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
@@ -120,6 +121,99 @@ public sealed class ChatWorkspaceViewTests
     }
 
     [Fact]
+    public void WorkspaceIndexesUserMessagesInMessagesTab()
+    {
+        Loc.Load("en");
+        var dataStore = new DataStore(CreateAppData());
+        using var chatVm = new ChatViewModel(dataStore, new CopilotService());
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+
+        chatVm.Messages.Add(new ChatMessageViewModel(new ChatMessage
+        {
+            Id = firstId,
+            Role = "user",
+            Content = "First prompt\nwith another line",
+            Timestamp = new DateTimeOffset(2026, 6, 28, 20, 10, 0, TimeSpan.Zero),
+            Attachments = ["C:\\Temp\\design.png"],
+        }));
+        chatVm.Messages.Add(new ChatMessageViewModel(new ChatMessage
+        {
+            Role = "assistant",
+            Content = "Answer",
+        }));
+        chatVm.Messages.Add(new ChatMessageViewModel(new ChatMessage
+        {
+            Role = "user",
+            Author = "Lumi Job - Daily summary",
+            Content = "Background job triggered: Daily summary",
+        }));
+        chatVm.Messages.Add(new ChatMessageViewModel(new ChatMessage
+        {
+            Id = secondId,
+            Role = "user",
+            Content = "Second prompt about auth",
+            Timestamp = new DateTimeOffset(2026, 6, 28, 20, 15, 0, TimeSpan.Zero),
+            ActiveSkills = [new SkillReference { Name = "Code Helper" }],
+        }));
+
+        chatVm.RebuildTranscript();
+
+        Assert.True(chatVm.HasWorkspaceUserMessages);
+        Assert.True(chatVm.HasWorkspaceContent);
+        Assert.True(chatVm.IsMessagesTabSelected);
+        Assert.Equal("2", chatVm.WorkspaceUserMessagesCountLabel);
+        Assert.Collection(
+            chatVm.WorkspaceUserMessages,
+            first =>
+            {
+                Assert.Equal("#1", first.NumberLabel);
+                Assert.Equal("First prompt with another line", first.Preview);
+                Assert.Contains("1 file", first.MetaText);
+                Assert.True(first.CanJump);
+                Assert.Equal($"turn:message:{firstId}", first.TargetTurnStableId);
+            },
+            second =>
+            {
+                Assert.Equal("#2", second.NumberLabel);
+                Assert.Equal("Second prompt about auth", second.Preview);
+                Assert.Contains("1 skill", second.MetaText);
+                Assert.True(second.CanJump);
+                Assert.Equal($"turn:message:{secondId}", second.TargetTurnStableId);
+            });
+
+        chatVm.WorkspaceSearchText = "auth";
+
+        Assert.Single(chatVm.WorkspaceUserMessages);
+        Assert.Equal("#2", chatVm.WorkspaceUserMessages[0].NumberLabel);
+    }
+
+    [Fact]
+    public void WorkspaceResetClearsUserMessages()
+    {
+        Loc.Load("en");
+        var dataStore = new DataStore(CreateAppData());
+        using var chatVm = new ChatViewModel(dataStore, new CopilotService());
+
+        chatVm.Messages.Add(new ChatMessageViewModel(new ChatMessage
+        {
+            Role = "user",
+            Content = "Prompt that should disappear",
+        }));
+        chatVm.RebuildTranscript();
+
+        Assert.True(chatVm.HasWorkspaceUserMessages);
+        Assert.Single(chatVm.WorkspaceUserMessages);
+
+        chatVm.Messages.Clear();
+
+        Assert.False(chatVm.HasWorkspaceUserMessages);
+        Assert.False(chatVm.HasWorkspaceContent);
+        Assert.Empty(chatVm.WorkspaceUserMessages);
+        Assert.Equal("0", chatVm.WorkspaceUserMessagesCountLabel);
+    }
+
+    [Fact]
     public void MainAndDetachedHostXamlUseSameWorkspaceComponent()
     {
         var root = FindRepoRoot();
@@ -149,7 +243,10 @@ public sealed class ChatWorkspaceViewTests
         Assert.Contains("Panel.ZIndex=\"10\"", chatWindowXaml);
         Assert.True(chatWindowXaml.IndexOf("x:Name=\"TitleDragRegion\"", StringComparison.Ordinal) <
             chatWindowXaml.IndexOf("x:Name=\"DetachedChatView\"", StringComparison.Ordinal));
-        Assert.Contains("UseShellChrome=\"{Binding UseChatIslandChrome", File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatWorkspaceView.axaml")));
+        var workspaceXaml = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatWorkspaceView.axaml"));
+        Assert.Contains("UseShellChrome=\"{Binding UseChatIslandChrome", workspaceXaml);
+        Assert.Contains("x:Name=\"WsTabMessages\"", workspaceXaml);
+        Assert.Contains("ItemsSource=\"{Binding WorkspaceUserMessages}\"", workspaceXaml);
         var chatViewXaml = File.ReadAllText(Path.Combine(root, "src", "Lumi", "Views", "ChatView.axaml"));
         Assert.Contains("StrataChatShell.flat-window /template/ Border#PART_Root", chatViewXaml);
         Assert.Contains("StrataChatShell.flat-window /template/ Border#PART_HeaderChrome", chatViewXaml);
@@ -266,14 +363,25 @@ public sealed class ChatWorkspaceViewTests
         },
     };
 
-    private static string FindRepoRoot()
+    private static string FindRepoRoot([CallerFilePath] string sourceFilePath = "")
     {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null)
+        foreach (var startPath in new[]
+                 {
+                     AppContext.BaseDirectory,
+                     Directory.GetCurrentDirectory(),
+                     Path.GetDirectoryName(sourceFilePath) ?? "",
+                 })
         {
-            if (File.Exists(Path.Combine(directory.FullName, "Lumi.slnx")))
-                return directory.FullName;
-            directory = directory.Parent;
+            if (string.IsNullOrWhiteSpace(startPath))
+                continue;
+
+            var directory = new DirectoryInfo(startPath);
+            while (directory is not null)
+            {
+                if (File.Exists(Path.Combine(directory.FullName, "Lumi.slnx")))
+                    return directory.FullName;
+                directory = directory.Parent;
+            }
         }
 
         throw new InvalidOperationException("Could not locate Lumi repository root.");
