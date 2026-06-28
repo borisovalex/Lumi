@@ -283,6 +283,14 @@ public static class SystemPromptBuilder
 
             IMPORTANT: Only use the diagram types listed above. Do NOT use journey, gantt, gitgraph, mindmap, block-beta, or sankey-beta — they are not supported and will show as raw code.
 
+            For clean, readable diagrams: keep one flow direction (`flowchart TB` for layered/architecture diagrams, `LR` for pipelines); group related nodes into labeled `subgraph` blocks (they render as titled containers); keep node labels short.
+
+            Architecture diagrams get messy fast — a complex diagram is hard to lay out cleanly in ANY renderer, so favour a clean STRUCTURE over completeness:
+            - Connect layers sequentially: each node should point to the next layer down, not reach across several layers at once. Avoid wide cross-layer fan-outs like `A --> B & C & D` where B, C, D live in different layers — they tangle the edges.
+            - Every node must have at least one edge. Don't leave nodes floating with no connections; either connect them or leave them out.
+            - Keep each layer to ~3-5 nodes; merge closely-related components into a single node (e.g. `Infra[MCP / Tools / Search]`) rather than listing 8 siblings in one layer.
+            - Prefer roughly one edge per relationship. If a node needs many connections, reconsider whether the diagram is trying to show too much — split it into smaller diagrams.
+
             Example (flowchart):
             ```mermaid
             flowchart TD

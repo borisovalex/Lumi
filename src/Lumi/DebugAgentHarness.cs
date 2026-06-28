@@ -181,6 +181,76 @@ public static class DebugAgentHarness
             ```comparison
             {"optionA":{"title":"LG C4","content":"- OLED evo panel\n- Excellent for gaming\n- **$1,799**"},"optionB":{"title":"Samsung S90D","content":"- QD-OLED panel\n- Brighter highlights\n- **$1,899**"}}
             ```
+
+            A native Mermaid **architecture diagram** verifies subgraph containers and distributed (fan-out / fan-in) arrows:
+
+            ```mermaid
+            flowchart TB
+                User[User] --> LB[Load Balancer]
+                subgraph Frontend
+                    Web[Web App]
+                    Mobile[Mobile App]
+                end
+                subgraph Backend
+                    API[API Gateway]
+                    Auth[Auth Service]
+                    Orders[Order Service]
+                end
+                subgraph Data
+                    DB[(Database)]
+                    Cache[(Redis)]
+                end
+                LB --> Web
+                LB --> Mobile
+                Web --> API
+                Mobile --> API
+                API --> Auth
+                API --> Orders
+                Orders --> DB
+                Orders --> Cache
+                Auth --> DB
+            ```
+
+            A **decision flowchart** verifies rank-skipping edges route around intermediate nodes — the `No` path leaves *Tests pass?* and drops down its own lane past the *Security scan* row instead of behind it:
+
+            ```mermaid
+            flowchart TD
+                Start([Push to main]) --> Build[Build]
+                Build --> Test{Tests pass?}
+                Test -->|No| Notify[Notify devs]
+                Test -->|Yes| Scan{Security scan}
+                Scan -->|Fail| Notify
+                Scan -->|Pass| Stage[Deploy staging]
+                Notify --> Fix[Fix issues]
+                Fix --> Build
+                Stage --> Done([Released])
+            ```
+
+            A **class diagram** verifies hierarchical layout, three compartments, and inheritance markers:
+
+            ```mermaid
+            classDiagram
+                Animal <|-- Duck
+                Animal <|-- Fish
+                Animal : +int age
+                Animal : +String gender
+                Animal : +isMammal()
+                Animal : +mate()
+                Duck : +String beakColor
+                Duck : +swim()
+                Duck : +quack()
+                Fish : -int sizeInFeet
+                Fish : -canEat()
+            ```
+
+            An **ER diagram** verifies crow's-foot cardinality and orthogonal routing:
+
+            ```mermaid
+            erDiagram
+                CUSTOMER ||--o{ ORDER : places
+                CUSTOMER ||--o{ DELIVERY-ADDRESS : uses
+                ORDER ||--|{ LINE-ITEM : contains
+            ```
             """);
         firstAssistant.Author = "Lumi";
         firstAssistant.Model = "gpt-5.5";
