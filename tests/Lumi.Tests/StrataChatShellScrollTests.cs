@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Headless;
 using Avalonia.Input;
 using Avalonia.Media;
@@ -378,6 +379,143 @@ public sealed class StrataChatShellScrollTests
         }, CancellationToken.None);
     }
 
+    [Fact]
+    public async Task MouseWheelOverTranscriptContent_ScrollsShellAndLeavesFollowMode()
+    {
+        using var session = HeadlessTestSession.Start();
+
+        double before = 0;
+        double after = 0;
+        bool isFollowingTail = true;
+
+        await session.Dispatch(async () =>
+        {
+            var transcript = new StackPanel { Spacing = 8 };
+            for (var i = 0; i < 64; i++)
+            {
+                transcript.Children.Add(new Border
+                {
+                    Height = 56,
+                    Child = new TextBlock { Text = $"Turn {i}" }
+                });
+            }
+
+            var shell = new StrataChatShell
+            {
+                Header = new TextBlock { Text = "Scroll Test" },
+                Transcript = transcript,
+                Composer = new Border { Height = 48 }
+            };
+
+            var window = new Window
+            {
+                Width = 720,
+                Height = 520,
+                Content = shell,
+            };
+
+            window.Show();
+            await PumpAsync();
+            await PumpAsync();
+
+            var scrollViewer = Assert.IsType<ScrollViewer>(shell.TranscriptScrollViewer);
+
+            shell.JumpToLatest();
+            await PumpAsync();
+
+            before = scrollViewer.Offset.Y;
+            var wheelPoint = GetCenterPoint(window, scrollViewer);
+            window.MouseWheel(wheelPoint, new Vector(0, 1), RawInputModifiers.None);
+            await PumpAsync();
+            await PumpAsync();
+
+            after = scrollViewer.Offset.Y;
+            isFollowingTail = shell.IsFollowingTail;
+
+            window.Close();
+        }, CancellationToken.None);
+
+        Assert.True(before > 0, "Test setup should start at the bottom of a scrollable transcript.");
+        Assert.True(after < before - 1, "A real upward mouse-wheel gesture over the transcript should scroll history into view.");
+        Assert.False(isFollowingTail);
+    }
+
+    [Fact]
+    public async Task MouseWheelOverExhaustedNestedScrollViewer_ScrollsShell()
+    {
+        using var session = HeadlessTestSession.Start();
+
+        double before = 0;
+        double after = 0;
+
+        await session.Dispatch(async () =>
+        {
+            var transcript = new StackPanel { Spacing = 8 };
+            for (var i = 0; i < 56; i++)
+            {
+                transcript.Children.Add(new Border
+                {
+                    Height = 56,
+                    Child = new TextBlock { Text = $"Turn {i}" }
+                });
+            }
+
+            var nested = new ScrollViewer
+            {
+                Height = 160,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Content = new TextBlock
+                {
+                    Text = "Short tool output that does not need its own vertical scrolling.",
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+
+            transcript.Children.Add(new Border
+            {
+                Height = 180,
+                Padding = new Thickness(10),
+                Child = nested
+            });
+
+            var shell = new StrataChatShell
+            {
+                Header = new TextBlock { Text = "Scroll Test" },
+                Transcript = transcript,
+                Composer = new Border { Height = 48 }
+            };
+
+            var window = new Window
+            {
+                Width = 720,
+                Height = 520,
+                Content = shell,
+            };
+
+            window.Show();
+            await PumpAsync();
+            await PumpAsync();
+
+            var scrollViewer = Assert.IsType<ScrollViewer>(shell.TranscriptScrollViewer);
+            shell.JumpToLatest();
+            await PumpAsync();
+
+            before = scrollViewer.Offset.Y;
+            var wheelPoint = GetCenterPoint(window, nested);
+            window.MouseWheel(wheelPoint, new Vector(0, 1), RawInputModifiers.None);
+            await PumpAsync();
+            await PumpAsync();
+
+            after = scrollViewer.Offset.Y;
+
+            window.Close();
+        }, CancellationToken.None);
+
+        Assert.True(before > 0, "Test setup should start at the bottom of a scrollable transcript.");
+        Assert.True(after < before - 1, "Wheel input over a nested scroller with no vertical room must keep scrolling the transcript.");
+    }
+
     // ── Regression: a left-click in the transcript must not scroll it ──
     //
     // Avalonia's ScrollViewer.OnGotFocus calls BringIntoView() on whichever focusable descendant
@@ -542,5 +680,13 @@ public sealed class StrataChatShellScrollTests
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Render);
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Loaded);
         await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
+    }
+
+    private static Point GetCenterPoint(Window window, Control target)
+    {
+        var topLeft = target.TranslatePoint(new Point(0, 0), window)
+            ?? throw new InvalidOperationException("Target is not attached to the test window.");
+
+        return topLeft + new Point(target.Bounds.Width / 2, target.Bounds.Height / 2);
     }
 }

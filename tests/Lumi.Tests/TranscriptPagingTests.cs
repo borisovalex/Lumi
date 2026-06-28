@@ -131,14 +131,22 @@ public sealed class TranscriptPagingTests
 
         var firstVisibleBefore = controller.MountedTurns[0].StableId;
         TranscriptWindowMutation lastMutation = TranscriptWindowMutation.None;
+        var prependCount = 0;
+        var sawBatchedPrepend = false;
         for (var i = 0; i < 4; i++)
         {
             lastMutation = controller.UpdateViewport(
                 new TranscriptViewportState(0, 200, 1400 + (i * 120), false, 260),
                 $"multi-prepend-{i}");
-            Assert.Equal(TranscriptWindowMutationKind.Prepend, lastMutation.Kind);
+            if (lastMutation.Kind != TranscriptWindowMutationKind.Prepend)
+                break;
+
+            prependCount++;
+            sawBatchedPrepend |= lastMutation.AddedPageCount > 1;
         }
 
+        Assert.True(prependCount > 0);
+        Assert.True(sawBatchedPrepend);
         Assert.NotEqual(firstVisibleBefore, controller.MountedTurns[0].StableId);
         Assert.Equal(new[]
         {
@@ -314,7 +322,8 @@ public sealed class TranscriptPagingTests
             var mutation = controller.UpdateViewport(
                 new TranscriptViewportState(0, 200, 1800 + (i * 120), false, 260),
                 $"reader-window-{i}");
-            Assert.Equal(TranscriptWindowMutationKind.Prepend, mutation.Kind);
+            if (mutation.Kind != TranscriptWindowMutationKind.Prepend)
+                break;
         }
 
         Assert.Equal("turn:0000", controller.MountedTurns[0].StableId);

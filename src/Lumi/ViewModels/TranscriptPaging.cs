@@ -22,6 +22,7 @@ internal sealed class TranscriptPagingOptions
     public int MinInitialPages { get; init; } = 2;
     public int MaxMountedPages { get; init; } = 6;
     public int TrimToMountedPages { get; init; } = 4;
+    public int PrependBatchPageCount { get; init; } = 3;
     public double InitialViewportFillMultiplier { get; init; } = 1.6d;
     public double MountedViewportFillMultiplier { get; init; } = 2.1d;
     public double PrependTriggerPixels { get; init; } = 220d;
@@ -375,15 +376,31 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
 
         if (state.OffsetY <= _options.PrependTriggerPixels && _firstMountedPageIndex > 0)
         {
-            _firstMountedPageIndex--;
-            _prependCount++;
-            _pageLoadCount++;
-            var page = _pages[_firstMountedPageIndex];
-            var estimatedDelta = GetEffectivePageHeight(page) + TranscriptLayoutMetrics.TurnSpacing;
+            // Load a small chunk of older pages per near-top scroll. This gives the reader more
+            // history above the anchor and avoids a render/layout cycle for every single page.
+            // Keep at least the previously-first mounted page so anchor restoration can still land.
+            var maxBatch = Math.Min(
+                Math.Max(1, _options.PrependBatchPageCount),
+                Math.Max(1, MountedPageCount - 1));
+            var addedPages = 0;
+            var estimatedDelta = 0d;
+            while (_firstMountedPageIndex > 0 && addedPages < maxBatch)
+            {
+                _firstMountedPageIndex--;
+                var page = _pages[_firstMountedPageIndex];
+                estimatedDelta += GetEffectivePageHeight(page) + TranscriptLayoutMetrics.TurnSpacing;
+                addedPages++;
+            }
+
+            if (addedPages == 0)
+                return TranscriptWindowMutation.None;
+
+            _prependCount += addedPages;
+            _pageLoadCount += addedPages;
             var removedTailPages = TrimMountedTailOverflow();
             ReconcileMountedTurns(BuildDesiredMountedTurns());
             UpdateDiagnostics("prepend", reason);
-            return new TranscriptWindowMutation(TranscriptWindowMutationKind.Prepend, reason, 1, removedTailPages, estimatedDelta, true);
+            return new TranscriptWindowMutation(TranscriptWindowMutationKind.Prepend, reason, addedPages, removedTailPages, estimatedDelta, true);
         }
 
         if (MountedPageCount > _options.MaxMountedPages)
