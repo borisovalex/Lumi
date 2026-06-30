@@ -407,6 +407,83 @@ public static class DebugAgentHarness
         });
         chat.Messages.Add(finalAssistant);
 
+        // ── Parallel multi-subagent fan-out turn ──────────────────────────────
+        // Exercises the grouped layout used when several sub-agents run at once.
+        var parallelUser = Message("user", "Research the three OLED contenders in parallel and tell me which wins.");
+        parallelUser.Author = userName;
+        chat.Messages.Add(parallelUser);
+
+        chat.Messages.Add(Message("reasoning", """
+            I'll fan out three agents at once — one per panel — then compare their findings.
+            """));
+
+        const string agentA = "debug-parallel-agent-a";
+        const string agentB = "debug-parallel-agent-b";
+        const string agentC = "debug-parallel-agent-c";
+
+        // Launch all three agents together (the fan-out the user sees as one batch).
+        chat.Messages.Add(Tool("task", JsonObject(
+            JsonProperty("description", JsonString("Benchmark the LG C4 evo panel")),
+            JsonProperty("agent_type", JsonString("research")),
+            JsonProperty("agentName", JsonString("research")),
+            JsonProperty("agentDisplayName", JsonString("Research agent")),
+            JsonProperty("agentDescription", JsonString("Deep web research agent.")),
+            JsonProperty("mode", JsonString("background")),
+            JsonProperty("model", JsonString("claude-sonnet-4.6")),
+            JsonProperty("reasoning", JsonString("Pulling rtings measurements for the C4.")),
+            JsonProperty("transcript", JsonString("LG C4: 1,000 nits peak, 144Hz, excellent near-black handling."))),
+            "Completed", toolCallId: agentA, output: "Research agent completed"));
+        chat.Messages.Add(Tool("task", JsonObject(
+            JsonProperty("description", JsonString("Benchmark the Samsung S90D QD-OLED")),
+            JsonProperty("agent_type", JsonString("research")),
+            JsonProperty("agentName", JsonString("research")),
+            JsonProperty("agentDisplayName", JsonString("Research agent")),
+            JsonProperty("agentDescription", JsonString("Deep web research agent.")),
+            JsonProperty("mode", JsonString("background")),
+            JsonProperty("model", JsonString("claude-sonnet-4.6")),
+            JsonProperty("reasoning", JsonString("Checking QD-OLED brightness claims.")),
+            JsonProperty("transcript", JsonString("Samsung S90D: brighter highlights, wider color volume, 144Hz."))),
+            "Completed", toolCallId: agentB, output: "Research agent completed"));
+        chat.Messages.Add(Tool("task", JsonObject(
+            JsonProperty("description", JsonString("Benchmark the Sony Bravia 8")),
+            JsonProperty("agent_type", JsonString("explore")),
+            JsonProperty("agentName", JsonString("explore")),
+            JsonProperty("agentDisplayName", JsonString("Explore agent")),
+            JsonProperty("agentDescription", JsonString("Fast codebase/data exploration agent.")),
+            JsonProperty("mode", JsonString("background")),
+            JsonProperty("model", JsonString("claude-haiku-4.5")),
+            JsonProperty("reasoning", JsonString("Still gathering Bravia 8 motion data."))),
+            "InProgress", toolCallId: agentC, output: null));
+
+        // Each agent's own activity streams in under its card.
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Measuring C4 peak brightness"))), "Completed", parentToolCallId: agentA));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("LG C4 rtings peak brightness 10% window"))), "Completed", parentToolCallId: agentA, output: "Returned 5 results"));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("LG C4 input lag 4k 120hz"))), "Completed", parentToolCallId: agentA, output: "Returned 4 results"));
+
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Comparing QD-OLED color volume"))), "Completed", parentToolCallId: agentB));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("Samsung S90D color volume measurement"))), "Completed", parentToolCallId: agentB, output: "Returned 6 results"));
+        chat.Messages.Add(Tool("powershell", JsonObject(
+            JsonProperty("command", JsonString("Write-Output 'S90D brightness: 1320 nits'")),
+            JsonProperty("description", JsonString("Record measurement"))), "Completed", parentToolCallId: agentB, output: "S90D brightness: 1320 nits\nexit code: 0"));
+
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Checking Bravia 8 motion handling"))), "Completed", parentToolCallId: agentC));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("Sony Bravia 8 motion interpolation review"))), "InProgress", parentToolCallId: agentC));
+
+        var parallelAssistant = Message("assistant", """
+            All three agents reported back. The **Samsung S90D** edges ahead on brightness and
+            color volume, with the **LG C4** close behind for gaming value.
+            """);
+        parallelAssistant.Author = "Lumi";
+        parallelAssistant.Model = "claude-sonnet-4.6";
+        chat.Messages.Add(parallelAssistant);
+
         chat.Messages.Add(Message("error", "Debug fixture error bubble: simulated recoverable Copilot error with retry styling."));
 
         return chat;

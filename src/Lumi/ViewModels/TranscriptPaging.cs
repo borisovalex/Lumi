@@ -67,6 +67,9 @@ internal static class TranscriptPageWeightEstimator
                 2 + subagent.Activities.Count
                   + EstimateAdditionalTextWeight(subagent.TranscriptText)
                   + EstimateAdditionalTextWeight(subagent.ReasoningText)),
+            SubagentGroupItem subagentGroup => Math.Max(
+                4,
+                2 + subagentGroup.Subagents.Sum(EstimateItemWeight)),
             ToolGroupItem toolGroup => Math.Max(4, 2 + toolGroup.ToolCalls.Count),
             QuestionItem => 3,
             PlanCardItem => 3,

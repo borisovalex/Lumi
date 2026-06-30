@@ -375,6 +375,15 @@
   "TurnSummary_ReasonedAndOneAction": "Reasoned \u00b7 1 action",
   "TurnSummary_Reasoned": "Reasoned",
 
+  "SubagentGroup_Working": "{0} agents working\u2026",
+  "SubagentGroup_Finished": "{0} agents",
+  "SubagentGroup_OneRunning": "1 running",
+  "SubagentGroup_CountRunning": "{0} running",
+  "SubagentGroup_Title": "Parallel agents",
+  "Subagent_StatusRunning": "Working",
+  "Subagent_StatusDone": "Done",
+  "Subagent_StatusFailed": "Failed",
+
   "Tool_ReasoningLabel": "Reasoning",
   "ToolTodo_Title": "Task plan",
   "ToolTodo_Meta": "{0}/{1} completed",

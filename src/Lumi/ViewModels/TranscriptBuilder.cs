@@ -365,7 +365,7 @@ public class TranscriptBuilder
             if (todoSubagent is not null)
             {
                 UpsertSubagentTodoProgressToolCall(todoSubagent, steps, msgVm.ToolStatus ?? "InProgress");
-                if (initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript)
+                if (initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript && !todoSubagent.IsGrouped)
                     todoSubagent.IsExpanded = true;
                 UpdateSubagentState(todoSubagent);
             }
@@ -497,7 +497,7 @@ public class TranscriptBuilder
 
             AddToolItemToCurrentContext(termPreview, msgVm.Message.ParentToolCallId);
 
-            if (termParentSubagent is not null && initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript)
+            if (termParentSubagent is not null && initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript && !termParentSubagent.IsGrouped)
                 termParentSubagent.IsExpanded = true;
 
             UpdateToolGroupLabel();
@@ -572,7 +572,7 @@ public class TranscriptBuilder
         }
 
         AddToolItemToCurrentContext(toolCall, msgVm.Message.ParentToolCallId);
-        if (toolParentSubagent is not null && initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript)
+        if (toolParentSubagent is not null && initialStatus == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript && !toolParentSubagent.IsGrouped)
             toolParentSubagent.IsExpanded = true;
         UpdateToolGroupLabel();
         if (shouldFlushLateFileEdit && diffs.Count > 0)
@@ -728,7 +728,7 @@ public class TranscriptBuilder
         };
         UpdateSubagentFromMessage(subagent, msgVm.Message);
 
-        AppendToCurrentTurn(subagent, turnStableId);
+        AttachSubagentToTurn(subagent, turnStableId);
         if (toolCallId is not null)
             _subagentsByToolCallId[toolCallId] = subagent;
 
@@ -873,10 +873,113 @@ public class TranscriptBuilder
                 ? subagent.DurationText
                 : $"{subagent.Meta} · {subagent.DurationText}";
 
-        if (subagent.Status == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript)
-            subagent.IsExpanded = true;
-        else if (IsRebuildingTranscript)
-            subagent.IsExpanded = false;
+        if (subagent.OwningGroup is null)
+        {
+            if (subagent.Status == StrataAiToolCallStatus.InProgress && !IsRebuildingTranscript)
+                subagent.IsExpanded = true;
+            else if (IsRebuildingTranscript)
+                subagent.IsExpanded = false;
+        }
+
+        if (subagent.OwningGroup is { } owningGroup)
+            UpdateSubagentGroupState(owningGroup);
+    }
+
+    /// <summary>
+    /// Places a freshly built sub-agent into the current turn. A lone sub-agent renders as a
+    /// standalone card; a second consecutive sub-agent promotes the pair into a
+    /// <see cref="SubagentGroupItem"/> so a parallel fan-out reads as one batch.
+    /// </summary>
+    private void AttachSubagentToTurn(SubagentToolCallItem subagent, string turnStableId)
+    {
+        var items = _currentTurn?.Items;
+        if (items is { Count: > 0 })
+        {
+            // Already grouped — append to the open group.
+            if (items[^1] is SubagentGroupItem group)
+            {
+                subagent.OwningGroup = group;
+                subagent.IsExpanded = false;
+                group.Subagents.Add(subagent);
+                UpdateSubagentGroupState(group);
+                return;
+            }
+
+            // A second back-to-back sub-agent promotes the pair into a group.
+            if (items[^1] is SubagentToolCallItem lone)
+            {
+                var newGroup = new SubagentGroupItem($"subagent-group:{lone.StableId}");
+                var idx = items.IndexOf(lone);
+
+                lone.OwningGroup = newGroup;
+                lone.IsExpanded = false;
+                subagent.OwningGroup = newGroup;
+                subagent.IsExpanded = false;
+                newGroup.Subagents.Add(lone);
+                newGroup.Subagents.Add(subagent);
+
+                if (idx >= 0)
+                    items[idx] = newGroup;
+                else
+                    items.Add(newGroup);
+
+                UpdateSubagentGroupState(newGroup);
+                return;
+            }
+        }
+
+        // First / standalone sub-agent.
+        AppendToCurrentTurn(subagent, turnStableId);
+    }
+
+    /// <summary>
+    /// Recomputes the aggregate header, meta line and progress for a sub-agent group from the
+    /// status of its members (how many agents are done / running / failed).
+    /// </summary>
+    private void UpdateSubagentGroupState(SubagentGroupItem group)
+    {
+        var total = group.Subagents.Count;
+        var completed = 0;
+        var failed = 0;
+        var running = 0;
+        for (var i = 0; i < total; i++)
+        {
+            var agent = group.Subagents[i];
+            agent.AccentIndex = (i % 6) + 1;
+            switch (agent.Status)
+            {
+                case StrataAiToolCallStatus.Completed:
+                    completed++;
+                    break;
+                case StrataAiToolCallStatus.Failed:
+                    failed++;
+                    break;
+                default:
+                    running++;
+                    break;
+            }
+        }
+
+        group.TotalCount = total;
+        group.DoneCount = completed;
+        group.FailedCount = failed;
+        group.RunningCount = running;
+        group.IsActive = running > 0;
+        group.IsExpanded = running > 0 && !IsRebuildingTranscript;
+        group.HeaderLabel = running > 0
+            ? string.Format(Loc.SubagentGroup_Working, total)
+            : string.Format(Loc.SubagentGroup_Finished, total);
+
+        group.Meta = failed > 0
+            ? string.Format(Loc.ToolGroup_MetaFailed, completed, total, failed)
+            : running > 0
+                ? string.Format(Loc.ToolGroup_MetaRunning, completed, total, running)
+                : string.Format(Loc.ToolGroup_MetaDone, completed, total);
+
+        var done = completed + failed;
+        group.ProgressValue = IsRebuildingTranscript || total == 0
+            ? -1
+            : Math.Clamp((done * 100d) / total, 0d, 100d);
     }
 
     private static void CountToolStatuses(IEnumerable<ToolCallItemBase> calls, out int total, out int completed, out int failed)

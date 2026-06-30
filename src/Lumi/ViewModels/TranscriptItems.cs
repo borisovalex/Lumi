@@ -599,6 +599,7 @@ public partial class SubagentToolCallItem : TranscriptItem
     [ObservableProperty] private StrataAiToolCallStatus _status;
     [ObservableProperty] private bool _isExpanded;
     [ObservableProperty] private double _durationMs;
+    [ObservableProperty] private int _accentIndex = 1;
 
     internal TodoProgressItem? TodoItem { get; set; }
     internal string TodoToolStatus { get; set; } = "InProgress";
@@ -606,6 +607,12 @@ public partial class SubagentToolCallItem : TranscriptItem
     internal int TodoCompleted { get; set; }
     internal int TodoFailed { get; set; }
     internal int TodoUpdateCount { get; set; }
+
+    /// <summary>Non-null when this subagent is rendered inside a parallel fan-out group.</summary>
+    internal SubagentGroupItem? OwningGroup { get; set; }
+
+    /// <summary>True when this subagent is one of several shown together in a group.</summary>
+    public bool IsGrouped => OwningGroup is { IsGrouped: true };
 
     public ObservableCollection<ToolCallItemBase> Activities { get; } = [];
 
@@ -630,6 +637,30 @@ public partial class SubagentToolCallItem : TranscriptItem
     public bool IsFailed => Status == StrataAiToolCallStatus.Failed;
     public string? DurationText => DurationMs <= 0 ? null : DurationMs >= 1000 ? $"{DurationMs / 1000:F1}s" : $"{DurationMs:F0} ms";
 
+    /// <summary>Single uppercase glyph for the agent avatar (first letter of the agent's role/name).</summary>
+    public string Initial
+    {
+        get
+        {
+            var source = !string.IsNullOrWhiteSpace(DisplayName) ? DisplayName : Title;
+            foreach (var ch in source)
+                if (char.IsLetterOrDigit(ch))
+                    return char.ToUpperInvariant(ch).ToString();
+            return "•";
+        }
+    }
+
+    /// <summary>"Role · Model" line shown under the agent's intent in a group lane.</summary>
+    public string AgentSubtitle
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(DisplayName) && !string.IsNullOrWhiteSpace(ModelDisplayName))
+                return $"{DisplayName} · {ModelDisplayName}";
+            return !string.IsNullOrWhiteSpace(ModelDisplayName) ? ModelDisplayName! : DisplayName;
+        }
+    }
+
     public SubagentToolCallItem(string displayName, StrataAiToolCallStatus status, string? stableId = null)
         : base(stableId ?? TranscriptIds.Create("subagent"))
     {
@@ -638,11 +669,20 @@ public partial class SubagentToolCallItem : TranscriptItem
         Activities.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasActivities));
     }
 
-    partial void OnDisplayNameChanged(string value) => OnPropertyChanged(nameof(Title));
+    partial void OnDisplayNameChanged(string value)
+    {
+        OnPropertyChanged(nameof(Title));
+        OnPropertyChanged(nameof(Initial));
+        OnPropertyChanged(nameof(AgentSubtitle));
+    }
     partial void OnTaskDescriptionChanged(string? value) => OnPropertyChanged(nameof(Title));
     partial void OnCurrentIntentChanged(string? value) => OnPropertyChanged(nameof(Title));
     partial void OnAgentDescriptionChanged(string? value) => OnPropertyChanged(nameof(HasDescription));
-    partial void OnModelDisplayNameChanged(string? value) => OnPropertyChanged(nameof(HasModelName));
+    partial void OnModelDisplayNameChanged(string? value)
+    {
+        OnPropertyChanged(nameof(HasModelName));
+        OnPropertyChanged(nameof(AgentSubtitle));
+    }
     partial void OnModeLabelChanged(string? value) { OnPropertyChanged(nameof(HasModeLabel)); OnPropertyChanged(nameof(IsBackgroundMode)); }
     partial void OnTranscriptTextChanged(string? value) => OnPropertyChanged(nameof(HasTranscriptText));
     partial void OnReasoningTextChanged(string? value) => OnPropertyChanged(nameof(HasReasoningText));
@@ -658,6 +698,64 @@ public partial class SubagentToolCallItem : TranscriptItem
 
         if (value != StrataAiToolCallStatus.InProgress)
             IsExpanded = false;
+    }
+
+    [RelayCommand]
+    private void ToggleExpanded() => IsExpanded = !IsExpanded;
+}
+
+// ── Subagent group (parallel fan-out container) ────────
+
+/// <summary>
+/// Groups several sub-agents that were launched together (a parallel fan-out) into a single
+/// scannable card with an aggregate header, instead of stacking disconnected agent cards.
+/// Only created when 2+ sub-agents run back-to-back; a lone sub-agent stays a standalone card.
+/// </summary>
+public partial class SubagentGroupItem : TranscriptItem
+{
+    [ObservableProperty] private string _headerLabel = "";
+    [ObservableProperty] private string? _meta;
+    [ObservableProperty] private double _progressValue = -1;
+    [ObservableProperty] private bool _isActive;
+    [ObservableProperty] private bool _isExpanded = true;
+    [ObservableProperty] private int _totalCount;
+    [ObservableProperty] private int _doneCount;
+    [ObservableProperty] private int _runningCount;
+    [ObservableProperty] private int _failedCount;
+
+    public ObservableCollection<SubagentToolCallItem> Subagents { get; } = [];
+
+    public int Count => Subagents.Count;
+    public bool IsGrouped => Subagents.Count >= 2;
+    public bool HasProgressValue => ProgressValue >= 0;
+    public bool HasRunning => RunningCount > 0;
+    public bool HasFailed => FailedCount > 0;
+    public bool ShowDoneBadge => !IsActive && FailedCount == 0 && TotalCount > 0;
+    public bool ShowFailedBadge => !IsActive && FailedCount > 0;
+
+    partial void OnProgressValueChanged(double value) => OnPropertyChanged(nameof(HasProgressValue));
+    partial void OnRunningCountChanged(int value) => OnPropertyChanged(nameof(HasRunning));
+    partial void OnFailedCountChanged(int value)
+    {
+        OnPropertyChanged(nameof(HasFailed));
+        OnPropertyChanged(nameof(ShowDoneBadge));
+        OnPropertyChanged(nameof(ShowFailedBadge));
+    }
+    partial void OnIsActiveChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowDoneBadge));
+        OnPropertyChanged(nameof(ShowFailedBadge));
+    }
+    partial void OnTotalCountChanged(int value) => OnPropertyChanged(nameof(ShowDoneBadge));
+
+    public SubagentGroupItem(string? stableId = null)
+        : base(stableId ?? TranscriptIds.Create("subagent-group"))
+    {
+        Subagents.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(Count));
+            OnPropertyChanged(nameof(IsGrouped));
+        };
     }
 }
 

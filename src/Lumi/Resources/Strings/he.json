@@ -376,6 +376,15 @@
   "TurnSummary_ReasonedAndOneAction": "חשב \u00b7 פעולה אחת",
   "TurnSummary_Reasoned": "חשב",
 
+  "SubagentGroup_Working": "{0} סוכנים פועלים\u2026",
+  "SubagentGroup_Finished": "{0} סוכנים",
+  "SubagentGroup_OneRunning": "אחד פעיל",
+  "SubagentGroup_CountRunning": "{0} פעילים",
+  "SubagentGroup_Title": "סוכנים במקביל",
+  "Subagent_StatusRunning": "פועל",
+  "Subagent_StatusDone": "הושלם",
+  "Subagent_StatusFailed": "נכשל",
+
   "Tool_ReasoningLabel": "חשיבה",
   "ToolTodo_Title": "תוכנית עבודה",
   "ToolTodo_Meta": "{0}/{1} הושלמו",

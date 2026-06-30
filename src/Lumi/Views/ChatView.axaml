@@ -15,6 +15,7 @@
 
   <UserControl.Resources>
     <conv:ModelDisplayConverter x:Key="ModelDisplayConverter" />
+    <conv:ChartBrushConverter x:Key="ChartBrush" />
     <!-- Shared reading-column width: the transcript and composer both cap at this
          and center, so on large/maximized windows content stays a balanced column
          instead of clinging to the edges. On narrow windows it grows to full width. -->
@@ -923,6 +924,109 @@
           </StackPanel>
         </sc:StrataThink.Content>
         </sc:StrataThink>
+    </DataTemplate>
+
+    <!-- ── Parallel agents group (native Strata pills) ── -->
+    <DataTemplate DataType="vm:SubagentGroupItem">
+      <sc:StrataThink Label="{Binding HeaderLabel}"
+                      Meta="{Binding Meta}"
+                      IsExpanded="{Binding IsExpanded}"
+                      IsActive="{Binding IsActive}"
+                      ProgressValue="{Binding ProgressValue}">
+        <sc:StrataThink.HeaderExtra>
+          <ItemsControl ItemsSource="{Binding Subagents}" VerticalAlignment="Center" Margin="2,0,0,0">
+            <ItemsControl.Styles>
+              <Style Selector="Border.cluster-avatar">
+                <Setter Property="Width" Value="18" />
+                <Setter Property="Height" Value="18" />
+                <Setter Property="CornerRadius" Value="9" />
+                <Setter Property="BorderThickness" Value="2" />
+                <Setter Property="BorderBrush" Value="{DynamicResource Brush.SurfaceCard}" />
+              </Style>
+              <Style Selector="Border.cluster-avatar > TextBlock">
+                <Setter Property="HorizontalAlignment" Value="Center" />
+                <Setter Property="VerticalAlignment" Value="Center" />
+                <Setter Property="FontSize" Value="9" />
+                <Setter Property="FontWeight" Value="Bold" />
+                <Setter Property="Foreground" Value="#FFFFFFFF" />
+              </Style>
+            </ItemsControl.Styles>
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="-6" /></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:SubagentToolCallItem">
+                <Border Classes="cluster-avatar"
+                        Background="{Binding AccentIndex, Converter={StaticResource ChartBrush}}">
+                  <TextBlock Text="{Binding Initial}" />
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </sc:StrataThink.HeaderExtra>
+        <sc:StrataThink.Content>
+          <ItemsControl ItemsSource="{Binding Subagents}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate><StackPanel Spacing="4" /></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:SubagentToolCallItem">
+                <sc:StrataThink Label="{Binding Title}"
+                                Meta="{Binding AgentSubtitle}"
+                                IsExpanded="{Binding IsExpanded}"
+                                IsActive="{Binding IsActive}"
+                                ProgressValue="{Binding ProgressValue}">
+                  <sc:StrataThink.HeaderExtra>
+                    <Border Width="16" Height="16" CornerRadius="8" VerticalAlignment="Center"
+                            Background="{Binding AccentIndex, Converter={StaticResource ChartBrush}}">
+                      <TextBlock Text="{Binding Initial}" FontSize="8.5" FontWeight="Bold"
+                                 Foreground="#FFFFFFFF"
+                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                  </sc:StrataThink.HeaderExtra>
+                  <sc:StrataThink.Content>
+                    <StackPanel Spacing="6">
+                      <sc:StrataThink Label="{loc:Str Tool_ReasoningLabel}"
+                                      IsExpanded="True"
+                                      IsActive="{Binding IsActive}"
+                                      IsVisible="{Binding HasReasoningText}">
+                        <sc:StrataThink.Content>
+                          <lc:TranscriptTextContent Text="{Binding ReasoningText}"
+                                                    PreferPlainText="{Binding IsActive}"
+                                                    RenderMarkdownWhileStreaming="True" />
+                        </sc:StrataThink.Content>
+                      </sc:StrataThink>
+                      <lc:TranscriptTextContent Text="{Binding TranscriptText}"
+                                                PreferPlainText="{Binding IsActive}"
+                                                RenderMarkdownWhileStreaming="True"
+                                                IsVisible="{Binding HasTranscriptText}" />
+                      <ItemsControl ItemsSource="{Binding Activities}"
+                                    IsVisible="{Binding HasActivities}">
+                        <ItemsControl.Styles>
+                          <Style Selector="ContentPresenter">
+                            <Setter Property="Margin" Value="0,0,6,6" />
+                          </Style>
+                          <Style Selector="sc|StrataAiToolCall">
+                            <Setter Property="MinWidth" Value="320" />
+                            <Setter Property="MaxWidth" Value="420" />
+                          </Style>
+                          <Style Selector="sc|StrataTerminalPreview">
+                            <Setter Property="MinWidth" Value="360" />
+                            <Setter Property="MaxWidth" Value="560" />
+                          </Style>
+                        </ItemsControl.Styles>
+                        <ItemsControl.ItemsPanel>
+                          <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                      </ItemsControl>
+                    </StackPanel>
+                  </sc:StrataThink.Content>
+                </sc:StrataThink>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </sc:StrataThink.Content>
+      </sc:StrataThink>
     </DataTemplate>
 
     <!-- ── Regular tool call (inside tool group) ────── -->
