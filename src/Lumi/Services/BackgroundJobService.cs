@@ -19,9 +19,14 @@ public sealed class BackgroundJobService : IDisposable
     private static readonly Encoding ScriptEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
     private readonly DataStore _dataStore;
-    private readonly ChatViewModel _chatViewModel;
+    private readonly ChatSurfaceRegistry _chatSurfaceRegistry;
+    private readonly bool _ownsChatSurfaceRegistry;
+    private readonly ChatViewModel? _fallbackChatViewModel;
+    private readonly ChatSessionStore? _chatSessionStore;
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly SemaphoreSlim _scanLock = new(1, 1);
+    private readonly object _chatInvocationLocksSync = new();
+    private readonly Dictionary<Guid, SemaphoreSlim> _chatInvocationLocks = [];
     private readonly object _rescheduleSync = new();
     private CancellationTokenSource _rescheduleCts = new();
     private Task? _runnerTask;
@@ -31,9 +36,93 @@ public sealed class BackgroundJobService : IDisposable
     public event Action? JobsChanged;
 
     public BackgroundJobService(DataStore dataStore, ChatViewModel chatViewModel)
+        : this(dataStore, CreateSingleSurfaceRegistry(chatViewModel), chatViewModel)
+    {
+        _ownsChatSurfaceRegistry = true;
+    }
+
+    public BackgroundJobService(
+        DataStore dataStore,
+        ChatSurfaceRegistry chatSurfaceRegistry,
+        ChatSessionStore chatSessionStore)
     {
         _dataStore = dataStore;
-        _chatViewModel = chatViewModel;
+        _chatSurfaceRegistry = chatSurfaceRegistry;
+        _chatSessionStore = chatSessionStore;
+    }
+
+    public BackgroundJobService(
+        DataStore dataStore,
+        ChatSurfaceRegistry chatSurfaceRegistry,
+        ChatViewModel fallbackChatViewModel)
+    {
+        _dataStore = dataStore;
+        _chatSurfaceRegistry = chatSurfaceRegistry;
+        _fallbackChatViewModel = fallbackChatViewModel;
+    }
+
+    private static ChatSurfaceRegistry CreateSingleSurfaceRegistry(ChatViewModel chatViewModel)
+    {
+        ArgumentNullException.ThrowIfNull(chatViewModel);
+        var registry = new ChatSurfaceRegistry();
+        registry.Attach(chatViewModel);
+        return registry;
+    }
+
+    private ChatViewModel ResolveChatExecutor(Guid chatId)
+    {
+        if (_chatSurfaceRegistry.TryGetLiveOwner(chatId, out var liveSurface))
+            return liveSurface;
+
+        if (_chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface))
+            return visibleSurface;
+
+        if (_fallbackChatViewModel is not null)
+            return _fallbackChatViewModel;
+
+        throw new InvalidOperationException($"No chat executor is available for chat {chatId}.");
+    }
+
+    private async Task<(ChatViewModel Executor, bool ReleaseWhenDone)> ResolveChatExecutorForInvocationAsync(Guid chatId)
+    {
+        if (_chatSurfaceRegistry.TryGetLiveOwner(chatId, out var liveSurface))
+            return (liveSurface, false);
+
+        if (_chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface))
+        {
+            if (_chatSessionStore is not null)
+            {
+                _chatSessionStore.Retain(visibleSurface);
+                return (visibleSurface, true);
+            }
+
+            return (visibleSurface, false);
+        }
+
+        if (_chatSessionStore is not null)
+        {
+            var chat = _dataStore.Data.Chats.FirstOrDefault(candidate => candidate.Id == chatId)
+                ?? throw new InvalidOperationException($"Background job chat not found: {chatId}");
+            return (await _chatSessionStore.AcquireChatAsync(chat), true);
+        }
+
+        if (_fallbackChatViewModel is not null)
+            return (_fallbackChatViewModel, false);
+
+        throw new InvalidOperationException($"No chat executor is available for chat {chatId}.");
+    }
+
+    internal ChatViewModel ResolveChatExecutorForTest(Guid chatId) => ResolveChatExecutor(chatId);
+
+    private bool IsChatBusy(Guid chatId)
+    {
+        if (_chatSurfaceRegistry.TryGetLiveOwner(chatId, out var liveSurface))
+            return liveSurface.IsChatBusy(chatId);
+
+        if (_chatSurfaceRegistry.TryGetOwner(chatId, out var visibleSurface))
+            return visibleSurface.IsChatBusy(chatId);
+
+        return _fallbackChatViewModel?.IsChatBusy(chatId) == true;
     }
 
     public void Start()
@@ -41,7 +130,15 @@ public sealed class BackgroundJobService : IDisposable
         if (Interlocked.Exchange(ref _started, 1) == 1)
             return;
 
+#if DEBUG
+        // The automatic scheduler is intentionally disabled in Debug builds. When Lumi is
+        // debugged from multiple git worktrees, every open debug window would otherwise fire
+        // each scheduled job, running it many times over. Manual "Run now" (RunDueJobsNowAsync)
+        // still works for testing jobs while debugging.
+        return;
+#else
         _runnerTask = Task.Run(RunAsync);
+#endif
     }
 
     public async Task RunDueJobsNowAsync(CancellationToken cancellationToken = default)
@@ -134,17 +231,6 @@ public sealed class BackgroundJobService : IDisposable
                     if (nextRun > now)
                     {
                         nextRunAt = Earlier(nextRunAt, nextRun.Value);
-                        continue;
-                    }
-
-                    if (_chatViewModel.IsChatBusy(job.ChatId))
-                    {
-                        job.LastRunStatus = BackgroundJobRunStatuses.Waiting;
-                        job.LastRunSummary = "Linked chat is busy; retrying soon.";
-                        job.NextRunAt = now.AddSeconds(10);
-                        job.UpdatedAt = now;
-                        nextRunAt = Earlier(nextRunAt, job.NextRunAt.Value);
-                        changed = true;
                         continue;
                     }
 
@@ -263,8 +349,18 @@ public sealed class BackgroundJobService : IDisposable
             if (!JobHasValidChat(job))
                 throw new InvalidOperationException("Linked chat was deleted.");
 
-            await WaitForChatAvailableAsync(job, ct);
-            await InvokeChatAsync(job, triggerContext, ct);
+            var chatInvocationLock = GetChatInvocationLock(job.ChatId);
+            await chatInvocationLock.WaitAsync(ct);
+            try
+            {
+                await WaitForChatAvailableAsync(job, ct);
+                await InvokeChatAsync(job, triggerContext, ct);
+            }
+            finally
+            {
+                chatInvocationLock.Release();
+            }
+
             var summary = scriptResult is null
                 ? $"Invoked Lumi in chat at {DateTimeOffset.Now:t}."
                 : $"Script exited with code {scriptResult.ExitCode} and woke Lumi at {DateTimeOffset.Now:t}.";
@@ -299,6 +395,20 @@ public sealed class BackgroundJobService : IDisposable
             }
 
             await SaveAndNotifyAsync(CancellationToken.None);
+        }
+    }
+
+    private SemaphoreSlim GetChatInvocationLock(Guid chatId)
+    {
+        lock (_chatInvocationLocksSync)
+        {
+            if (!_chatInvocationLocks.TryGetValue(chatId, out var chatLock))
+            {
+                chatLock = new SemaphoreSlim(1, 1);
+                _chatInvocationLocks[chatId] = chatLock;
+            }
+
+            return chatLock;
         }
     }
 
@@ -339,7 +449,17 @@ public sealed class BackgroundJobService : IDisposable
         {
             try
             {
-                await _chatViewModel.SendBackgroundJobMessageAsync(job, triggerContext, ct);
+                var (executor, releaseWhenDone) = await ResolveChatExecutorForInvocationAsync(job.ChatId);
+                try
+                {
+                    await executor.SendBackgroundJobMessageAsync(job, triggerContext, ct);
+                }
+                finally
+                {
+                    if (releaseWhenDone)
+                        _chatSessionStore?.Release(executor);
+                }
+
                 tcs.TrySetResult();
             }
             catch (Exception ex)
@@ -354,7 +474,7 @@ public sealed class BackgroundJobService : IDisposable
     private async Task WaitForChatAvailableAsync(BackgroundJob job, CancellationToken ct)
     {
         var savedWaitingState = false;
-        while (_chatViewModel.IsChatBusy(job.ChatId))
+        while (await IsChatBusyAsync(job.ChatId, ct))
         {
             if (!savedWaitingState)
             {
@@ -371,6 +491,24 @@ public sealed class BackgroundJobService : IDisposable
 
             await Task.Delay(TimeSpan.FromSeconds(2), ct);
         }
+    }
+
+    private async Task<bool> IsChatBusyAsync(Guid chatId, CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Dispatcher.UIThread.Post(() =>
+        {
+            try
+            {
+                tcs.TrySetResult(IsChatBusy(chatId));
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        });
+
+        return await tcs.Task.WaitAsync(ct);
     }
 
     private async Task<ScriptTriggerResult> RunScriptTriggerAsync(BackgroundJob job, DateTimeOffset startedAt, CancellationToken ct)
@@ -705,6 +843,14 @@ public sealed class BackgroundJobService : IDisposable
         }
 
         _scanLock.Dispose();
+        lock (_chatInvocationLocksSync)
+        {
+            foreach (var chatLock in _chatInvocationLocks.Values)
+                chatLock.Dispose();
+            _chatInvocationLocks.Clear();
+        }
+        if (_ownsChatSurfaceRegistry)
+            _chatSurfaceRegistry.Dispose();
     }
 
     private bool IsStopping => Volatile.Read(ref _stopping) == 1;

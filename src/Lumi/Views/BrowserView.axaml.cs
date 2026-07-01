@@ -242,6 +242,10 @@ public partial class BrowserView : UserControl
         var topLevel = TopLevel.GetTopLevel(this);
         if (topLevel is null) return;
 
+        var platformHandle = topLevel.TryGetPlatformHandle();
+        if (platformHandle is not null)
+            _browserService.SetParentHwnd(platformHandle.Handle);
+
         var scaling = topLevel.RenderScaling;
 
         // Translate the physical left edge instead of logical x=0 so RTL layouts

@@ -18,6 +18,12 @@ class Program
 #if DEBUG
     /// <summary>When true, opens Lumi directly into the agent debug transcript fixture.</summary>
     public static bool OpenAgentDebugHarness { get; private set; }
+
+    /// <summary>When true, debug automation starts in the main app without first-run onboarding.</summary>
+    public static bool SkipOnboarding { get; private set; }
+
+    /// <summary>Parsed options for the UI responsiveness harness (enabled via CLI flag, debug only).</summary>
+    public static UiPerf.UiHarnessOptions? UiHarnessOptions { get; private set; }
 #endif
 
     [STAThread]
@@ -30,11 +36,38 @@ class Program
 
 #if DEBUG
         OpenAgentDebugHarness = args.Any(DebugAgentHarness.IsUiHarnessFlag);
+        SkipOnboarding = args.Contains("--skip-onboarding", StringComparer.OrdinalIgnoreCase)
+            || args.Contains("--no-onboarding", StringComparer.OrdinalIgnoreCase);
+
+        // The UI responsiveness harness boots the real headed app, so it integrates with normal
+        // startup. It must run in an isolated app-data dir (set BEFORE any DataStore access) so the
+        // user's real Lumi data is never touched, and it skips onboarding on the fresh data dir.
+        UiHarnessOptions = UiPerf.UiHarnessOptions.Parse(args);
+        if (UiHarnessOptions.Enabled)
+        {
+            AttachParentConsole();
+            EnsureIsolatedUiHarnessAppDataDir();
+            SkipOnboarding = true;
+        }
 
         if (args.Any(DebugAgentHarness.IsChatStressFlag))
         {
             AttachParentConsole();
             RunChatStressAsync().GetAwaiter().GetResult();
+            return;
+        }
+
+        if (args.Any(DebugAgentHarness.IsNativeMcpStressFlag))
+        {
+            AttachParentConsole();
+            RunNativeMcpStressAsync().GetAwaiter().GetResult();
+            return;
+        }
+
+        if (args.Any(DebugAgentHarness.IsProxyMcpStressFlag))
+        {
+            AttachParentConsole();
+            RunProxyMcpStressAsync().GetAwaiter().GetResult();
             return;
         }
 
@@ -55,7 +88,7 @@ class Program
 
     private static void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
-        if (!IsAvaloniaTextSelectionHandleBoundsFailure(e.Exception))
+        if (!IsAvaloniaTextSelectionBoundsFailure(e.Exception))
             return;
 
         System.Diagnostics.Trace.TraceWarning(
@@ -63,20 +96,31 @@ class Program
         e.Handled = true;
     }
 
-    private static bool IsAvaloniaTextSelectionHandleBoundsFailure(Exception exception)
+    internal static bool IsAvaloniaTextSelectionBoundsFailure(Exception exception)
     {
         for (var current = exception; current is not null; current = current.InnerException)
         {
             if (current is InvalidOperationException
                 && string.Equals(current.Message, "Covered length must be greater than zero.", StringComparison.Ordinal)
-                && current.StackTrace?.Contains("TextSelectionHandleCanvas", StringComparison.Ordinal) == true
-                && current.StackTrace?.Contains("HitTestTextRange", StringComparison.Ordinal) == true)
+                && IsAvaloniaTextSelectionStack(current.StackTrace))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static bool IsAvaloniaTextSelectionStack(string? stackTrace)
+    {
+        if (string.IsNullOrEmpty(stackTrace)
+            || !stackTrace.Contains("HitTestTextRange", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return stackTrace.Contains("TextSelectionHandleCanvas", StringComparison.Ordinal)
+            || stackTrace.Contains("SelectableTextBlock.RenderTextLayout", StringComparison.Ordinal);
     }
 
 #if DEBUG
@@ -91,6 +135,20 @@ class Program
     {
         var copilotService = new Services.CopilotService();
         var exitCode = await DebugAgentHarness.RunChatStressAsync(copilotService, default);
+        Environment.ExitCode = exitCode;
+    }
+
+    private static async System.Threading.Tasks.Task RunNativeMcpStressAsync()
+    {
+        var copilotService = new Services.CopilotService();
+        var exitCode = await DebugAgentHarness.RunNativeMcpStressAsync(copilotService, default);
+        Environment.ExitCode = exitCode;
+    }
+
+    private static async System.Threading.Tasks.Task RunProxyMcpStressAsync()
+    {
+        var copilotService = new Services.CopilotService();
+        var exitCode = await DebugAgentHarness.RunProxyMcpStressAsync(copilotService, default);
         Environment.ExitCode = exitCode;
     }
 
@@ -109,6 +167,22 @@ class Program
 
         Console.SetOut(new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true });
         Console.SetError(new StreamWriter(Console.OpenStandardError()) { AutoFlush = true });
+    }
+
+    /// <summary>Points Lumi at a throwaway app-data directory so the harness never touches real data.</summary>
+    private static void EnsureIsolatedUiHarnessAppDataDir()
+    {
+        var existing = Environment.GetEnvironmentVariable("LUMI_APPDATA_DIR");
+        if (!string.IsNullOrWhiteSpace(existing))
+        {
+            Console.WriteLine($"[ui-perf] Using caller-provided LUMI_APPDATA_DIR: {existing}");
+            return;
+        }
+
+        var dir = Path.Combine(Path.GetTempPath(), "Lumi-ui-perf-appdata", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        Environment.SetEnvironmentVariable("LUMI_APPDATA_DIR", dir);
+        Console.WriteLine($"[ui-perf] Using isolated app-data dir: {dir}");
     }
 #endif
 

@@ -1,11 +1,12 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
@@ -16,7 +17,7 @@ namespace Lumi.Tests;
 public sealed class ChatViewModelLeakTests
 {
     [Fact]
-    public void ReleaseInactiveChatState_ClearsDetachedChatResources()
+    public void ReleaseInactiveChatState_ReleasesDetachedRuntimeResourcesWithoutEvictingMessages()
     {
         var dataStore = CreateDataStore();
         var vm = new ChatViewModel(dataStore, new CopilotService());
@@ -30,8 +31,7 @@ public sealed class ChatViewModelLeakTests
 
         GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates")[inactiveChat.Id] = new ChatRuntimeState
         {
-            Chat = inactiveChat,
-            HasUsedBrowser = true
+            Chat = inactiveChat
         };
         GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources")[inactiveChat.Id] = new CancellationTokenSource();
         var subscription = new CountingDisposable();
@@ -40,11 +40,12 @@ public sealed class ChatViewModelLeakTests
             new ChatMessage { Role = "assistant", Content = "streaming" };
         GetField<HashSet<Guid>>(vm, "_suggestionGenerationInFlightChats").Add(inactiveChat.Id);
         GetField<Dictionary<Guid, Guid>>(vm, "_lastSuggestedAssistantMessageByChat")[inactiveChat.Id] = Guid.NewGuid();
-        GetField<Dictionary<Guid, BrowserService>>(vm, "_chatBrowserServices")[inactiveChat.Id] = new BrowserService();
+        GetField<ConcurrentDictionary<Guid, BrowserService>>(vm, "_chatBrowserServices")[inactiveChat.Id] = new BrowserService();
 
-        InvokePrivate(vm, "ReleaseInactiveChatState", inactiveChat, true);
+        InvokePrivate(vm, "ReleaseInactiveChatState", inactiveChat);
 
-        Assert.Empty(inactiveChat.Messages);
+        Assert.Single(inactiveChat.Messages);
+        Assert.Equal("cached", inactiveChat.Messages[0].Content);
         Assert.Equal(1, subscription.DisposeCount);
         Assert.False(GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates").ContainsKey(inactiveChat.Id));
         Assert.False(GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources").ContainsKey(inactiveChat.Id));
@@ -52,7 +53,40 @@ public sealed class ChatViewModelLeakTests
         Assert.False(GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages").ContainsKey(inactiveChat.Id));
         Assert.DoesNotContain(inactiveChat.Id, GetField<HashSet<Guid>>(vm, "_suggestionGenerationInFlightChats"));
         Assert.DoesNotContain(inactiveChat.Id, GetField<Dictionary<Guid, Guid>>(vm, "_lastSuggestedAssistantMessageByChat").Keys);
-        Assert.False(GetField<Dictionary<Guid, BrowserService>>(vm, "_chatBrowserServices").ContainsKey(inactiveChat.Id));
+        // Browser sessions belong to the chat's lifetime, not its transient runtime state, so they
+        // survive an inactive-state release and are reattached when the user switches back.
+        Assert.True(GetField<ConcurrentDictionary<Guid, BrowserService>>(vm, "_chatBrowserServices").ContainsKey(inactiveChat.Id));
+    }
+
+    [Fact]
+    public void BrowserService_SurvivesInactiveReleaseButIsDisposedOnCleanup()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var activeChat = new Chat { Title = "active" };
+        var browserChat = new Chat { Title = "browser" };
+        browserChat.Messages.Add(new ChatMessage { Role = "assistant", Content = "kept" });
+
+        dataStore.Data.Chats.Add(activeChat);
+        dataStore.Data.Chats.Add(browserChat);
+        vm.CurrentChat = activeChat;
+
+        var services = GetField<ConcurrentDictionary<Guid, BrowserService>>(vm, "_chatBrowserServices");
+        services[browserChat.Id] = new BrowserService();
+        GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates")[browserChat.Id] =
+            new ChatRuntimeState { Chat = browserChat };
+
+        // Going inactive releases the runtime state but preserves the browser session so the user
+        // can return to the chat and find the browser exactly as they left it.
+        InvokePrivate(vm, "ReleaseInactiveChatState", browserChat);
+        Assert.False(GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates").ContainsKey(browserChat.Id));
+        Assert.True(services.ContainsKey(browserChat.Id));
+
+        // Deleting the chat tears the browser session down for good.
+        vm.CleanupSession(browserChat.Id);
+        Assert.False(services.ContainsKey(browserChat.Id));
+
+        vm.Dispose();
     }
 
     [Fact]
@@ -76,7 +110,7 @@ public sealed class ChatViewModelLeakTests
         var subscription = new CountingDisposable();
         GetField<Dictionary<Guid, IDisposable>>(vm, "_sessionSubs")[busyChat.Id] = subscription;
 
-        InvokePrivate(vm, "ReleaseInactiveChatState", busyChat, true);
+        InvokePrivate(vm, "ReleaseInactiveChatState", busyChat);
 
         Assert.Single(busyChat.Messages);
         Assert.Equal(0, subscription.DisposeCount);
@@ -97,9 +131,40 @@ public sealed class ChatViewModelLeakTests
         dataStore.Data.Chats.Add(detachedChat);
         vm.CurrentChat = activeChat;
 
-        InvokePrivate(vm, "ReleaseInactiveChatState", detachedChat, true);
+        InvokePrivate(vm, "ReleaseInactiveChatState", detachedChat);
 
         Assert.False(GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates").ContainsKey(detachedChat.Id));
+    }
+
+    [Fact]
+    public void DropCompletedTurnState_RemovesStaleLiveOwnershipMarkersAfterIdle()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "completed" };
+        dataStore.Data.Chats.Add(chat);
+
+        GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates")[chat.Id] = new ChatRuntimeState
+        {
+            Chat = chat
+        };
+        GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources")[chat.Id] = new CancellationTokenSource();
+        GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages")[chat.Id] =
+            new ChatMessage { Role = "assistant", Content = "done" };
+
+        Assert.True(vm.OwnsLiveChat(chat.Id));
+
+        InvokePrivate(vm, "DropCompletedTurnState", chat.Id, false);
+
+        Assert.True(GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources").ContainsKey(chat.Id));
+        Assert.False(GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages").ContainsKey(chat.Id));
+        Assert.True(vm.OwnsLiveChat(chat.Id));
+
+        InvokePrivate(vm, "DropCompletedTurnState", chat.Id, true);
+
+        Assert.False(GetField<Dictionary<Guid, CancellationTokenSource>>(vm, "_ctsSources").ContainsKey(chat.Id));
+        Assert.False(GetField<Dictionary<Guid, ChatMessage>>(vm, "_inProgressMessages").ContainsKey(chat.Id));
+        Assert.False(vm.OwnsLiveChat(chat.Id));
     }
 
     [Fact]
@@ -139,6 +204,167 @@ public sealed class ChatViewModelLeakTests
         };
 
         Assert.True(vm.IsChatBusy(chat.Id));
+    }
+
+    [Fact]
+    public void IsChatBusy_ReturnsTrueWhileToolIsStillTracked()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "tool-chat" };
+
+        dataStore.Data.Chats.Add(chat);
+        GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates")[chat.Id] = new ChatRuntimeState
+        {
+            Chat = chat,
+            ActiveToolCount = 1
+        };
+
+        Assert.True(vm.IsChatBusy(chat.Id));
+    }
+
+    [Fact]
+    public void MarkRuntimeActive_SetsRunningFlagForPreSendWork()
+    {
+        var chat = new Chat { Title = "worktree-chat" };
+        var runtime = new ChatRuntimeState { Chat = chat };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeActive", runtime, "Creating worktree", true, false);
+
+        Assert.True(runtime.IsBusy);
+        Assert.True(runtime.IsStreaming);
+        Assert.True(chat.IsRunning);
+        Assert.Equal("Creating worktree", runtime.StatusText);
+    }
+
+    [Fact]
+    public void MarkRuntimeWaitingForSessionIdle_KeepsRunningWhileTurnIsTracked()
+    {
+        var chat = new Chat { Title = "agent-chat" };
+        var runtime = new ChatRuntimeState
+        {
+            Chat = chat,
+            IsBusy = true,
+            IsStreaming = true,
+            PendingSessionUserMessageCount = 1,
+            StatusText = "Running agent"
+        };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeWaitingForSessionIdle", runtime);
+
+        Assert.True(runtime.IsBusy);
+        Assert.False(runtime.IsStreaming);
+        Assert.True(chat.IsRunning);
+        Assert.Equal("Running agent", runtime.StatusText);
+    }
+
+    [Fact]
+    public void MarkRuntimeWaitingForSessionIdle_KeepsRunningWhileBackgroundWorkIsPending()
+    {
+        var chat = new Chat { Title = "background-chat" };
+        var runtime = new ChatRuntimeState
+        {
+            Chat = chat,
+            IsStreaming = true,
+            HasPendingBackgroundWork = true
+        };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeWaitingForSessionIdle", runtime);
+
+        Assert.True(runtime.IsBusy);
+        Assert.False(runtime.IsStreaming);
+        Assert.True(runtime.HasPendingBackgroundWork);
+        Assert.True(chat.IsRunning);
+    }
+
+    [Fact]
+    public void MarkRuntimeWaitingForSessionIdle_ClearsWhenNoWorkRemains()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var runtime = new ChatRuntimeState
+        {
+            Chat = chat,
+            IsBusy = true,
+            IsStreaming = true,
+            StatusText = "Finishing"
+        };
+
+        InvokePrivateStatic(typeof(ChatViewModel), "MarkRuntimeWaitingForSessionIdle", runtime);
+
+        Assert.False(runtime.IsBusy);
+        Assert.False(runtime.IsStreaming);
+        Assert.False(chat.IsRunning);
+        Assert.Equal("", runtime.StatusText);
+    }
+
+    [Fact]
+    public void FinalizeTerminalAssistantMessage_AddsCompletedStreamingMessage()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var streamingMessage = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "final answer",
+            IsStreaming = true
+        };
+
+        var added = ChatViewModel.FinalizeTerminalAssistantMessage(chat, streamingMessage);
+
+        Assert.True(added);
+        Assert.False(streamingMessage.IsStreaming);
+        Assert.Same(streamingMessage, Assert.Single(chat.Messages));
+    }
+
+    [Fact]
+    public void FinalizeTerminalAssistantMessage_DoesNotPersistEmptyStreamingMessage()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var streamingMessage = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "   ",
+            IsStreaming = true
+        };
+
+        var added = ChatViewModel.FinalizeTerminalAssistantMessage(chat, streamingMessage);
+
+        Assert.False(added);
+        Assert.False(streamingMessage.IsStreaming);
+        Assert.Empty(chat.Messages);
+    }
+
+    [Fact]
+    public void FinalizeTerminalAssistantMessage_DoesNotDuplicateExistingMessage()
+    {
+        var chat = new Chat { Title = "complete-chat" };
+        var streamingMessage = new ChatMessage
+        {
+            Role = "assistant",
+            Content = "final answer",
+            IsStreaming = true
+        };
+        chat.Messages.Add(streamingMessage);
+
+        var added = ChatViewModel.FinalizeTerminalAssistantMessage(chat, streamingMessage);
+
+        Assert.True(added);
+        Assert.False(streamingMessage.IsStreaming);
+        Assert.Single(chat.Messages);
+    }
+
+    [Fact]
+    public void FinalizeTerminalReasoningMessage_ClearsStreamingState()
+    {
+         var reasoningMessage = new ChatMessage
+        {
+            Role = "reasoning",
+            Content = "thinking",
+            IsStreaming = true
+        };
+
+        ChatViewModel.FinalizeTerminalReasoningMessage(reasoningMessage);
+
+        Assert.False(reasoningMessage.IsStreaming);
     }
 
     [Fact]
@@ -341,11 +567,11 @@ public sealed class ChatViewModelLeakTests
         GetField<Dictionary<Guid, IDisposable>>(vm, "_sessionSubs")[detachedChat.Id] = subscription;
 
         InvokePrivate(vm, "DetachSessionAfterRemoteShutdown", detachedChat, false);
-        InvokePrivate(vm, "ReleaseInactiveChatState", detachedChat, true);
+        InvokePrivate(vm, "ReleaseInactiveChatState", detachedChat);
 
         Assert.Equal(1, subscription.DisposeCount);
         Assert.False(GetField<Dictionary<Guid, ChatRuntimeState>>(vm, "_runtimeStates").ContainsKey(detachedChat.Id));
-        Assert.Empty(detachedChat.Messages);
+        Assert.Single(detachedChat.Messages);
     }
 
     [Fact]
@@ -779,10 +1005,49 @@ public sealed class ChatViewModelLeakTests
         var vm = new ChatViewModel(dataStore, new CopilotService());
         vm.SetActiveAgent(activeAgent);
 
-        var configs = InvokePrivate<List<CustomAgentConfig>>(vm, "BuildCustomAgents");
+        var configs = InvokePrivate<List<CustomAgentConfig>>(vm, "BuildCustomAgents", new object[] { null! });
 
         Assert.Contains(configs, cfg => cfg.Name == activeAgent.Name);
         Assert.Contains(configs, cfg => cfg.Name == otherAgent.Name);
+    }
+
+    [Fact]
+    public void BuildCustomAgents_RegistersDiscoveredExternalAgentsAsDelegatableSubagents()
+    {
+        var dataStore = CreateDataStore();
+        dataStore.Data.Agents.Add(new LumiAgent
+        {
+            Name = "Lumi agent",
+            Description = "Built-in persona",
+            SystemPrompt = "You are a Lumi agent."
+        });
+
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+
+        var catalog = new ProjectContextCatalogSnapshot(
+            new[] { new CopilotSkillDefinition("SomeSkill", "desc", "content", @"C:\repo\.github\skills\some\SKILL.md") },
+            new[]
+            {
+                new CopilotAgentDefinition("WebReviewer", "Reviews web app code", "You review TypeScript code.", @"C:\repo\.github\agents\reviewer\AGENT.md"),
+                new CopilotAgentDefinition("Lumi agent", "External duplicate", "External duplicate body.", @"C:\repo\.github\agents\dup\AGENT.md"),
+                new CopilotAgentDefinition("Blank", "No body", "   ", @"C:\repo\.github\agents\blank\AGENT.md"),
+            },
+            Array.Empty<ProjectContextMcpServerDefinition>());
+
+        var configs = InvokePrivate<List<CustomAgentConfig>>(vm, "BuildCustomAgents", new object[] { catalog });
+
+        // External .github/agents agent becomes a delegatable subagent using its AGENT.md body as the prompt.
+        var webReviewer = configs.Single(cfg => cfg.Name == "WebReviewer");
+        Assert.Equal("You review TypeScript code.", webReviewer.Prompt);
+        Assert.Equal("Reviews web app code", webReviewer.Description);
+
+        // Lumi's own agent wins a name collision; the external duplicate is not added.
+        var lumiMatches = configs.Where(cfg => cfg.Name == "Lumi agent").ToList();
+        Assert.Single(lumiMatches);
+        Assert.Equal("You are a Lumi agent.", lumiMatches[0].Prompt);
+
+        // External agents with blank content are skipped.
+        Assert.DoesNotContain(configs, cfg => cfg.Name == "Blank");
     }
 
     [Fact]
@@ -879,6 +1144,20 @@ public sealed class ChatViewModelLeakTests
     }
 
     [Fact]
+    public void ShouldMarkBackgroundWorkPending_IgnoresStaleBusyAfterTurnTrackingClears()
+    {
+        var runtime = new ChatRuntimeState
+        {
+            IsBusy = true,
+            IsStreaming = true
+        };
+
+        var shouldMark = InvokePrivateStatic<bool>(typeof(ChatViewModel), "ShouldMarkBackgroundWorkPending", runtime);
+
+        Assert.False(shouldMark);
+    }
+
+    [Fact]
     public void BackgroundTasksChangedAfterIdleCleanup_DoesNotRestickPendingBackgroundWork()
     {
         var dataStore = CreateDataStore();
@@ -910,6 +1189,88 @@ public sealed class ChatViewModelLeakTests
 
         Assert.False(shouldMarkAfterIdle);
         Assert.False(runtime.HasPendingBackgroundWork);
+    }
+
+    [Fact]
+    public void ShouldRecoverCompletedTurnIfIdleIsMissing_ReturnsTrueForTextOnlyTurnEnd()
+    {
+        var runtime = new ChatRuntimeState
+        {
+            IsBusy = true,
+            IsStreaming = false,
+            PendingSessionUserMessageCount = 1,
+            ActiveToolCount = 0,
+            HasPendingBackgroundWork = false
+        };
+
+        var shouldRecover = InvokePrivateStatic<bool>(
+            typeof(ChatViewModel),
+            "ShouldRecoverCompletedTurnIfIdleIsMissing",
+            runtime);
+
+        Assert.True(shouldRecover);
+    }
+
+    [Theory]
+    [InlineData(true, 0, false)]
+    [InlineData(false, 1, false)]
+    [InlineData(false, 0, true)]
+    public void ShouldRecoverCompletedTurnIfIdleIsMissing_ReturnsFalseWhileWorkRemains(
+        bool isStreaming,
+        int activeToolCount,
+        bool hasPendingBackgroundWork)
+    {
+        var runtime = new ChatRuntimeState
+        {
+            IsBusy = true,
+            IsStreaming = isStreaming,
+            PendingSessionUserMessageCount = 1,
+            ActiveToolCount = activeToolCount,
+            HasPendingBackgroundWork = hasPendingBackgroundWork
+        };
+
+        var shouldRecover = InvokePrivateStatic<bool>(
+            typeof(ChatViewModel),
+            "ShouldRecoverCompletedTurnIfIdleIsMissing",
+            runtime);
+
+        Assert.False(shouldRecover);
+    }
+
+    [Fact]
+    public void CanTreatCompletedTurnAsIdle_ReturnsTrueForTurnEndWithoutActiveTools()
+    {
+        var analysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true,
+            AssistantTurnEnded = true,
+            ActiveToolCount = 0
+        };
+
+        var canTreatAsIdle = InvokePrivateStatic<bool>(
+            typeof(ChatViewModel),
+            "CanTreatCompletedTurnAsIdle",
+            analysis);
+
+        Assert.True(canTreatAsIdle);
+    }
+
+    [Fact]
+    public void CanTreatCompletedTurnAsIdle_ReturnsFalseWhenToolStillActive()
+    {
+        var analysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true,
+            AssistantTurnEnded = true,
+            ActiveToolCount = 1
+        };
+
+        var canTreatAsIdle = InvokePrivateStatic<bool>(
+            typeof(ChatViewModel),
+            "CanTreatCompletedTurnAsIdle",
+            analysis);
+
+        Assert.False(canTreatAsIdle);
     }
 
     private static DataStore CreateDataStore()
@@ -981,6 +1342,7 @@ public sealed class ChatViewModelLeakTests
             }
         };
 
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; test fixture mirrors the runtime sub-agent payload.
     private static AssistantMessageEvent CreateAssistantMessageEvent(
         string messageId,
         string content,
@@ -994,6 +1356,7 @@ public sealed class ChatViewModelLeakTests
                 ParentToolCallId = parentToolCallId
             }
         };
+#pragma warning restore CS0618
 
     private sealed class CountingDisposable : IDisposable
     {

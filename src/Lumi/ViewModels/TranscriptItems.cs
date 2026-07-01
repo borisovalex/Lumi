@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -60,10 +61,11 @@ public partial class UserMessageItem : TranscriptItem
     public ChatMessage Message => _source.Message;
     public List<FileAttachmentItem> Attachments { get; }
     public List<SkillReference> Skills { get; }
+    public List<SkillChipItem> SkillChips { get; }
     public bool HasAttachments => Attachments.Count > 0;
     public bool HasSkills => Skills.Count > 0;
     public List<FileAttachmentItem>? DisplayAttachments => HasAttachments ? Attachments : null;
-    public List<SkillReference>? DisplaySkills => HasSkills ? Skills : null;
+    public List<SkillChipItem>? DisplaySkills => HasSkills ? SkillChips : null;
 
     /// <summary>Command invoked when user clicks Edit on the message. Sets EditText to current content.</summary>
     public ICommand BeginEditCommand { get; }
@@ -79,7 +81,8 @@ public partial class UserMessageItem : TranscriptItem
         bool showTimestamps,
         List<SkillReference>? filteredSkills = null,
         Action<ChatMessage>? beginEditAction = null,
-        Action<ChatMessage, bool>? resendAction = null)
+        Action<ChatMessage, bool>? resendAction = null,
+        Action<SkillReference>? openSkillAction = null)
         : base($"message:user:{source.Message.Id}")
     {
         _source = source;
@@ -89,6 +92,7 @@ public partial class UserMessageItem : TranscriptItem
         _timestampText = showTimestamps ? source.TimestampText : "";
         Attachments = source.Message.Attachments.Select(fp => new FileAttachmentItem(fp)).ToList();
         Skills = filteredSkills ?? source.Message.ActiveSkills.ToList();
+        SkillChips = Skills.Select(s => new SkillChipItem(s, () => openSkillAction?.Invoke(s))).ToList();
 
         BeginEditCommand = new RelayCommand(() => _beginEditAction?.Invoke(_source.Message));
         ConfirmEditCommand = new RelayCommand<string>(text => EditAndResend(text ?? Content));
@@ -103,6 +107,47 @@ public partial class UserMessageItem : TranscriptItem
         _source.NotifyContentChanged();
         Content = newContent;
         _resendAction?.Invoke(_source.Message, true);
+    }
+}
+
+// ── Skill chip (clickable; opens the skill markdown in the right-side island) ──
+
+/// <summary>
+/// A loaded-skill chip shown under a message. Clicking it opens the skill's
+/// markdown in the preview island (same surface used for plans).
+/// </summary>
+public partial class SkillChipItem
+{
+    private readonly Action? _openAction;
+
+    public string Name { get; }
+    public string Description { get; }
+
+    public SkillChipItem(SkillReference skill, Action? openAction)
+    {
+        Name = skill.Name;
+        Description = skill.Description;
+        _openAction = openAction;
+    }
+
+    [RelayCommand]
+    private void Open() => _openAction?.Invoke();
+}
+
+// ── Inline "skill loaded" chip (shown mid-turn when a skill is fetched at runtime) ──
+
+/// <summary>
+/// A turn-level item that renders a single skill chip inline, at the point in the
+/// conversation where the skill was loaded (e.g. via a fetch_skill tool call).
+/// </summary>
+public sealed class SkillLoadedItem : TranscriptItem
+{
+    public SkillChipItem Chip { get; }
+
+    public SkillLoadedItem(SkillChipItem chip, string? stableId = null)
+        : base(stableId ?? TranscriptIds.Create("skill-loaded"))
+    {
+        Chip = chip;
     }
 }
 
@@ -240,6 +285,7 @@ public sealed class JobWakeItem : TranscriptItem
 public partial class AssistantMessageItem : TranscriptItem
 {
     private readonly ChatMessageViewModel _source;
+    private readonly Action<SkillReference>? _openSkillAction;
 
     [ObservableProperty] private string _content;
     [ObservableProperty] private string _timestampText;
@@ -259,17 +305,20 @@ public partial class AssistantMessageItem : TranscriptItem
 
     public string? Author => _source.Author;
     public string? ModelName => _source.ModelName;
+    internal Guid MessageId => _source.Message.Id;
     public ObservableCollection<SkillReference> Skills { get; } = [];
+    public ObservableCollection<SkillChipItem> SkillChips { get; } = [];
     public ObservableCollection<FileAttachmentItem> FileAttachments { get; } = [];
     public ObservableCollection<SourceItem> Sources { get; } = [];
-    public ObservableCollection<SkillReference>? DisplaySkills => HasSkills ? Skills : null;
+    public ObservableCollection<SkillChipItem>? DisplaySkills => HasSkills ? SkillChips : null;
     public ObservableCollection<FileAttachmentItem>? DisplayFileAttachments => HasFileAttachments ? FileAttachments : null;
     public AssistantMessageItem? DisplaySourcesSection => HasSources ? this : null;
 
-    public AssistantMessageItem(ChatMessageViewModel source, bool showTimestamps)
+    public AssistantMessageItem(ChatMessageViewModel source, bool showTimestamps, Action<SkillReference>? openSkillAction = null)
         : base($"message:assistant:{source.Message.Id}")
     {
         _source = source;
+        _openSkillAction = openSkillAction;
         _content = source.Content;
         _timestampText = showTimestamps ? source.TimestampText : "";
         _isStreaming = source.IsStreaming;
@@ -307,14 +356,23 @@ public partial class AssistantMessageItem : TranscriptItem
         List<FileAttachmentItem>? fileChips,
         HashSet<string>? shownSkillNames = null)
     {
-        // Skills come from the persisted model — only show first occurrence
+        // Skills come from the persisted model. Keep the full list for data (clipboard).
+        // Render a chip for each skill not already shown earlier in the transcript — e.g.
+        // a skill attached to the user message, or one surfaced inline at its fetch_skill
+        // load point. Skills the SDK reports via SkillInvokedEvent (no inline tool call)
+        // still surface here at the end of the turn.
         Skills.Clear();
+        SkillChips.Clear();
         foreach (var skill in _source.Message.ActiveSkills)
         {
+            Skills.Add(skill);
             if (shownSkillNames is null || shownSkillNames.Add(skill.Name))
-                Skills.Add(skill);
+            {
+                var captured = skill;
+                SkillChips.Add(new SkillChipItem(captured, () => _openSkillAction?.Invoke(captured)));
+            }
         }
-        HasSkills = Skills.Count > 0;
+        HasSkills = SkillChips.Count > 0;
 
         // File attachments
         if (fileChips is { Count: > 0 })
@@ -325,6 +383,20 @@ public partial class AssistantMessageItem : TranscriptItem
         HasFileAttachments = FileAttachments.Count > 0;
 
         // Sources come from the persisted model
+        Sources.Clear();
+        foreach (var src in _source.Message.Sources)
+            Sources.Add(new SourceItem(src));
+        HasSources = Sources.Count > 0;
+        SourcesLabel = Sources.Count == 1 ? Loc.Sources_One : string.Format(Loc.Sources_N, Sources.Count);
+    }
+
+    /// <summary>
+    /// Re-reads sources from the persisted model and updates the observable sources section in
+    /// place. Used when web sources are attached after the turn completes (on session idle) so the
+    /// sources can appear without rebuilding — and re-parsing — the whole transcript.
+    /// </summary>
+    public void RefreshSources()
+    {
         Sources.Clear();
         foreach (var src in _source.Message.Sources)
             Sources.Add(new SourceItem(src));
@@ -418,6 +490,7 @@ public partial class ToolGroupItem : TranscriptItem
 
     public ObservableCollection<ToolCallItemBase> ToolCalls { get; } = [];
     public bool HasStreamingSummary => !string.IsNullOrWhiteSpace(StreamingSummary);
+    public ChatMessageViewModel? Source { get; set; }
 
     public ToolGroupItem(string label, string? stableId = null)
         : base(stableId ?? TranscriptIds.Create("tool-group"))
@@ -433,6 +506,7 @@ public partial class ToolGroupItem : TranscriptItem
 public partial class SingleToolItem : TranscriptItem
 {
     public ToolCallItemBase Inner { get; }
+    private readonly ChatMessageViewModel? _source;
 
     [ObservableProperty] private bool _isExpanded;
 
@@ -477,6 +551,7 @@ public partial class SingleToolItem : TranscriptItem
     public string? MoreInfo => Inner switch
     {
         ToolCallItem tc => tc.MoreInfo,
+        _ when _source?.Message.ToolStatus == "Failed" => _source.Message.ToolOutput,
         _ => null
     };
 
@@ -494,6 +569,12 @@ public partial class SingleToolItem : TranscriptItem
         : base($"single:{inner.StableId}")
     {
         Inner = inner;
+    }
+
+    public SingleToolItem(ToolCallItemBase inner, ChatMessageViewModel? source)
+        : this(inner)
+    {
+        _source = source;
     }
 }
 
@@ -526,6 +607,7 @@ public partial class SubagentToolCallItem : TranscriptItem
     [ObservableProperty] private StrataAiToolCallStatus _status;
     [ObservableProperty] private bool _isExpanded;
     [ObservableProperty] private double _durationMs;
+    [ObservableProperty] private int _accentIndex = 1;
 
     internal TodoProgressItem? TodoItem { get; set; }
     internal string TodoToolStatus { get; set; } = "InProgress";
@@ -533,6 +615,12 @@ public partial class SubagentToolCallItem : TranscriptItem
     internal int TodoCompleted { get; set; }
     internal int TodoFailed { get; set; }
     internal int TodoUpdateCount { get; set; }
+
+    /// <summary>Non-null when this subagent is rendered inside a parallel fan-out group.</summary>
+    internal SubagentGroupItem? OwningGroup { get; set; }
+
+    /// <summary>True when this subagent is one of several shown together in a group.</summary>
+    public bool IsGrouped => OwningGroup is { IsGrouped: true };
 
     public ObservableCollection<ToolCallItemBase> Activities { get; } = [];
 
@@ -557,6 +645,30 @@ public partial class SubagentToolCallItem : TranscriptItem
     public bool IsFailed => Status == StrataAiToolCallStatus.Failed;
     public string? DurationText => DurationMs <= 0 ? null : DurationMs >= 1000 ? $"{DurationMs / 1000:F1}s" : $"{DurationMs:F0} ms";
 
+    /// <summary>Single uppercase glyph for the agent avatar (first letter of the agent's role/name).</summary>
+    public string Initial
+    {
+        get
+        {
+            var source = !string.IsNullOrWhiteSpace(DisplayName) ? DisplayName : Title;
+            foreach (var ch in source)
+                if (char.IsLetterOrDigit(ch))
+                    return char.ToUpperInvariant(ch).ToString();
+            return "•";
+        }
+    }
+
+    /// <summary>"Role · Model" line shown under the agent's intent in a group lane.</summary>
+    public string AgentSubtitle
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(DisplayName) && !string.IsNullOrWhiteSpace(ModelDisplayName))
+                return $"{DisplayName} · {ModelDisplayName}";
+            return !string.IsNullOrWhiteSpace(ModelDisplayName) ? ModelDisplayName! : DisplayName;
+        }
+    }
+
     public SubagentToolCallItem(string displayName, StrataAiToolCallStatus status, string? stableId = null)
         : base(stableId ?? TranscriptIds.Create("subagent"))
     {
@@ -565,11 +677,20 @@ public partial class SubagentToolCallItem : TranscriptItem
         Activities.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasActivities));
     }
 
-    partial void OnDisplayNameChanged(string value) => OnPropertyChanged(nameof(Title));
+    partial void OnDisplayNameChanged(string value)
+    {
+        OnPropertyChanged(nameof(Title));
+        OnPropertyChanged(nameof(Initial));
+        OnPropertyChanged(nameof(AgentSubtitle));
+    }
     partial void OnTaskDescriptionChanged(string? value) => OnPropertyChanged(nameof(Title));
     partial void OnCurrentIntentChanged(string? value) => OnPropertyChanged(nameof(Title));
     partial void OnAgentDescriptionChanged(string? value) => OnPropertyChanged(nameof(HasDescription));
-    partial void OnModelDisplayNameChanged(string? value) => OnPropertyChanged(nameof(HasModelName));
+    partial void OnModelDisplayNameChanged(string? value)
+    {
+        OnPropertyChanged(nameof(HasModelName));
+        OnPropertyChanged(nameof(AgentSubtitle));
+    }
     partial void OnModeLabelChanged(string? value) { OnPropertyChanged(nameof(HasModeLabel)); OnPropertyChanged(nameof(IsBackgroundMode)); }
     partial void OnTranscriptTextChanged(string? value) => OnPropertyChanged(nameof(HasTranscriptText));
     partial void OnReasoningTextChanged(string? value) => OnPropertyChanged(nameof(HasReasoningText));
@@ -585,6 +706,64 @@ public partial class SubagentToolCallItem : TranscriptItem
 
         if (value != StrataAiToolCallStatus.InProgress)
             IsExpanded = false;
+    }
+
+    [RelayCommand]
+    private void ToggleExpanded() => IsExpanded = !IsExpanded;
+}
+
+// ── Subagent group (parallel fan-out container) ────────
+
+/// <summary>
+/// Groups several sub-agents that were launched together (a parallel fan-out) into a single
+/// scannable card with an aggregate header, instead of stacking disconnected agent cards.
+/// Only created when 2+ sub-agents run back-to-back; a lone sub-agent stays a standalone card.
+/// </summary>
+public partial class SubagentGroupItem : TranscriptItem
+{
+    [ObservableProperty] private string _headerLabel = "";
+    [ObservableProperty] private string? _meta;
+    [ObservableProperty] private double _progressValue = -1;
+    [ObservableProperty] private bool _isActive;
+    [ObservableProperty] private bool _isExpanded = true;
+    [ObservableProperty] private int _totalCount;
+    [ObservableProperty] private int _doneCount;
+    [ObservableProperty] private int _runningCount;
+    [ObservableProperty] private int _failedCount;
+
+    public ObservableCollection<SubagentToolCallItem> Subagents { get; } = [];
+
+    public int Count => Subagents.Count;
+    public bool IsGrouped => Subagents.Count >= 2;
+    public bool HasProgressValue => ProgressValue >= 0;
+    public bool HasRunning => RunningCount > 0;
+    public bool HasFailed => FailedCount > 0;
+    public bool ShowDoneBadge => !IsActive && FailedCount == 0 && TotalCount > 0;
+    public bool ShowFailedBadge => !IsActive && FailedCount > 0;
+
+    partial void OnProgressValueChanged(double value) => OnPropertyChanged(nameof(HasProgressValue));
+    partial void OnRunningCountChanged(int value) => OnPropertyChanged(nameof(HasRunning));
+    partial void OnFailedCountChanged(int value)
+    {
+        OnPropertyChanged(nameof(HasFailed));
+        OnPropertyChanged(nameof(ShowDoneBadge));
+        OnPropertyChanged(nameof(ShowFailedBadge));
+    }
+    partial void OnIsActiveChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ShowDoneBadge));
+        OnPropertyChanged(nameof(ShowFailedBadge));
+    }
+    partial void OnTotalCountChanged(int value) => OnPropertyChanged(nameof(ShowDoneBadge));
+
+    public SubagentGroupItem(string? stableId = null)
+        : base(stableId ?? TranscriptIds.Create("subagent-group"))
+    {
+        Subagents.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(Count));
+            OnPropertyChanged(nameof(IsGrouped));
+        };
     }
 }
 
@@ -787,6 +966,45 @@ public partial class FileAttachmentItem : ObservableObject
         catch { /* ignore if file doesn't exist */ }
     }
 
+    /// <summary>Opens the containing folder, selecting the file when it still exists.</summary>
+    [RelayCommand]
+    private void ShowInFolder()
+    {
+        try
+        {
+            // explorer.exe /select only honors backslash separators, and announced paths
+            // frequently arrive with forward slashes from tool output — normalize first.
+            var path = FilePath;
+            try { path = Path.GetFullPath(FilePath); } catch { /* keep original */ }
+
+            if (OperatingSystem.IsWindows() && File.Exists(path))
+            {
+                Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"")
+                {
+                    UseShellExecute = true
+                });
+                return;
+            }
+
+            var folder = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(folder) && Directory.Exists(folder))
+                Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true });
+        }
+        catch { /* ignore */ }
+    }
+
+    /// <summary>Copies the file itself so it can be pasted into another folder.</summary>
+    [RelayCommand]
+    private Task Copy() => Services.ClipboardHelper.CopyFileAsync(FilePath);
+
+    /// <summary>Copies the full file path as text.</summary>
+    [RelayCommand]
+    private Task CopyPath() => Services.ClipboardHelper.CopyTextAsync(FilePath);
+
+    /// <summary>Copies just the file name as text.</summary>
+    [RelayCommand]
+    private Task CopyName() => Services.ClipboardHelper.CopyTextAsync(FileName);
+
     [RelayCommand]
     private void Remove()
     {
@@ -803,11 +1021,19 @@ public partial class SourceItem : ObservableObject
     public string Domain { get; }
     public string Url { get; }
 
+    /// <summary>Single glyph shown in the source's favicon-style chip.</summary>
+    public string InitialLetter { get; }
+
+    /// <summary>Deterministic accent fill for the favicon-style chip (stable per domain).</summary>
+    public Avalonia.Media.IBrush AccentBrush { get; }
+
     public SourceItem(SearchSource source)
     {
         Title = source.Title;
         Url = source.Url;
         Domain = ExtractDomain(source.Url);
+        InitialLetter = ComputeInitial(Domain, Title);
+        AccentBrush = ComputeAccent(Domain);
     }
 
     [RelayCommand]
@@ -822,6 +1048,42 @@ public partial class SourceItem : ObservableObject
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
             return uri.Host.Replace("www.", "");
         return url;
+    }
+
+    private static string ComputeInitial(string domain, string title)
+    {
+        var basis = !string.IsNullOrWhiteSpace(domain) ? domain : title;
+        foreach (var ch in basis)
+        {
+            if (char.IsLetterOrDigit(ch))
+                return char.ToUpperInvariant(ch).ToString();
+        }
+        return "?";
+    }
+
+    private static readonly Avalonia.Media.Color[] AccentPalette =
+    [
+        Avalonia.Media.Color.FromRgb(0x6E, 0x8B, 0xFF),
+        Avalonia.Media.Color.FromRgb(0x35, 0xC2, 0xA8),
+        Avalonia.Media.Color.FromRgb(0xF2, 0xA1, 0x4E),
+        Avalonia.Media.Color.FromRgb(0xF2, 0x6D, 0x8B),
+        Avalonia.Media.Color.FromRgb(0xA9, 0x7B, 0xFF),
+        Avalonia.Media.Color.FromRgb(0x4E, 0xB6, 0xF2),
+        Avalonia.Media.Color.FromRgb(0x5F, 0xCB, 0x7A),
+        Avalonia.Media.Color.FromRgb(0xFF, 0x8A, 0x5C),
+    ];
+
+    private static Avalonia.Media.IBrush ComputeAccent(string key)
+    {
+        // FNV-1a over the domain → stable index (process-independent, unlike GetHashCode).
+        uint hash = 2166136261;
+        foreach (var ch in key)
+        {
+            hash ^= ch;
+            hash *= 16777619;
+        }
+        var color = AccentPalette[(int)(hash % (uint)AccentPalette.Length)];
+        return new Avalonia.Media.SolidColorBrush(color);
     }
 }
 

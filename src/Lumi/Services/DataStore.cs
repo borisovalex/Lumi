@@ -26,6 +26,13 @@ public class DataStore
     public static string SkillsDir { get; } = Path.Combine(AppDir, "skills");
     public static string ChatsDir { get; } = Path.Combine(AppDir, "chats");
     public static string CopilotConfigDir { get; } = Path.Combine(AppDir, "copilot");
+    public static string SearchContentIndexFile { get; } = Path.Combine(AppDir, "search-content-index.bin");
+
+    /// <summary>Raised when a chat's persisted content changes (saved or deleted) so search indexes can refresh.</summary>
+    public event Action<Guid>? ChatContentChanged;
+
+    /// <summary>Raised when all chats are cleared so search indexes can be reset.</summary>
+    public event Action? ChatsContentReset;
 
     private AppData _data;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
@@ -254,6 +261,11 @@ public class DataStore
                 ParentToolCallId = m.ParentToolCallId,
                 ToolStatus = m.ToolStatus,
                 ToolOutput = m.ToolOutput,
+                QuestionId = m.QuestionId,
+                QuestionText = m.QuestionText,
+                QuestionOptions = m.QuestionOptions,
+                QuestionAllowFreeText = m.QuestionAllowFreeText,
+                QuestionAllowMultiSelect = m.QuestionAllowMultiSelect,
                 IsStreaming = m.IsStreaming,
                 Model = m.Model,
                 ReasoningEffort = m.ReasoningEffort,
@@ -299,6 +311,8 @@ public class DataStore
         {
             _writeLock.Release();
         }
+
+        ChatContentChanged?.Invoke(chat.Id);
     }
 
     /// <summary>Loads messages from a chat's per-chat file into chat.Messages.</summary>
@@ -373,14 +387,29 @@ public class DataStore
         if (maxMessages <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxMessages), "Message limit must be greater than zero.");
 
-        var history = new List<UserPromptHistoryItem>();
-        foreach (var chat in _data.Chats)
+        // Visit newest chats first so we can stop once the newest `maxMessages` prompts are found,
+        // instead of reading every cold chat file from disk on each call. A chat's messages are never
+        // newer than its UpdatedAt, so once the running top-`maxMessages` set is full and a chat's
+        // UpdatedAt is older than the oldest kept prompt, no remaining (older) chat can contribute.
+        var orderedChats = SnapshotChatsByRecency();
+
+        // Min-heap keyed by timestamp ticks; keeps only the newest `maxMessages` prompts seen so far.
+        var topPrompts = new PriorityQueue<UserPromptHistoryItem, long>();
+
+        foreach (var chat in orderedChats)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (topPrompts.Count >= maxMessages
+                && topPrompts.TryPeek(out _, out var oldestKeptTicks)
+                && chat.UpdatedAt.UtcTicks <= oldestKeptTicks)
+            {
+                break;
+            }
+
             var messages = loadedMessageSnapshots.TryGetValue(chat.Id, out var loadedMessages)
                 ? loadedMessages
-                : await ReadChatMessagesForSuggestionHistoryAsync(chat, cancellationToken).ConfigureAwait(false);
+                : await ReadPersistedChatMessagesFromFileAsync(chat, cancellationToken).ConfigureAwait(false);
 
             foreach (var message in messages)
             {
@@ -390,21 +419,62 @@ public class DataStore
                     continue;
                 }
 
-                history.Add(new UserPromptHistoryItem(
-                    chat.Id,
-                    message.Id,
-                    message.Content,
-                    message.Timestamp));
+                topPrompts.Enqueue(
+                    new UserPromptHistoryItem(chat.Id, message.Id, message.Content, message.Timestamp),
+                    message.Timestamp.UtcTicks);
+
+                if (topPrompts.Count > maxMessages)
+                    topPrompts.Dequeue();
             }
         }
 
-        return history
+        return topPrompts.UnorderedItems
+            .Select(static entry => entry.Element)
             .OrderByDescending(static item => item.Timestamp)
-            .Take(maxMessages)
             .ToList();
     }
 
-    private async Task<IReadOnlyList<ChatMessage>> ReadChatMessagesForSuggestionHistoryAsync(
+    /// <summary>Takes a recency-ordered snapshot of the chat list. <see cref="_data"/>.Chats is a plain
+    /// <see cref="List{T}"/> mutated on the UI thread, while this scan can run on a background thread, so a
+    /// concurrent add/remove can throw <see cref="InvalidOperationException"/> mid-enumeration. Retrying a
+    /// few times yields a consistent snapshot without locking the UI thread's collection.</summary>
+    private List<Chat> SnapshotChatsByRecency()
+    {
+        const int maxAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return _data.Chats
+                    .OrderByDescending(static chat => chat.UpdatedAt)
+                    .ToList();
+            }
+            catch (InvalidOperationException) when (attempt < maxAttempts)
+            {
+                // Collection was modified during enumeration; retry with a fresh pass.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns a chat's full message history without permanently materializing a cold chat.
+    /// Loaded chats return their in-memory messages; cold chats are read from their per-chat file
+    /// and returned without populating <see cref="Chat.Messages"/>, so reading history for tooling
+    /// or search does not bloat memory or change the chat's loaded/cold state.
+    /// </summary>
+    public async Task<IReadOnlyList<ChatMessage>> ReadChatMessagesAsync(
+        Chat chat,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(chat);
+
+        if (chat.Messages.Count > 0)
+            return chat.Messages.ToList();
+
+        return await ReadPersistedChatMessagesFromFileAsync(chat, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IReadOnlyList<ChatMessage>> ReadPersistedChatMessagesFromFileAsync(
         Chat chat,
         CancellationToken cancellationToken)
     {
@@ -460,7 +530,10 @@ public class DataStore
         ArgumentNullException.ThrowIfNull(chat);
 
         if (chat.Messages.Count > 0)
-            return CreateLoadedChatSearchSnapshot(chat.Messages);
+            // Copy once before indexing: callers (global search index, search_chats) run on
+            // background threads while the UI thread appends/removes messages, so iterating the
+            // live list would risk ArgumentOutOfRangeException / torn reads.
+            return CreateLoadedChatSearchSnapshot(chat.Messages.ToArray());
 
         var chatFile = Path.Combine(ChatsDir, $"{chat.Id}.json");
         if (!File.Exists(chatFile))
@@ -550,6 +623,28 @@ public class DataStore
     {
         lock (_chatSearchCacheSync)
             _chatSearchCache.Remove(chatId);
+    }
+
+    /// <summary>Evicts a chat's cached full-text snapshot to bound memory (e.g., after it is indexed elsewhere).</summary>
+    public void EvictChatSearchSnapshot(Guid chatId) => RemoveChatSearchSnapshot(chatId);
+
+    /// <summary>
+    /// Returns the last-write time (UTC) of a chat's persisted file, or null when it has no file.
+    /// Used by the search content index to detect entries that went stale between runs.
+    /// </summary>
+    public DateTimeOffset? GetChatFileTimestamp(Guid chatId)
+    {
+        var chatFile = Path.Combine(ChatsDir, $"{chatId}.json");
+        try
+        {
+            return File.Exists(chatFile)
+                ? new DateTimeOffset(File.GetLastWriteTimeUtc(chatFile))
+                : null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
     }
 
     private static ChatSearchSnapshot CreateLoadedChatSearchSnapshot(IReadOnlyList<ChatMessage> messages)
@@ -660,6 +755,8 @@ public class DataStore
         var chatFile = Path.Combine(ChatsDir, $"{chatId}.json");
         if (File.Exists(chatFile))
             File.Delete(chatFile);
+
+        ChatContentChanged?.Invoke(chatId);
     }
 
     /// <summary>Deletes all per-chat files.</summary>
@@ -673,6 +770,8 @@ public class DataStore
             foreach (var file in Directory.GetFiles(ChatsDir, "*.json"))
                 File.Delete(file);
         }
+
+        ChatsContentReset?.Invoke();
     }
 
     /// <summary>
@@ -994,7 +1093,7 @@ public class DataStore
                        - Use the user's Documents folder (resolve from `$env:USERPROFILE` if needed via a quick PowerShell call).
                        - Use a short descriptive slug (e.g., `lumi-website-tokyo-itinerary.html`).
 
-                    6. **Open in Lumi's browser** — Use the `browser` tool to navigate to the local file URL:
+                    6. **Open in Lumi's browser** — Use the `lumi_browser_open` tool to navigate to the local file URL:
                        - Convert the file path to a `file:///` URL: replace backslashes with forward slashes and prefix with `file:///`.
                        - Example: `C:\Users\John\Documents\lumi-website-tokyo.html` → `file:///C:/Users/John/Documents/lumi-website-tokyo.html`
                        - This opens the website inside Lumi's built-in browser panel so the user sees it immediately.
@@ -1003,7 +1102,7 @@ public class DataStore
 
                     ## Important Rules
                     - The HTML file MUST be fully self-contained and valid. All styles and scripts are inlined or loaded from CDNs.
-                    - Never use `localhost` or start a web server. Just save an `.html` file and open it with the `browser` tool.
+                    - Never use `localhost` or start a web server. Just save an `.html` file and open it with the `lumi_browser_open` tool.
                     - Make the website genuinely impressive — not a basic page with plain text. Use modern CSS, animations, and interactivity.
                     - If the conversation content is long, organize it into navigable sections with a sticky navigation bar or sidebar.
                     - Always include a header/hero section with a title and brief description.

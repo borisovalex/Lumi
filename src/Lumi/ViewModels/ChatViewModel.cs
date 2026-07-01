@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -13,7 +16,7 @@ using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
@@ -26,18 +29,58 @@ namespace Lumi.ViewModels;
 public partial class ChatViewModel : ObservableObject, IDisposable
 {
     private const int SuggestionHistoryScanLimit = 1000;
-    private const int SuggestionHistorySummaryMaxItems = 24;
-    private const int SuggestionHistoryDisplayMaxLength = 160;
+    private const int SuggestionFrequentRequestMaxItems = 8;
+    /// <summary>How long a computed user-prompt-history snapshot stays usable before a background refresh.
+    /// The frequent-requests block is a slowly-changing, low-priority aggregate, so serving a slightly
+    /// stale snapshot keeps suggestion latency to just the model call instead of a full cross-chat scan.</summary>
+    private static readonly TimeSpan SuggestionHistoryCacheTtl = TimeSpan.FromMinutes(2);
+    private static readonly HttpClient McpDiagnosticsHttp = new()
+    {
+        Timeout = TimeSpan.FromSeconds(5)
+    };
+    private static readonly Regex SensitiveHttpDiagnosticPattern = new(
+        @"(?i)(authorization|token|api[_-]?key|secret|password)(\s*[=:]\s*)([^\s,;]+)",
+        RegexOptions.Compiled);
 
     private static readonly bool TranscriptDiagnosticsEnabled = Debugger.IsAttached
         || string.Equals(Environment.GetEnvironmentVariable("LUMI_TRANSCRIPT_DEBUG"), "1", StringComparison.Ordinal);
 
     /// <summary>
-    /// Checks MCP server status after session creation and marks failed server chips with an error.
-    /// Runs in the background so it doesn't block message sending.
+    /// Tracks <c>sessionId|serverName</c> pairs we've already started an interactive OAuth login for,
+    /// so the startup status poll and repeated live status events don't relaunch the browser for the
+    /// same server. Removed when the server connects, or when an attempt is cancelled by navigate-away,
+    /// so a later status change can retry; kept on a genuine sign-in failure to avoid hammering a
+    /// failing endpoint. Purged on session teardown so dead sessions don't accumulate entries.
     /// </summary>
-    private async Task CheckMcpServerStatusAsync(CopilotSession session, Guid chatId, CancellationToken ct)
+    private readonly HashSet<string> _mcpOAuthLoginAttempts = new(StringComparer.Ordinal);
+    private readonly object _mcpOAuthLoginLock = new();
+
+    /// <summary>
+    /// The resolved OAuth chip message per <c>sessionId|serverName</c> once a login attempt has produced
+    /// an outcome (browser opened, or sign-in couldn't start). Repeated <c>NeedsAuth</c> status events
+    /// re-assert this instead of downgrading the chip back to the generic "signing you in" text.
+    /// Guarded by <see cref="_mcpOAuthLoginLock"/>; cleared when the server connects.
+    /// </summary>
+    private readonly Dictionary<string, string> _mcpOAuthResolvedMessages = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Configured MCP servers for the active session of each chat, captured so live
+    /// <c>mcp_server_status_changed</c> events can build a meaningful error message and tell each
+    /// server's transport apart (stdio servers never use OAuth).
+    /// </summary>
+    private readonly ConcurrentDictionary<Guid, IReadOnlyDictionary<string, McpServerConfig>> _activeMcpConfigs = new();
+
+    /// <summary>
+    /// Checks MCP server status after session creation and reacts to any server that failed or needs
+    /// authentication. Runs in the background so it doesn't block message sending.
+    /// </summary>
+    private async Task CheckMcpServerStatusAsync(
+        CopilotSession session,
+        Guid chatId,
+        IReadOnlyDictionary<string, McpServerConfig> configuredServers,
+        CancellationToken ct)
     {
+        _activeMcpConfigs[chatId] = configuredServers;
         try
         {
             // Give the MCP servers a moment to connect
@@ -45,46 +88,385 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var mcpList = await session.Rpc.Mcp.ListAsync(ct);
             if (mcpList?.Servers is not { Count: > 0 }) return;
 
-            var failed = mcpList.Servers
-                .Where(s => s.Status == GitHub.Copilot.SDK.Rpc.McpServerStatus.Failed)
-                .ToList();
-
-            if (failed.Count == 0) return;
-
-            Dispatcher.UIThread.Post(() =>
+            foreach (var server in mcpList.Servers)
             {
-                if (CurrentChat?.Id != chatId)
-                    return;
-
-                foreach (var server in failed)
+                if (server.Status == McpServerStatus.Failed || server.Status == McpServerStatus.NeedsAuth)
                 {
-                    var rawError = server.Error ?? "";
-
-                    // Build a user-friendly error message
-                    var errorMsg = rawError switch
-                    {
-                        _ when rawError.Contains("Connection closed", StringComparison.OrdinalIgnoreCase)
-                            => $"Server process exited immediately. Verify the command is installed and runnable.",
-                        _ when rawError.Contains("ENOENT", StringComparison.OrdinalIgnoreCase)
-                            => $"Command not found. Check that the MCP server is installed.",
-                        _ when string.IsNullOrWhiteSpace(rawError)
-                            => "Failed to connect to MCP server.",
-                        _ => rawError
-                    };
-
-                    // Replace the active chip with an error-state chip
-                    var existingChip = ActiveMcpChips.OfType<StrataComposerChip>()
-                        .FirstOrDefault(c => c.Name == server.Name);
-                    if (existingChip is not null)
-                    {
-                        var index = ActiveMcpChips.IndexOf(existingChip);
-                        ActiveMcpChips[index] = new StrataComposerChip(
-                            server.Name, existingChip.Glyph, ErrorMessage: errorMsg);
-                    }
+                    await HandleMcpServerStatusAsync(
+                        session, chatId, server.Name, server.Status, server.Error, ct).ConfigureAwait(false);
                 }
-            });
+            }
         }
         catch { /* best effort — don't let MCP status checks break the chat flow */ }
+    }
+
+    /// <summary>
+    /// Reacts to a single MCP server's status: refreshes its composer chip and, when a remote server
+    /// needs OAuth, starts the interactive login once per session+server. Safe to call from both the
+    /// startup status poll and live <c>mcp_server_status_changed</c> events.
+    /// </summary>
+    private async Task HandleMcpServerStatusAsync(
+        CopilotSession session,
+        Guid chatId,
+        string serverName,
+        McpServerStatus status,
+        string? error,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(serverName))
+            return;
+
+        McpServerConfig? config = null;
+        if (_activeMcpConfigs.TryGetValue(chatId, out var configured))
+            configured.TryGetValue(serverName, out config);
+
+        if (status == McpServerStatus.Connected)
+        {
+            // A server that recovered — including after the user completed OAuth — drops its error chip
+            // and forgets the prior login attempt so a later token expiry can re-drive sign-in.
+            var connectedKey = McpOAuthKey(session, serverName);
+            lock (_mcpOAuthLoginLock)
+            {
+                _mcpOAuthLoginAttempts.Remove(connectedKey);
+                _mcpOAuthResolvedMessages.Remove(connectedKey);
+            }
+            Dispatcher.UIThread.Post(() => ClearMcpChipError(chatId, serverName));
+            return;
+        }
+
+        if (status != McpServerStatus.NeedsAuth && status != McpServerStatus.Failed)
+            return;
+
+        var errorMessage = await BuildMcpStatusErrorMessageAsync(
+            serverName, status, error ?? "", config, ct).ConfigureAwait(false);
+
+        if (status == McpServerStatus.NeedsAuth)
+        {
+            // Don't let a repeated NeedsAuth event downgrade a richer, already-resolved message
+            // (e.g. revert "Lumi opened your browser…" back to the generic "signing you in…").
+            lock (_mcpOAuthLoginLock)
+            {
+                if (_mcpOAuthResolvedMessages.TryGetValue(McpOAuthKey(session, serverName), out var resolved))
+                    errorMessage = resolved;
+            }
+        }
+
+        Dispatcher.UIThread.Post(() => SetMcpChipError(chatId, serverName, errorMessage));
+
+        if (status == McpServerStatus.NeedsAuth)
+            await TryInitiateMcpOAuthLoginAsync(session, chatId, serverName, config, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts the interactive MCP OAuth login for a remote server at most once per session+server.
+    /// Opening the browser is delegated to <see cref="CopilotService.StartMcpOAuthLoginAsync"/>; when a
+    /// cached token already authenticates the server the runtime reconnects silently and reports
+    /// completion via a later status event that clears the chip.
+    /// </summary>
+    private async Task TryInitiateMcpOAuthLoginAsync(
+        CopilotSession session,
+        Guid chatId,
+        string serverName,
+        McpServerConfig? config,
+        CancellationToken ct)
+    {
+        // stdio servers don't authenticate over OAuth; only remote (and unknown) servers can.
+        if (config is McpStdioServerConfig)
+            return;
+
+        // Don't pop a browser for a chat the user has navigated away from.
+        if (CurrentChat?.Id != chatId || _activeSession != session)
+            return;
+
+        var key = McpOAuthKey(session, serverName);
+        lock (_mcpOAuthLoginLock)
+        {
+            if (!_mcpOAuthLoginAttempts.Add(key))
+                return;
+        }
+
+        try
+        {
+            var authorizationUrl = await _copilotService
+                .StartMcpOAuthLoginAsync(session, serverName, forceReauth: false, ct)
+                .ConfigureAwait(false);
+
+            // A non-empty URL means the runtime opened the browser for interactive consent.
+            // An empty URL means a cached token is being reused; a later Connected event clears the chip.
+            if (!string.IsNullOrWhiteSpace(authorizationUrl))
+            {
+                var openedMessage =
+                    $"Lumi opened your browser to sign in to MCP server '{serverName}'. " +
+                    "Finish signing in and it reconnects automatically.";
+                ResolveMcpOAuthChip(chatId, serverName, key, openedMessage);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The chat was navigated away from (or its load was superseded) while sign-in was starting.
+            // That isn't a real failure: forget the attempt so a later status event can retry cleanly,
+            // and don't poison the chip with a bogus "couldn't start sign-in (The operation was canceled)".
+            // Note the guard: an *internal* timeout (TaskCanceledException with ct NOT cancelled) is a real
+            // sign-in failure and must fall through to the honest-failure branch below, not be retried.
+            lock (_mcpOAuthLoginLock)
+                _mcpOAuthLoginAttempts.Remove(key);
+        }
+        catch (Exception ex)
+        {
+            // Sign-in couldn't be started — e.g. the server's identity provider doesn't support
+            // dynamic client registration. Report it honestly and keep the attempt recorded so we
+            // don't hammer a failing endpoint on every status event; a later session retries cleanly.
+            var failedMessage =
+                $"Lumi couldn't start sign-in for MCP server '{serverName}' automatically " +
+                $"({DescribeMcpOAuthLoginFailure(ex)}). Open it from the MCP servers page to sign in.";
+            ResolveMcpOAuthChip(chatId, serverName, key, failedMessage);
+        }
+    }
+
+    /// <summary>
+    /// Records the final OAuth chip message for a session+server and shows it, so later repeated
+    /// <c>NeedsAuth</c> status events re-assert it rather than reverting to the generic pending text.
+    /// </summary>
+    private void ResolveMcpOAuthChip(Guid chatId, string serverName, string key, string message)
+    {
+        lock (_mcpOAuthLoginLock)
+            _mcpOAuthResolvedMessages[key] = message;
+        Dispatcher.UIThread.Post(() => SetMcpChipError(chatId, serverName, message));
+    }
+
+    private static string McpOAuthKey(CopilotSession session, string serverName)
+        => $"{session.SessionId}|{serverName}";
+
+    /// <summary>
+    /// Releases the per-session OAuth chip/login bookkeeping for a chat's current session when that
+    /// session is torn down, so servers that never reached <c>Connected</c> (dismissed browser, failed
+    /// sign-in, navigate-away) don't leak <c>sessionId|serverName</c> entries for the app's lifetime.
+    /// </summary>
+    private void ForgetMcpOAuthState(Guid chatId)
+    {
+        if (!_sessionCache.TryGetValue(chatId, out var session))
+            return;
+
+        var prefix = $"{session.SessionId}|";
+        lock (_mcpOAuthLoginLock)
+        {
+            _mcpOAuthLoginAttempts.RemoveWhere(k => k.StartsWith(prefix, StringComparison.Ordinal));
+            if (_mcpOAuthResolvedMessages.Count > 0)
+            {
+                var stale = _mcpOAuthResolvedMessages.Keys
+                    .Where(k => k.StartsWith(prefix, StringComparison.Ordinal))
+                    .ToList();
+                foreach (var staleKey in stale)
+                    _mcpOAuthResolvedMessages.Remove(staleKey);
+            }
+        }
+    }
+
+    /// <summary>Extracts a short, user-facing reason from an MCP OAuth login failure.</summary>
+    private static string DescribeMcpOAuthLoginFailure(Exception ex)
+    {
+        var message = ex.Message ?? string.Empty;
+        const string marker = "message: ";
+        var index = message.LastIndexOf(marker, StringComparison.Ordinal);
+        if (index >= 0)
+            message = message[(index + marker.Length)..];
+        message = message.Trim();
+        return string.IsNullOrEmpty(message) ? ex.GetType().Name : message;
+    }
+
+    /// <summary>Puts the named MCP composer chip into an error state (tooltip = <paramref name="errorMessage"/>).</summary>
+    private void SetMcpChipError(Guid chatId, string serverName, string errorMessage)
+    {
+        if (CurrentChat?.Id != chatId)
+            return;
+
+        var existingChip = ActiveMcpChips.OfType<StrataComposerChip>().FirstOrDefault(c => c.Name == serverName);
+        if (existingChip is null)
+            return;
+
+        ActiveMcpChips[ActiveMcpChips.IndexOf(existingChip)] = existingChip with { ErrorMessage = errorMessage };
+    }
+
+    /// <summary>Clears the error state from the named MCP composer chip, if present.</summary>
+    private void ClearMcpChipError(Guid chatId, string serverName)
+    {
+        if (CurrentChat?.Id != chatId)
+            return;
+
+        var existingChip = ActiveMcpChips.OfType<StrataComposerChip>().FirstOrDefault(c => c.Name == serverName);
+        if (existingChip is null || !existingChip.HasError)
+            return;
+
+        ActiveMcpChips[ActiveMcpChips.IndexOf(existingChip)] = existingChip with { ErrorMessage = null };
+    }
+
+    internal static async Task<string> BuildMcpStatusErrorMessageAsync(
+        string serverName,
+        McpServerStatus status,
+        string rawError,
+        McpServerConfig? config,
+        CancellationToken ct)
+    {
+        if (status == McpServerStatus.NeedsAuth)
+        {
+            return config is McpHttpServerConfig authRemote
+                ? $"Sign-in required for MCP server '{serverName}' at {SanitizeMcpDiagnosticUrl(authRemote.Url)}. Lumi is signing you in…"
+                : $"Sign-in required for MCP server '{serverName}'. If it supports OAuth, Lumi will sign you in and reconnect automatically.";
+        }
+
+        if (config is McpHttpServerConfig remote)
+            return await BuildHttpMcpStatusErrorMessageAsync(serverName, rawError, remote, ct).ConfigureAwait(false);
+
+        if (config is McpStdioServerConfig local)
+            return BuildStdioMcpStatusErrorMessage(serverName, rawError, local);
+
+        return BuildGenericMcpStatusErrorMessage(rawError);
+    }
+
+    private static async Task<string> BuildHttpMcpStatusErrorMessageAsync(
+        string serverName,
+        string rawError,
+        McpHttpServerConfig remote,
+        CancellationToken ct)
+    {
+        if (ShouldProbeHttpMcpEndpoint(remote.Url))
+        {
+            var diagnostic = await ProbeHttpMcpEndpointAsync(remote, ct).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(diagnostic))
+                return $"HTTP MCP server '{serverName}' failed. {diagnostic}";
+        }
+
+        var safeUrl = SanitizeMcpDiagnosticUrl(remote.Url);
+        return string.IsNullOrWhiteSpace(rawError)
+            ? $"HTTP MCP server '{serverName}' failed to connect to {safeUrl}."
+            : $"HTTP MCP server '{serverName}' failed for {safeUrl}: {rawError}";
+    }
+
+    private static string BuildStdioMcpStatusErrorMessage(
+        string serverName,
+        string rawError,
+        McpStdioServerConfig local)
+    {
+        if (rawError.Contains("system cannot find the file specified", StringComparison.OrdinalIgnoreCase)
+            || rawError.Contains("command not found", StringComparison.OrdinalIgnoreCase)
+            || rawError.Contains("ENOENT", StringComparison.OrdinalIgnoreCase))
+        {
+            var cwd = string.IsNullOrWhiteSpace(local.WorkingDirectory) ? Environment.CurrentDirectory : local.WorkingDirectory;
+            return $"Command not found for MCP server '{serverName}': '{local.Command}'. Working directory: '{cwd}'. Install '{local.Command}' or add it to the PATH used by Lumi.";
+        }
+
+        return BuildGenericMcpStatusErrorMessage(rawError);
+    }
+
+    private static string BuildGenericMcpStatusErrorMessage(string rawError)
+    {
+        return rawError switch
+        {
+            _ when rawError.Contains("Connection closed", StringComparison.OrdinalIgnoreCase)
+                => "Server process exited immediately. Verify the command is installed and runnable.",
+            _ when string.IsNullOrWhiteSpace(rawError)
+                => "Failed to connect to MCP server.",
+            _ => rawError
+        };
+    }
+
+    private static async Task<string?> ProbeHttpMcpEndpointAsync(McpHttpServerConfig remote, CancellationToken ct)
+    {
+        if (!Uri.TryCreate(remote.Url, UriKind.Absolute, out var uri)
+            || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, uri)
+            {
+                Content = new StringContent(
+                    """
+                    {"jsonrpc":"2.0","id":"lumi-diagnostic","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"lumi-diagnostic","version":"1"}}}
+                    """,
+                    Encoding.UTF8,
+                    "application/json")
+            };
+
+            // Diagnostic probes intentionally omit configured auth headers. The SDK
+            // already made the real MCP connection attempt; this probe is only for
+            // safe loopback endpoint/status discovery.
+
+            using var response = await McpDiagnosticsHttp.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var body = await ReadHttpDiagnosticBodyAsync(response, ct).ConfigureAwait(false);
+            var status = $"{(int)response.StatusCode} {response.ReasonPhrase}".Trim();
+            var hint = response.StatusCode switch
+            {
+                HttpStatusCode.Unauthorized => " Authentication is required; configure headers/token for this MCP server.",
+                HttpStatusCode.Forbidden => " Authentication or permission is required for this MCP server.",
+                HttpStatusCode.NotFound => " Endpoint was not found; check the MCP URL and protocol for this server.",
+                HttpStatusCode.MethodNotAllowed => " Endpoint rejected POST; check whether this server uses a different MCP transport or URL.",
+                _ => ""
+            };
+            var summary = string.IsNullOrWhiteSpace(body) ? "" : $" Response: {body}";
+            return $"POST {SanitizeMcpDiagnosticUrl(remote.Url)} returned {status}.{hint}{summary}";
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested
+            && ex is HttpRequestException or TaskCanceledException or IOException)
+        {
+            return $"POST {SanitizeMcpDiagnosticUrl(remote.Url)} failed: {ex.Message}";
+        }
+    }
+
+    private static string SanitizeMcpDiagnosticUrl(string url)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return url;
+
+        try
+        {
+            var builder = new UriBuilder(uri)
+            {
+                UserName = "",
+                Password = "",
+                Query = "",
+                Fragment = ""
+            };
+
+            return builder.Uri.GetLeftPart(UriPartial.Path);
+        }
+        catch (UriFormatException)
+        {
+            return uri.GetLeftPart(UriPartial.Path);
+        }
+    }
+
+    private static bool ShouldProbeHttpMcpEndpoint(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri)
+            && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            && uri.IsLoopback;
+    }
+
+    private static async Task<string> ReadHttpDiagnosticBodyAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        try
+        {
+            var mediaType = response.Content.Headers.ContentType?.MediaType;
+            if (!string.IsNullOrWhiteSpace(mediaType)
+                && !mediaType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)
+                && !mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+                && !mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase))
+            {
+                return "";
+            }
+
+            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            body = body.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            body = SensitiveHttpDiagnosticPattern.Replace(body, "$1$2[redacted]");
+            return body.Length <= 300 ? body : body[..300] + "...";
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     private void SetSessionSetupStatus(Chat chat, string statusText)
@@ -97,6 +479,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private readonly DataStore _dataStore;
     private readonly CopilotService _copilotService;
+    private readonly GlobalSearchService? _globalSearchService;
     private readonly MemoryAgentService _memoryAgentService;
     private readonly CodingToolService _codingToolService;
     private readonly UIAutomationService _uiAutomation = new();
@@ -116,6 +499,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private CopilotSession? _activeSession;
     /// <summary>Maps chat ID → locally attached CopilotSession objects for active or running chats.</summary>
     private readonly Dictionary<Guid, CopilotSession> _sessionCache = new();
+    /// <summary>Tracks SDK session disposal in progress so resume waits until the prior handle is released.</summary>
+    private readonly Dictionary<Guid, Task> _sessionReleaseTasks = new();
     /// <summary>Maps chat ID → live event subscriptions for locally attached sessions.</summary>
     private readonly Dictionary<Guid, IDisposable> _sessionSubs = new();
     /// <summary>Maps chat ID → in-progress streaming message not yet committed to Chat.Messages.</summary>
@@ -123,7 +508,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// <summary>Per-chat runtime state sourced from live session events.</summary>
     private readonly Dictionary<Guid, ChatRuntimeState> _runtimeStates = new();
     /// <summary>Maps chat ID → per-chat BrowserService instance. Created lazily on first browser tool use.</summary>
-    private readonly Dictionary<Guid, BrowserService> _chatBrowserServices = new();
+    private readonly ConcurrentDictionary<Guid, BrowserService> _chatBrowserServices = new();
     /// <summary>Skills activated mid-chat (after session exists). Consumed on next SendMessage to inject into prompt.</summary>
     private readonly List<Guid> _pendingSkillInjections = new();
     /// <summary>Per-chat guard so suggestion generation is queued at most once concurrently.</summary>
@@ -136,6 +521,16 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private readonly Dictionary<Guid, string> _queuedBusySendPrompts = new();
     /// <summary>Tracks the last assistant message ID that already produced suggestions per chat.</summary>
     private readonly Dictionary<Guid, Guid> _lastSuggestedAssistantMessageByChat = new();
+    /// <summary>Cached cross-chat user-prompt history for the suggestion "frequent requests" block.
+    /// Reused across turns and refreshed in the background so suggestion generation rarely pays the
+    /// cross-chat disk scan. Reference assignment is atomic; staleness is bounded by <see cref="SuggestionHistoryCacheTtl"/>.</summary>
+    private volatile IReadOnlyList<UserPromptHistoryItem>? _cachedUserPromptHistory;
+    /// <summary>UTC ticks of the last history snapshot. Stored as a <see cref="long"/> accessed via
+    /// <see cref="Interlocked"/> so the suggestion thread and background-refresh thread read/write it
+    /// atomically (a 16-byte <see cref="DateTimeOffset"/> struct can tear across threads).</summary>
+    private long _cachedUserPromptHistoryAtTicks = DateTimeOffset.MinValue.UtcTicks;
+    /// <summary>0/1 guard ensuring at most one background history refresh runs at a time.</summary>
+    private int _userPromptHistoryRefreshing;
 
     private sealed record ComposerEditSnapshot(
         string PromptText,
@@ -151,16 +546,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private ComposerEditSnapshot? _preEditComposerSnapshot;
     private ChatMessage? _editingUserMessage;
 
-    /// <summary>Gets or lazily creates a per-chat BrowserService instance.</summary>
+    /// <summary>Gets or lazily creates a per-chat BrowserService instance. Browser tool callbacks run
+    /// off the UI thread while chat-switch/cleanup code touches this map on the UI thread, so the
+    /// backing store is a ConcurrentDictionary and creation goes through an atomic GetOrAdd.</summary>
     private BrowserService GetOrCreateBrowserService(Guid chatId)
-    {
-        if (!_chatBrowserServices.TryGetValue(chatId, out var service))
-        {
-            service = new BrowserService();
-            _chatBrowserServices[chatId] = service;
-        }
-        return service;
-    }
+        => _chatBrowserServices.GetOrAdd(chatId, static _ => new BrowserService());
 
     /// <summary>Gets the BrowserService for a chat if one exists, without creating.</summary>
     public BrowserService? GetBrowserServiceForChat(Guid chatId)
@@ -173,7 +563,25 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     public IReadOnlyDictionary<Guid, BrowserService> ChatBrowserServices => _chatBrowserServices;
 
     /// <summary>True while a chat is being loaded and the loading overlay is shown.</summary>
-    [ObservableProperty] private bool _isLoadingChat;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsChatSurfaceLoading))]
+    private bool _isLoadingChat;
+
+    /// <summary>
+    /// True while a freshly opened transcript is still realizing its mounted turns (the deferred,
+    /// frame-budgeted layout pass that runs after the placeholders mount). The view drives this so
+    /// the loading overlay stays up until the transcript is actually measured and pinned, rather
+    /// than flashing blank for a frame.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsChatSurfaceLoading))]
+    private bool _isTranscriptRealizing;
+
+    /// <summary>
+    /// Drives the chat loading overlay: visible while either the chat history is loading or the
+    /// transcript is still realizing its mounted turns after an open/switch.
+    /// </summary>
+    public bool IsChatSurfaceLoading => IsLoadingChat || IsTranscriptRealizing;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CurrentChatTitle))]
@@ -219,6 +627,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     public string TokenOutputDisplay => $"{TotalOutputTokens:N0}";
     public string TokenTotalDisplay => $"{TotalInputTokens + TotalOutputTokens:N0}";
     public bool HasContextUsage => ContextCurrentTokens > 0 && ContextTokenLimit > 0;
+    public string? ActiveSessionModelId => CurrentChat is not null && _runtimeStates.TryGetValue(CurrentChat.Id, out var runtime)
+        ? runtime.ActiveModelId
+        : null;
+    public string? ActiveSessionContextWindowTier => CurrentChat is not null && _runtimeStates.TryGetValue(CurrentChat.Id, out var runtime)
+        ? runtime.ActiveContextWindowTier
+        : null;
+    public string ContextTokenLimitSourceDisplay => CurrentChat is not null && _runtimeStates.TryGetValue(CurrentChat.Id, out var runtime)
+        ? runtime.ContextTokenLimitSource.ToString()
+        : ContextTokenLimitSource.Unknown.ToString();
     public int ContextUsagePercent => ContextTokenLimit > 0
         ? (int)Math.Round(100.0 * ContextCurrentTokens / ContextTokenLimit)
         : 0;
@@ -241,6 +658,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(TokenOutputDisplay));
         OnPropertyChanged(nameof(TokenTotalDisplay));
         OnPropertyChanged(nameof(HasContextUsage));
+        OnPropertyChanged(nameof(ContextTokenLimitSourceDisplay));
         OnPropertyChanged(nameof(ContextUsagePercent));
         OnPropertyChanged(nameof(ContextUsageDisplay));
     }
@@ -260,14 +678,118 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         return (long)Math.Round(tokens);
     }
 
-    private long ResolveKnownContextTokenLimit(string? modelId)
+    internal static (long TokenLimit, ContextTokenLimitSource Source) ResolveContextTokenLimitFromSessionUsage(
+        long sessionTokenLimit,
+        long catalogTokenLimit)
+    {
+        if (sessionTokenLimit > 0)
+            return (sessionTokenLimit, ContextTokenLimitSource.Session);
+
+        return catalogTokenLimit > 0
+            ? (catalogTokenLimit, ContextTokenLimitSource.Catalog)
+            : (0, ContextTokenLimitSource.Unknown);
+    }
+
+    private long ResolveKnownContextTokenLimit(string? modelId, string? contextTier = null)
     {
         if (string.IsNullOrWhiteSpace(modelId))
             return 0;
 
+        if (string.Equals(contextTier, ModelContextWindowTiers.LongContext, StringComparison.OrdinalIgnoreCase)
+            && _modelLongContextTokenLimits.TryGetValue(modelId, out var longTokenLimit))
+        {
+            return longTokenLimit;
+        }
+
         return _modelContextTokenLimits.TryGetValue(modelId, out var tokenLimit)
             ? tokenLimit
             : 0;
+    }
+
+    internal (string? ModelId, string? ContextTier) ResolveCatalogFallbackContextWindowSelection(
+        Chat chat,
+        ChatRuntimeState runtime,
+        string? requestedModelId)
+    {
+        if (!string.IsNullOrWhiteSpace(runtime.ActiveModelId))
+        {
+            var activeTier = !string.IsNullOrWhiteSpace(runtime.ActiveContextWindowTier)
+                ? runtime.ActiveContextWindowTier
+                : _modelsWithLongContext.Contains(runtime.ActiveModelId)
+                    ? ModelContextWindowTiers.Default
+                    : null;
+            return (runtime.ActiveModelId, activeTier);
+        }
+
+        return (requestedModelId, ResolveSelectedContextWindowTierForChat(chat, requestedModelId));
+    }
+
+    private string? ResolveSessionContextWindowTier(string? modelId, object? sessionContextTier)
+    {
+        var tierValue = GetSessionContextTierValue(sessionContextTier);
+        if (!string.IsNullOrWhiteSpace(tierValue))
+            return ModelSelectionHelper.NormalizeContextWindowTier(tierValue, modelId, _modelsWithLongContext);
+
+        return !string.IsNullOrWhiteSpace(modelId) && _modelsWithLongContext.Contains(modelId)
+            ? ModelContextWindowTiers.Default
+            : null;
+    }
+
+    private static string? GetSessionContextTierValue(object? sessionContextTier)
+    {
+        if (sessionContextTier is null)
+            return null;
+
+        if (sessionContextTier is ContextTier contextTier)
+            return contextTier.Value;
+
+        return sessionContextTier.ToString();
+    }
+
+    private void ApplySessionModelState(
+        Chat chat,
+        ChatRuntimeState runtime,
+        string? modelId,
+        string? reasoningEffort,
+        object? sessionContextTier,
+        bool updateDisplayed)
+    {
+        var effectiveModel = string.IsNullOrWhiteSpace(modelId)
+            ? ResolveSelectedModelForChat(chat)
+            : modelId;
+        var effectiveContextTier = ResolveSessionContextWindowTier(effectiveModel, sessionContextTier);
+        var modelStateChanged = !string.Equals(runtime.ActiveModelId, effectiveModel, StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(runtime.ActiveContextWindowTier, effectiveContextTier, StringComparison.OrdinalIgnoreCase);
+
+        if (modelStateChanged && runtime.ContextTokenLimitSource == ContextTokenLimitSource.Session)
+        {
+            runtime.ContextTokenLimit = 0;
+            runtime.ContextTokenLimitSource = ContextTokenLimitSource.Unknown;
+            chat.ContextTokenLimit = 0;
+            if (updateDisplayed)
+                ContextTokenLimit = 0;
+        }
+
+        runtime.ActiveModelId = effectiveModel;
+        runtime.ActiveContextWindowTier = effectiveContextTier;
+        OnPropertyChanged(nameof(ActiveSessionModelId));
+        OnPropertyChanged(nameof(ActiveSessionContextWindowTier));
+        OnPropertyChanged(nameof(ContextTokenLimitSourceDisplay));
+
+        if (!string.IsNullOrWhiteSpace(effectiveModel))
+            chat.LastModelUsed = effectiveModel;
+
+        chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
+            reasoningEffort,
+            effectiveModel,
+            _modelReasoningEfforts,
+            _modelDefaultEfforts);
+        chat.LastContextWindowTierUsed = effectiveContextTier;
+
+        if (updateDisplayed && !string.IsNullOrWhiteSpace(effectiveModel))
+            ApplyModelSelection(effectiveModel, chat.LastReasoningEffortUsed, effectiveContextTier);
+
+        ApplyKnownContextTokenLimit(chat, runtime, effectiveModel, updateDisplayed);
     }
 
     private void ApplyKnownContextTokenLimit(
@@ -276,14 +798,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         string? modelId,
         bool updateDisplayed)
     {
-        var tokenLimit = ResolveKnownContextTokenLimit(modelId);
+        if (runtime.ContextTokenLimitSource == ContextTokenLimitSource.Session)
+            return;
+
+        var (fallbackModelId, contextTier) = ResolveCatalogFallbackContextWindowSelection(chat, runtime, modelId);
+        var tokenLimit = ResolveKnownContextTokenLimit(fallbackModelId, contextTier);
         if (tokenLimit <= 0)
             return;
 
         var currentTokens = runtime.ContextCurrentTokens <= 0 && chat.ContextCurrentTokens > 0
             ? chat.ContextCurrentTokens
             : (long?)null;
-        ApplyContextUsage(chat, runtime, currentTokens, tokenLimit, updateDisplayed);
+        ApplyContextUsage(chat, runtime, currentTokens, tokenLimit, ContextTokenLimitSource.Catalog, updateDisplayed);
     }
 
     private void ApplyContextUsage(
@@ -291,6 +817,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         ChatRuntimeState runtime,
         long? currentTokens,
         long? tokenLimit,
+        ContextTokenLimitSource tokenLimitSource,
         bool updateDisplayed)
     {
         if (currentTokens is > 0 and var currentTokenValue)
@@ -301,8 +828,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         if (tokenLimit is > 0 and var tokenLimitValue)
         {
-            runtime.ContextTokenLimit = tokenLimitValue;
-            chat.ContextTokenLimit = tokenLimitValue;
+            var canApplyTokenLimit = tokenLimitSource != ContextTokenLimitSource.Catalog
+                || runtime.ContextTokenLimitSource != ContextTokenLimitSource.Session;
+            if (canApplyTokenLimit)
+            {
+                runtime.ContextTokenLimit = tokenLimitValue;
+                runtime.ContextTokenLimitSource = tokenLimitSource;
+                chat.ContextTokenLimit = tokenLimitValue;
+                OnPropertyChanged(nameof(ContextTokenLimitSourceDisplay));
+            }
         }
 
         if (updateDisplayed)
@@ -372,9 +906,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     public event Action? PlanShowRequested;
 
     /// <summary>Raised when a model/effort change in a new chat updates the global default selection.</summary>
-    public event Action<string, string?>? DefaultModelSelectionChanged;
+    public event Action<string, string?, string?>? DefaultModelSelectionChanged;
     /// <summary>Raised to hide the plan preview island.</summary>
     public event Action? PlanHideRequested;
+
+    /// <summary>Raised when the user clicks a transcript skill chip to open it in the right panel.</summary>
+    public event Action? SkillShowRequested;
+    /// <summary>Raised to hide the skill preview island.</summary>
+    public event Action? SkillHideRequested;
 
     /// <summary>Raised when the LLM calls ask_question. Args: questionId, question, options (JSON array string), allowFreeText.</summary>
     public event Action<string, string, string, bool>? QuestionAsked;
@@ -385,10 +924,17 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// <summary>Raised when the view should rebuild DataTemplates (e.g. settings changed).</summary>
     public event Action? TranscriptRebuilt;
 
-    public ChatViewModel(DataStore dataStore, CopilotService copilotService)
+    /// <summary>Raised when a Workspace activity item asks to scroll the transcript to a turn (by StableId).</summary>
+    public event Action<string>? WorkspaceJumpToTurnRequested;
+
+    /// <summary>Raised when the Workspace panel open/closed preference changes so the view re-evaluates visibility.</summary>
+    public event Action? WorkspacePanelPreferenceChanged;
+
+    public ChatViewModel(DataStore dataStore, CopilotService copilotService, GlobalSearchService? globalSearchService = null)
     {
         _dataStore = dataStore;
         _copilotService = copilotService;
+        _globalSearchService = globalSearchService;
         _memoryAgentService = new MemoryAgentService(dataStore, copilotService);
         _codingToolService = new CodingToolService(copilotService, GetCurrentCancellationToken);
         _selectedModel = dataStore.Data.Settings.PreferredModel;
@@ -399,6 +945,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             submitQuestionAnswerAction: SubmitQuestionAnswer,
             beginEditMessageAction: BeginComposerEdit,
             resendFromMessageAction: ResendFromMessageAsync,
+            openSkillAction: OpenSkillPreview,
+            resolveSkill: name => FindSkillReferenceByName(name),
             getSelectedModel: () => SelectedModel);
         _transcriptBuilder.SetLiveTarget(_transcriptTurns);
         _transcriptWindow.BindTranscript(_transcriptTurns, "ctor");
@@ -418,13 +966,21 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
             if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add && args.NewItems is not null)
             {
+                var shouldRefreshWorkspaceMessages = false;
                 foreach (ChatMessageViewModel msgVm in args.NewItems)
+                {
                     _transcriptBuilder.ProcessMessageToTranscript(msgVm);
+                    shouldRefreshWorkspaceMessages |= IsWorkspaceUserMessage(msgVm);
+                }
+
+                if (shouldRefreshWorkspaceMessages)
+                    RebuildWorkspacePanel();
             }
             else if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset)
             {
                 TranscriptTurns.Clear();
                 _transcriptBuilder.ResetState();
+                RebuildWorkspacePanel();
             }
         };
 
@@ -459,7 +1015,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         ApplyModelSelection(
             _dataStore.Data.Settings.PreferredModel,
-            _dataStore.Data.Settings.ReasoningEffort);
+            _dataStore.Data.Settings.ReasoningEffort,
+            _dataStore.Data.Settings.ContextWindowTier);
     }
 
     partial void OnIsBusyChanged(bool value)
@@ -471,7 +1028,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             _transcriptBuilder.HideTypingIndicator();
             // Refresh git status after turn completes
             if (IsCodingProject)
-                _ = RefreshCodingProjectState();
+                QueueRefreshCodingProjectState();
+            // Newly produced files / sources may have arrived this turn.
+            RebuildWorkspacePanel();
         }
     }
 
@@ -497,7 +1056,67 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (IsBusy)
             _transcriptBuilder.ShowTypingIndicator(StatusText);
 
+        RebuildWorkspacePanel();
+
         TranscriptRebuilt?.Invoke();
+    }
+
+    private IReadOnlyList<ChatMessage> GetDisplayMessagesForChat(Chat chat)
+    {
+        var displayMessages = chat.Messages
+            .Where(static msg => msg.Role != "assistant" || !string.IsNullOrWhiteSpace(msg.Content))
+            .ToList();
+
+        if (_inProgressMessages.TryGetValue(chat.Id, out var inProgress)
+            && displayMessages.All(message => message.Id != inProgress.Id))
+        {
+            displayMessages.Add(inProgress);
+        }
+
+        return displayMessages;
+    }
+
+    private bool AreDisplayedMessagesInSync(IReadOnlyList<ChatMessage> displayMessages)
+    {
+        if (Messages.Count != displayMessages.Count)
+            return false;
+
+        for (var i = 0; i < displayMessages.Count; i++)
+        {
+            var message = displayMessages[i];
+            var viewModel = Messages[i];
+            if (viewModel.Message.Id != message.Id
+                || viewModel.Role != message.Role
+                || !string.Equals(viewModel.Content, message.Content, StringComparison.Ordinal)
+                || viewModel.IsStreaming != message.IsStreaming
+                || !string.Equals(viewModel.ToolStatus, message.ToolStatus, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private void SynchronizeDisplayedMessagesFromChat(Chat chat, bool forceRebuild = false)
+    {
+        var displayMessages = GetDisplayMessagesForChat(chat);
+        if (!forceRebuild && AreDisplayedMessagesInSync(displayMessages))
+            return;
+
+        _isBulkLoadingMessages = true;
+        try
+        {
+            Messages.Clear();
+            foreach (var msg in displayMessages)
+                Messages.Add(new ChatMessageViewModel(msg));
+
+            RebuildTranscript();
+        }
+        finally
+        {
+            _isBulkLoadingMessages = false;
+        }
     }
 
     private static string BuildSubagentPayloadJson(
@@ -578,6 +1197,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         return changed;
     }
 
+    internal TranscriptWindowMutation EnsureLatestTranscriptMountedIfAdjacentTailGap()
+    {
+        var mutation = _transcriptWindow.EnsureLatestMountedIfAdjacentTailGap("assistant-completed");
+        if (mutation.HasChanges && ShowTranscriptDiagnostics)
+            OnPropertyChanged(nameof(TranscriptDiagnosticsText));
+        return mutation;
+    }
+
     internal bool MountTranscriptPageContainingTurn(TranscriptTurn turn)
     {
         var changed = _transcriptWindow.MountPageContainingTurn(turn, "search-navigate");
@@ -623,16 +1250,35 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             .ToList();
     }
 
-    private async Task<string?> SyncActiveSkillDirectoryAsync(CancellationToken ct)
-        => await SyncSkillDirectoryAsync(ActiveSkillIds, ct);
-
-    private async Task<string?> SyncSkillDirectoryAsync(IReadOnlyCollection<Guid> skillIds, CancellationToken ct)
+    /// <summary>
+    /// Builds skill references for a message from both internal skill ids and external
+    /// (file/project-context) skill names, so edited messages can restore the full skill
+    /// selection through the composer.
+    /// </summary>
+    private List<SkillReference> BuildSkillReferences(
+        IReadOnlyCollection<Guid> skillIds,
+        IReadOnlyCollection<string> externalSkillNames)
     {
-        if (skillIds.Count == 0)
-            return null;
+        var references = BuildSkillReferences(skillIds);
+        if (externalSkillNames.Count == 0)
+            return references;
 
-        var activeSkillIds = skillIds.ToList();
-        return await _dataStore.SyncSkillFilesForIdsAsync(activeSkillIds, ct);
+        var projectContextCatalog = GetProjectContextCatalog();
+        foreach (var name in externalSkillNames
+                     .Where(static n => !string.IsNullOrWhiteSpace(n))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            references.Add(
+                FindSkillReferenceByName(name, projectContextCatalog)
+                ?? new SkillReference
+                {
+                    Name = name,
+                    Glyph = ExternalSkillGlyph,
+                    Description = string.Empty
+                });
+        }
+
+        return references;
     }
 
     private (long RequestId, CancellationTokenSource Source) BeginChatLoad(CancellationToken outerCancellationToken)
@@ -674,39 +1320,41 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             ? _dataStore.Data.Projects.FirstOrDefault(p => p.Id == chat.ProjectId)
             : null;
         var workDir = GetEffectiveWorkingDirectory(chat);
-        var externalCatalog = GetExternalCatalog(workDir);
-        var externalSkills = externalCatalog.Skills;
+        var projectContextCatalog = GetProjectContextCatalog(chat, workDir);
         var activeAgent = chat.AgentId.HasValue
             ? _dataStore.Data.Agents.FirstOrDefault(agent => agent.Id == chat.AgentId.Value)
             : null;
         var systemPrompt = SystemPromptBuilder.Build(
             _dataStore.Data.Settings, activeAgent, project, allSkills, activeSkills, memories, _dataStore.SnapshotBackgroundJobs());
-        systemPrompt = AppendAvailableExternalSkillsToPrompt(systemPrompt, externalSkills, chat.ActiveExternalSkillNames);
 
         var sdkAgentName = GetSessionSdkAgentName(chat, CurrentChat, SelectedSdkAgentName);
         var externalAgent = activeAgent is null
-            ? FindExternalAgentByName(externalCatalog, sdkAgentName)
+            ? FindExternalAgentByName(projectContextCatalog, sdkAgentName)
             : null;
-        var skillDirTask = SyncSkillDirectoryAsync(chat.ActiveSkillIds, ct);
-        var mcpServersTask = BuildMcpServersAsync(workDir, chat, activeAgent, ct);
+        var mcpServers = BuildMcpServers(workDir, projectContextCatalog, chat, activeAgent);
 
-        var customAgents = BuildCustomAgents();
-        var customTools = BuildCustomTools(chat.Id, activeAgent, workDir);
+        var customAgents = BuildCustomAgents(projectContextCatalog);
+        var customTools = BuildCustomTools(chat.Id, activeAgent, projectContextCatalog);
         if (!string.IsNullOrWhiteSpace(externalAgent?.Content))
             systemPrompt = (systemPrompt ?? "") + "\n\n--- Active Agent: " + externalAgent.Name + " ---\n" + externalAgent.Content;
 
         var skillDirs = new List<string>();
-        var dir = await skillDirTask;
-        if (!string.IsNullOrWhiteSpace(dir))
-            skillDirs.Add(dir);
+        // Lumi app skills are Lumi-owned: active skills are injected into the system prompt,
+        // and inactive ones are loaded lazily through fetch_skill. Canonical workspace
+        // .github/skills roots are handed to the SDK instead of being re-advertised by Lumi.
+        foreach (var nativeSkillDir in projectContextCatalog.SkillDirectories)
+        {
+            if (!skillDirs.Contains(nativeSkillDir, StringComparer.OrdinalIgnoreCase))
+                skillDirs.Add(nativeSkillDir);
+        }
 
-        var mcpServers = await mcpServersTask;
         var selectedModel = ResolveSelectedModelForChat(chat);
         var persistedEffort = ResolvePersistedReasoningEffortForChat(chat, selectedModel);
         if (chat.LastReasoningEffortUsed != persistedEffort)
             chat.LastReasoningEffortUsed = persistedEffort;
 
         var effort = persistedEffort;
+        var contextTier = ResolveSelectedContextWindowTierForChat(chat, selectedModel);
         var agentName = ResolveSessionAgentName(
             activeAgent,
             externalAgent,
@@ -717,7 +1365,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         // Capture chat.Id in the closure so questions always target the owning chat,
         // even if the user switches to a different chat while this session is active.
         var inputHandlerChatId = chat.Id;
-        UserInputHandler userInputHandler = async (request, invocation) =>
+        Func<UserInputRequest, UserInputInvocation, Task<UserInputResponse>> userInputHandler = async (request, invocation) =>
         {
             var questionId = Guid.NewGuid().ToString("N");
             var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -729,10 +1377,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
             Dispatcher.UIThread.Post(() =>
             {
-                if (CurrentChat?.Id != inputHandlerChatId) return;
-                _transcriptBuilder.AddQuestionToTranscript(questionId, request.Question, optionsList, freeText);
-                QuestionAsked?.Invoke(questionId, request.Question, optionsJson, freeText);
-                ScrollToEndRequested?.Invoke();
+                NotifyQuestionAsked(inputHandlerChatId, request.Question);
+
+                if (CurrentChat?.Id == inputHandlerChatId)
+                {
+                    _transcriptBuilder.AddQuestionToTranscript(questionId, request.Question, optionsList, freeText);
+                    QuestionAsked?.Invoke(questionId, request.Question, optionsJson, freeText);
+                    ScrollToEndRequested?.Invoke();
+                }
             });
 
             // Persist question data on the tool message so rebuild can recreate the question card.
@@ -766,7 +1418,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             try
             {
                 var answer = await tcs.Task;
-                return new GitHub.Copilot.SDK.UserInputResponse { Answer = answer, WasFreeform = true };
+                return new GitHub.Copilot.UserInputResponse { Answer = answer, WasFreeform = true };
             }
             finally
             {
@@ -775,19 +1427,24 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         };
 
         // Session hooks for lifecycle events
-        var hooks = new GitHub.Copilot.SDK.SessionHooks
+        var hooks = new GitHub.Copilot.SessionHooks
         {
             OnPreToolUse = async (input, invocation) =>
             {
                 // Auto-allow all tools (permission UI can be added later)
-                return new GitHub.Copilot.SDK.PreToolUseHookOutput { PermissionDecision = "allow" };
+                return new GitHub.Copilot.PreToolUseHookOutput { PermissionDecision = "allow" };
             },
             OnErrorOccurred = async (input, invocation) =>
             {
-                // Retry transient errors, abort on persistent ones
-                if (input.Recoverable)
-                    return new GitHub.Copilot.SDK.ErrorOccurredHookOutput { ErrorHandling = "retry", RetryCount = 2 };
-                return new GitHub.Copilot.SDK.ErrorOccurredHookOutput { ErrorHandling = "abort" };
+                // Retry transient errors, abort on persistent ones. Besides the SDK's own
+                // Recoverable flag, GitHub's backend occasionally wraps an internal RPC failure
+                // (twirp/usersd "failed to do request") in a 401 on long sessions; the CLI marks it
+                // non-recoverable but a plain resend recovers, so retry those too. Bare/ambiguous
+                // 401/403s are deliberately NOT matched — they may be a genuine logout and must
+                // surface (abort) so the user can re-authenticate.
+                if (input.Recoverable || CopilotService.IsTransientServerAuthError(input.Error))
+                    return new GitHub.Copilot.ErrorOccurredHookOutput { ErrorHandling = "retry", RetryCount = 3 };
+                return new GitHub.Copilot.ErrorOccurredHookOutput { ErrorHandling = "abort" };
             }
         };
 
@@ -802,6 +1459,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         sessionCts?.CancelAfter(TimeSpan.FromSeconds(30));
         var sessionCt = sessionCts?.Token ?? ct;
 
+        if (chat.CopilotSessionId is not null)
+            await AwaitPendingSessionReleaseAsync(chat.Id, sessionCt);
+
         if (chat.CopilotSessionId is null)
         {
             if (!allowCreateFallback)
@@ -811,7 +1471,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             {
                 var createConfig = SessionConfigBuilder.Build(
                     systemPrompt, selectedModel, workDir, skillDirs, customAgents, customTools,
-                    mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName);
+                    mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName, contextTier);
                 var createdSession = await _copilotService.CreateSessionAsync(createConfig, sessionCt);
                 chat.CopilotSessionId = createdSession.SessionId;
                 _dataStore.MarkChatChanged(chat);
@@ -821,7 +1481,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 // Check MCP server status after session creation and surface errors
                 if (mcpServers is { Count: > 0 })
                 {
-                    _ = CheckMcpServerStatusAsync(createdSession, chat.Id, ct);
+                    _ = CheckMcpServerStatusAsync(createdSession, chat.Id, mcpServers, ct);
                 }
 
                 return true;
@@ -843,11 +1503,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 SetSessionSetupStatus(chat, attempt > 0 ? Loc.Status_Reconnecting : Loc.Status_Resuming);
                 var resumeConfig = SessionConfigBuilder.BuildForResume(
                     systemPrompt, selectedModel, workDir, skillDirs, customAgents, customTools,
-                    mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName);
+                    mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName, contextTier);
                 var session = await _copilotService.ResumeSessionAsync(
                     chat.CopilotSessionId, resumeConfig, sessionCt);
                 _activeSession = session;
                 SubscribeToSession(session, chat, workDir);
+                if (mcpServers is { Count: > 0 })
+                    _ = CheckMcpServerStatusAsync(session, chat.Id, mcpServers, ct);
 
                 // The SDK does not automatically change the session model on resume —
                 // ResumeSessionConfig.Model only sets a preference for the CLI process,
@@ -856,7 +1518,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 // user's current selection (e.g. switching from gpt-5.4 to opus-4.6-1m).
                 if (!string.IsNullOrWhiteSpace(selectedModel))
                 {
-                    try { await session.SetModelAsync(selectedModel, effort, null, sessionCt); }
+                    try
+                    {
+                        await session.SetModelAsync(
+                            selectedModel,
+                            new SetModelOptions
+                            {
+                                ReasoningEffort = effort,
+                                ReasoningSummary = SessionConfigBuilder.DefaultReasoningSummary,
+                                ContextTier = SessionConfigBuilder.CreateContextTier(contextTier)
+                            },
+                            sessionCt);
+                    }
                     catch { /* best-effort — session works with original model if this fails */ }
                 }
 
@@ -889,11 +1562,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             var createConfig = SessionConfigBuilder.Build(
                 systemPrompt, selectedModel, workDir, skillDirs, customAgents, customTools,
-                mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName);
+                mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName, contextTier);
             var createdSession = await _copilotService.CreateSessionAsync(createConfig, sessionCt);
             chat.CopilotSessionId = createdSession.SessionId;
             _activeSession = createdSession;
             SubscribeToSession(createdSession, chat, workDir);
+            if (mcpServers is { Count: > 0 })
+                _ = CheckMcpServerStatusAsync(createdSession, chat.Id, mcpServers, ct);
             _dataStore.MarkChatChanged(chat);
             await SaveChatAsync(chat, saveIndex: true);
             return true;
@@ -912,17 +1587,33 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         if (CurrentChat?.Id == chat.Id && chat.Messages.Count > 0)
         {
-            _suggestionDisplayChatId = chat.Id;
-            RestoreSuggestionsForChat(chat);
-            lock (_chatLoadSync)
+            try
             {
-                if (ReferenceEquals(_chatLoadCts, loadCts))
-                {
-                    _chatLoadCts = null;
-                    IsLoadingChat = false;
-                }
+                await _dataStore.LoadChatMessagesAsync(chat, loadToken);
+
+                if (loadToken.IsCancellationRequested || !IsCurrentChatLoad(requestId, loadCts))
+                    return;
+
+                _suggestionDisplayChatId = chat.Id;
+                chat.HasUnreadMessages = false;
+                SynchronizeDisplayedMessagesFromChat(chat, forceRebuild: true);
+                RestoreSuggestionsForChat(chat);
+                SweepInactiveChatStates();
             }
-            loadCts.Dispose();
+            finally
+            {
+                lock (_chatLoadSync)
+                {
+                    if (ReferenceEquals(_chatLoadCts, loadCts))
+                    {
+                        _chatLoadCts = null;
+                        IsLoadingChat = false;
+                    }
+                }
+
+                loadCts.Dispose();
+            }
+
             return;
         }
 
@@ -963,7 +1654,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // Clear pending state from any previous chat
             _pendingSkillInjections.Clear();
             _activeExternalSkillNames.Clear();
-            _transcriptBuilder.PendingFetchedSkillRefs.Clear();
 
             // Restore real runtime state for this session/chat
             var runtime = GetOrCreateRuntimeState(chat.Id);
@@ -975,23 +1665,16 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             TotalOutputTokens = runtime.TotalOutputTokens;
             ContextCurrentTokens = runtime.ContextCurrentTokens;
             ContextTokenLimit = runtime.ContextTokenLimit;
-            HasUsedBrowser = runtime.HasUsedBrowser;
+            // The browser toggle/panel follow the live BrowserService, which persists across chat
+            // switches, so derive visibility from the service rather than the transient runtime flag.
+            HasUsedBrowser = _chatBrowserServices.ContainsKey(chat.Id);
 
             _isBulkLoadingMessages = true;
             try
             {
                 Messages.Clear();
-                foreach (var msg in chat.Messages)
-                {
-                    // Skip empty assistant messages (SDK artifact)
-                    if (msg.Role == "assistant" && string.IsNullOrWhiteSpace(msg.Content))
-                        continue;
+                foreach (var msg in GetDisplayMessagesForChat(chat))
                     Messages.Add(new ChatMessageViewModel(msg));
-                }
-
-                // If there's an in-progress streaming message not yet committed, show it
-                if (_inProgressMessages.TryGetValue(chat.Id, out var inProgress))
-                    Messages.Add(new ChatMessageViewModel(inProgress));
 
                 CurrentChat = chat;
                 chat.HasUnreadMessages = false; // Clear unread when switching to this chat
@@ -1013,7 +1696,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
                 // If this chat has an active browser, show its panel (after CurrentChat is set
                 // so ActiveChatId is already updated when the MainWindow handler runs)
-                if (runtime.HasUsedBrowser && _chatBrowserServices.ContainsKey(chat.Id))
+                if (_chatBrowserServices.ContainsKey(chat.Id))
                     BrowserShowRequested?.Invoke(chat.Id);
 
                 // Rebuild transcript items from the fully loaded message list before
@@ -1031,11 +1714,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             ActiveSkillChips.Clear();
             foreach (var skillId in chat.ActiveSkillIds)
                 ActiveSkillIds.Add(skillId);
-            foreach (var skillName in chat.ActiveExternalSkillNames)
-                _activeExternalSkillNames.Add(skillName);
+            if (chat.ActiveExternalSkillNames.Count > 0)
+            {
+                chat.ActiveExternalSkillNames = [];
+                _dataStore.MarkChatChanged(chat);
+            }
             RefreshActiveSkillChipsFromState();
 
-            // Restore active MCP servers from chat (default to all enabled if none saved)
+            // Restore active MCP servers from chat (default to all enabled for older chats with no saved selection)
             ActiveMcpServerNames.Clear();
             ActiveMcpChips.Clear();
             var enabledServersByName = new Dictionary<string, McpServer>(StringComparer.Ordinal);
@@ -1045,11 +1731,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     enabledServersByName[server.Name] = server;
             }
 
-            // Discover workspace MCPs from .vscode/mcp.json so we can restore them too
-            var workDir = GetEffectiveWorkingDirectory();
-            var workspaceMcpNames = DiscoverWorkspaceMcps(workDir, []);
+            // Restore project-scoped MCPs from the same context catalog used for sessions.
+            var projectContextMcpNames = GetProjectContextCatalog(chat).McpServers
+                .Select(server => server.Name)
+                .ToList();
 
-            if (chat.ActiveMcpServerNames.Count > 0)
+            if (chat.HasExplicitMcpServerSelection || chat.ActiveMcpServerNames.Count > 0)
             {
                 foreach (var name in chat.ActiveMcpServerNames)
                 {
@@ -1058,7 +1745,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                         ActiveMcpServerNames.Add(name);
                         ActiveMcpChips.Add(new StrataTheme.Controls.StrataComposerChip(name));
                     }
-                    else if (workspaceMcpNames.Contains(name))
+                    else if (projectContextMcpNames.Contains(name))
                     {
                         ActiveMcpServerNames.Add(name);
                         ActiveMcpChips.Add(new StrataTheme.Controls.StrataComposerChip(name, "🔌"));
@@ -1067,14 +1754,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
             else
             {
-                // No MCPs saved — default to all enabled
+                // Older chats did not store whether an empty list was intentional, so default them to all enabled.
                 foreach (var server in enabledServersByName.Values)
                 {
                     ActiveMcpServerNames.Add(server.Name);
                     ActiveMcpChips.Add(new StrataTheme.Controls.StrataComposerChip(server.Name));
                 }
-                // Also include workspace MCPs by default
-                foreach (var name in workspaceMcpNames)
+                // Also include project-context MCPs by default.
+                foreach (var name in projectContextMcpNames)
                 {
                     if (!ActiveMcpServerNames.Contains(name))
                     {
@@ -1095,11 +1782,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // Restore per-chat model selection (falls back to global preferred model)
             ApplyModelSelection(
                 chat.LastModelUsed ?? _dataStore.Data.Settings.PreferredModel,
-                chat.LastReasoningEffortUsed ?? _dataStore.Data.Settings.ReasoningEffort);
+                chat.LastReasoningEffortUsed ?? _dataStore.Data.Settings.ReasoningEffort,
+                chat.LastContextWindowTierUsed ?? _dataStore.Data.Settings.ContextWindowTier);
 
             // Git status can be slow in large repos/worktrees. Do not keep the chat
             // loading overlay up after the transcript is already interactive.
-            _ = RefreshCodingProjectState();
+            QueueRefreshCodingProjectState();
 
             // Refresh SDK agents if we have a session
             if (_activeSession is not null)
@@ -1165,6 +1853,43 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         _transcriptBuilder.SetPendingPlanCard(statusText, () => PlanShowRequested?.Invoke());
     }
 
+    /// <summary>
+    /// Opens a loaded skill's markdown in the right-side preview island (same surface as the plan).
+    /// Invoked when the user clicks a skill chip in the transcript.
+    /// </summary>
+    public void OpenSkillPreview(SkillReference? skill)
+    {
+        if (skill is null || string.IsNullOrWhiteSpace(skill.Name))
+            return;
+
+        SkillPreviewTitle = skill.Name;
+        SkillPreviewContent = ResolveSkillMarkdown(skill);
+        SkillShowRequested?.Invoke();
+    }
+
+    /// <summary>Resolves the markdown body for a skill chip — internal skills first, then external catalog skills.</summary>
+    private string ResolveSkillMarkdown(SkillReference skill)
+    {
+        var internalSkill = _dataStore.Data.Skills
+            .FirstOrDefault(s => s.Name.Equals(skill.Name, StringComparison.OrdinalIgnoreCase));
+        if (internalSkill is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(internalSkill.Content))
+                return internalSkill.Content;
+            return string.IsNullOrWhiteSpace(internalSkill.Description)
+                ? "_This skill has no content yet._"
+                : internalSkill.Description;
+        }
+
+        var externalSkill = GetProjectContextCatalog().FindSkill(skill.Name);
+        if (externalSkill is not null && !string.IsNullOrWhiteSpace(externalSkill.Content))
+            return externalSkill.Content;
+
+        return string.IsNullOrWhiteSpace(skill.Description)
+            ? "_No content is available for this skill._"
+            : skill.Description;
+    }
+
     public void ClearChat()
     {
         lock (_chatLoadSync)
@@ -1187,6 +1912,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         BrowserHideRequested?.Invoke();
         DiffHideRequested?.Invoke();
         PlanHideRequested?.Invoke();
+        SkillHideRequested?.Invoke();
         HasUsedBrowser = false;
 
         // Detach from the visible chat; inactive chat state is released later when it is safe.
@@ -1198,7 +1924,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         TranscriptTurns.Clear();
         _transcriptBuilder.ResetState();
         CurrentChat = null;
-        _ = RefreshCodingProjectState();
+        QueueRefreshCodingProjectState();
         IsBusy = false;
         IsStreaming = false;
         TotalInputTokens = 0;
@@ -1227,6 +1953,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         HasPlan = false;
         PlanContent = null;
         IsPlanOpen = false;
+        IsSkillOpen = false;
+        SkillPreviewContent = null;
         SelectedSdkAgentName = null;
         SdkAgentChips.Clear();
 
@@ -1238,15 +1966,27 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
-    /// Called when MCP server config changes so the next message creates a fresh session with updated MCP servers.
+    /// Called when MCP server config changes so the next Copilot session create/resume uses the updated MCP catalog.
     /// </summary>
     public void InvalidateMcpSession()
     {
         if (CurrentChat is not null)
         {
-            InvalidateCurrentSession();
             _pendingSkillInjections.Clear();
             _activeExternalSkillNames.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Called when project settings change so the next message recreates the session
+    /// with updated project instructions, context folders, file-based skills/agents, and MCPs.
+    /// </summary>
+    public void InvalidateProjectSession()
+    {
+        if (CurrentChat is not null)
+        {
+            InvalidateCurrentSession();
+            _pendingSkillInjections.Clear();
         }
     }
 
@@ -1295,7 +2035,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     public bool IsChatBusy(Guid chatId)
     {
-        return IsChatRuntimeActive(chatId);
+        return OwnsLiveChat(chatId);
     }
 
     public async Task SendBackgroundJobMessageAsync(
@@ -1316,7 +2056,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (!_copilotService.IsConnected)
             await _copilotService.ConnectAsync(cancellationToken);
 
-        var targetWorkDir = GetEffectiveWorkingDirectory(targetChat);
         if (string.IsNullOrWhiteSpace(targetChat.LastModelUsed))
         {
             var targetModel = ResolveSelectedModelForChat(targetChat);
@@ -1331,13 +2070,20 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 targetChat.LastReasoningEffortUsed = targetEffort;
         }
 
+        if (string.IsNullOrWhiteSpace(targetChat.LastContextWindowTierUsed))
+        {
+            var targetTier = ResolveSelectedContextWindowTierForChat(targetChat, targetChat.LastModelUsed);
+            if (!string.IsNullOrWhiteSpace(targetTier))
+                targetChat.LastContextWindowTierUsed = targetTier;
+        }
+
         var prompt = BuildBackgroundJobPrompt(job, triggerContext);
         var userMsg = new ChatMessage
         {
             Role = "user",
             Content = prompt,
             Author = $"Lumi Job - {job.Name}",
-            ActiveSkills = BuildSkillReferences(targetChat.ActiveSkillIds, targetChat.ActiveExternalSkillNames, targetWorkDir)
+            ActiveSkills = BuildSkillReferences(targetChat.ActiveSkillIds)
         };
 
         targetChat.Messages.Add(userMsg);
@@ -1358,10 +2104,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         MessageOptions? sendOptions = null;
         CopilotSession? sendSession = null;
         var retainedContext = targetChat.Messages.Take(Math.Max(targetChat.Messages.Count - 1, 0)).ToList();
-        var promptAdditions = BuildSendPromptAdditions(
-            externalSkillNames: targetChat.ActiveExternalSkillNames,
-            consumePendingSkillInjections: false,
-            workDir: targetWorkDir);
+        var promptAdditions = BuildSendPromptAdditions(consumePendingSkillInjections: false);
         var localUserMessageCount = 0;
         var localAssistantMessageCount = 0;
 
@@ -1376,15 +2119,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
 
             var runtime = GetOrCreateRuntimeState(chatId);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Thinking;
+            MarkRuntimeActive(runtime, Loc.Status_Thinking);
             if (CurrentChat?.Id == chatId)
-            {
-                IsBusy = true;
-                IsStreaming = true;
-                StatusText = runtime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(runtime);
 
             var needsSessionSetup = targetChat.CopilotSessionId is null
                                     || !_sessionCache.TryGetValue(chatId, out var cachedSession)
@@ -1617,7 +2354,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         userMessage.Content = prompt;
         userMessage.Attachments = attachments
-            .OfType<UserMessageAttachmentFile>()
+            .OfType<AttachmentFile>()
             .Select(static attachment => attachment.Path)
             .ToList();
         ApplyCurrentComposerSelectionsToMessage(userMessage, selectedReasoningEffort);
@@ -1845,11 +2582,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         QueueSaveChat(chat, saveIndex: true);
     }
 
-    private static List<UserMessageAttachment> BuildUserMessageAttachments(IEnumerable<string> attachmentPaths)
+    private static List<Attachment> BuildUserMessageAttachments(IEnumerable<string> attachmentPaths)
         => attachmentPaths
             .Where(static path => !string.IsNullOrWhiteSpace(path))
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(static path => (UserMessageAttachment)new UserMessageAttachmentFile
+            .Select(static path => (Attachment)new AttachmentFile
             {
                 Path = path,
                 DisplayName = Path.GetFileName(path)
@@ -1911,6 +2648,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
         ClearSuggestions();
         var selectedReasoningEffort = GetPersistedReasoningEffortPreference();
+        var selectedContextTier = GetSelectedContextWindowTier();
 
         // Expire any pending question cards — the user chose to type instead
         if (CurrentChat is not null)
@@ -1925,16 +2663,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             var chat = new Chat
             {
-                Title = prompt.Length > 40 ? prompt[..40].Trim() + "…" : prompt,
+                Title = BuildProvisionalChatTitle(prompt),
                 AgentId = ActiveAgent?.Id,
                 ProjectId = _pendingProjectId ?? ActiveProjectFilterId,
                 ActiveSkillIds = new List<Guid>(ActiveSkillIds),
-                ActiveExternalSkillNames = new List<string>(_activeExternalSkillNames),
+                ActiveExternalSkillNames = [],
                 ActiveMcpServerNames = new List<string>(ActiveMcpServerNames),
+                HasExplicitMcpServerSelection = true,
                 SdkAgentName = SelectedSdkAgentName,
                 WorktreePath = IsWorktreeMode ? WorktreePath : null,
                 LastModelUsed = SelectedModel,
-                LastReasoningEffortUsed = selectedReasoningEffort
+                LastReasoningEffortUsed = selectedReasoningEffort,
+                LastContextWindowTierUsed = selectedContextTier
             };
             _pendingProjectId = null;
             _dataStore.Data.Chats.Add(chat);
@@ -1948,6 +2688,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         ClearPersistedSuggestions(targetChat);
         targetChat.LastModelUsed = SelectedModel;
         targetChat.LastReasoningEffortUsed = selectedReasoningEffort;
+        targetChat.LastContextWindowTierUsed = selectedContextTier;
 
         // Add user message immediately so it appears before async worktree creation
         var isSilentRetry = _silentRetryPrompt is not null && prompt == _silentRetryPrompt;
@@ -1968,7 +2709,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 HasAgentSelection = true,
                 ActiveMcpServerNames = new List<string>(ActiveMcpServerNames),
                 HasMcpSelection = true,
-                Attachments = attachments?.OfType<UserMessageAttachmentFile>().Select(a => a.Path).ToList() ?? [],
+                Attachments = attachments?.OfType<AttachmentFile>().Select(a => a.Path).ToList() ?? [],
                 ActiveSkills = BuildSkillReferences(ActiveSkillIds, _activeExternalSkillNames)
             };
             targetChat.Messages.Add(userMsg);
@@ -1986,7 +2727,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var projectDir = GetProjectWorkingDirectory();
             if (GitService.IsGitRepo(projectDir))
             {
-                _transcriptBuilder.ShowTypingIndicator(Loc.Status_CreatingWorktree);
+                var runtime = GetOrCreateRuntimeState(targetChat.Id);
+                MarkRuntimeActive(runtime, Loc.Status_CreatingWorktree);
+                if (CurrentChat?.Id == targetChat.Id)
+                    ApplyDisplayedRuntimeState(runtime);
                 try
                 {
                     var chatId = Guid.NewGuid().ToString("N")[..8];
@@ -1998,10 +2742,15 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                         WorktreePath = path;
                         targetChat.WorktreePath = path;
 
-                        // Rebase attachment paths before persisting so the saved
-                        // chat has the corrected worktree paths from the start.
+                        // Rebase attachment paths before persisting so the saved chat has the
+                        // corrected worktree paths from the start. Rebase onto the mapped project
+                        // subfolder inside the worktree (not the worktree root) so paths stay valid
+                        // when the project working directory is a subfolder of the git root.
                         if (attachments is { Count: > 0 } && userMsg is not null)
-                            RebaseAttachmentPaths(attachments, userMsg, projectDir, path);
+                        {
+                            var effectiveWorktreeDir = GitService.ResolveWorktreeWorkingDirectory(path, projectDir);
+                            RebaseAttachmentPaths(attachments, userMsg, projectDir, effectiveWorktreeDir);
+                        }
 
                         QueueSaveChat(targetChat, saveIndex: false);
                     }
@@ -2027,12 +2776,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (!needsWorktreeCreation && WorktreePath is { Length: > 0 } wtPath && attachments is { Count: > 0 } && userMsg is not null)
         {
             var projDir = GetProjectWorkingDirectory();
-            RebaseAttachmentPaths(attachments, userMsg, projDir, wtPath);
+            var effectiveWorktreeDir = GitService.ResolveWorktreeWorkingDirectory(wtPath, projDir);
+            RebaseAttachmentPaths(attachments, userMsg, projDir, effectiveWorktreeDir);
         }
 
         if (createdChat)
         {
-            _ = RefreshCodingProjectState();
+            QueueRefreshCodingProjectState();
             QueueGeneratedChatTitle(targetChat, prompt);
         }
 
@@ -2061,15 +2811,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 }
             }
             var runtime = GetOrCreateRuntimeState(targetChat.Id);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Thinking;
+            MarkRuntimeActive(runtime, Loc.Status_Thinking);
             if (CurrentChat?.Id == targetChat.Id)
-            {
-                IsBusy = runtime.IsBusy;
-                IsStreaming = runtime.IsStreaming;
-                StatusText = runtime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(runtime);
 
             var needsSessionSetup = _activeSession?.SessionId != targetChat.CopilotSessionId
                                     || targetChat.CopilotSessionId is null;
@@ -2280,15 +3024,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             using var reconnectCts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var runtime = GetOrCreateRuntimeState(chat.Id);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Reconnecting;
+            MarkRuntimeActive(runtime, Loc.Status_Reconnecting);
             if (CurrentChat?.Id == chat.Id)
-            {
-                IsBusy = true;
-                IsStreaming = true;
-                StatusText = runtime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(runtime);
 
             if (!await TryReconnectCopilotAsync(reconnectCts.Token))
                 return (null, Loc.Status_ConnectionRecoveryFailed);
@@ -2331,15 +3069,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             recoveredTurnCts.Token);
         if (!recoveredAnalysis.UserMessageObserved)
         {
-            pendingRuntime.IsBusy = true;
-            pendingRuntime.IsStreaming = true;
-            pendingRuntime.StatusText = Loc.Status_ConnectionRecoveredRetry;
+            MarkRuntimeActive(pendingRuntime, Loc.Status_ConnectionRecoveredRetry);
             if (CurrentChat?.Id == chat.Id)
-            {
-                IsBusy = true;
-                IsStreaming = true;
-                StatusText = pendingRuntime.StatusText;
-            }
+                ApplyDisplayedRuntimeState(pendingRuntime);
 
             var expectedSessionUserMessageCount = await CaptureExpectedSessionUserMessageCountAsync(
                 recoveredSession,
@@ -2387,7 +3119,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         try
         {
-            return await session.GetMessagesAsync(ct);
+            return await session.GetEventsAsync(ct);
         }
         catch
         {
@@ -2471,14 +3203,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         var runtime = GetOrCreateRuntimeState(chat.Id);
-        runtime.IsBusy = false;
-        runtime.IsStreaming = false;
-        runtime.StatusText = "";
+        MarkRuntimeTerminal(runtime);
         if (CurrentChat?.Id == chat.Id)
         {
-            IsBusy = false;
-            IsStreaming = false;
-            StatusText = runtime.StatusText;
+            ApplyDisplayedRuntimeState(runtime);
             ScrollToEndRequested?.Invoke();
         }
 
@@ -2495,7 +3223,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     {
         var sawRecoveredTurnActivity = false;
         var turnActivity = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -2650,10 +3378,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         _dataStore.MarkChatChanged(chat);
     }
 
-    private string BuildSendPromptAdditions(
-        IReadOnlyCollection<string>? externalSkillNames = null,
-        bool consumePendingSkillInjections = true,
-        string? workDir = null)
+    private string BuildSendPromptAdditions(bool consumePendingSkillInjections = true)
     {
         var builder = new StringBuilder();
         var hasActivatedSkillsSection = false;
@@ -2676,27 +3401,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             {
                 AppendActivatedSkillsHeader();
                 foreach (var skill in injectedSkills)
-                {
-                    builder.Append("\n### ")
-                        .Append(skill.Name)
-                        .Append('\n')
-                        .Append(skill.Content)
-                        .Append('\n');
-                }
-            }
-        }
-
-        var externalNames = externalSkillNames ?? _activeExternalSkillNames;
-        if (externalNames.Count > 0)
-        {
-            var externalSkills = ResolveExternalSkills(
-                workDir is { Length: > 0 } ? GetExternalCatalog(workDir) : GetExternalCatalog(),
-                externalNames);
-
-            if (externalSkills.Count > 0)
-            {
-                AppendActivatedSkillsHeader();
-                foreach (var skill in externalSkills)
                 {
                     builder.Append("\n### ")
                         .Append(skill.Name)
@@ -2733,6 +3437,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         if (chat is not null)
             ClearPendingTurnTracking(chat.Id);
+
+        // A PROVABLY transient backend-internal failure (twirp/usersd "failed to do request", or a
+        // 5xx "unavailable") is not a logout: the credential is still valid and a resend recovers.
+        // Surface it as a one-click-retryable failure (same affordance as a connection loss) instead
+        // of a terminal error. A bare/ambiguous 401/403 is NOT matched here, so a genuine logout
+        // falls through to the normal error path below and the user can re-authenticate.
+        if (overrideMessage is null && chat is not null
+            && CopilotService.IsTransientServerAuthError(FlattenExceptionMessages(ex)))
+        {
+            ApplyUnexpectedAbortState(chat, Loc.Status_TransientAuthRetry);
+            return;
+        }
 
         var message = overrideMessage ?? FlattenExceptionMessages(ex);
         var errorText = string.Format(Loc.Status_Error, message);
@@ -2851,26 +3567,39 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private async Task GenerateTitleForChatAsync(Chat chat, string firstUserMessage, string? expectedCurrentTitle)
     {
-        try
+        // Title generation runs concurrently with the main send over the shared Copilot client.
+        // A large/heavy first message is more likely to stall the pipeline or trigger a transport
+        // reconnect that invalidates the title's in-flight lightweight session, leaving the chat
+        // stuck on its provisional truncated title. Retry a few times (with backoff) so a transient
+        // failure or a mid-flight reconnect recovers onto a fresh client instead of silently giving up.
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            var generatedTitle = await _copilotService.GenerateTitleAsync(firstUserMessage).ConfigureAwait(false);
-            if (string.IsNullOrWhiteSpace(generatedTitle))
-                return;
-
-            Dispatcher.UIThread.Post(() =>
+            try
             {
-                if (!_dataStore.Data.Settings.AutoGenerateTitles)
-                    return;
+                var generatedTitle = await _copilotService.GenerateTitleAsync(firstUserMessage).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(generatedTitle))
+                {
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        if (!_dataStore.Data.Settings.AutoGenerateTitles)
+                            return;
 
-                if (!_dataStore.Data.Chats.Any(c => c.Id == chat.Id))
-                    return;
+                        if (!_dataStore.Data.Chats.Any(c => c.Id == chat.Id))
+                            return;
 
-                ApplyChatTitle(chat, generatedTitle, expectedCurrentTitle);
-            });
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[Lumi] Title generation failed: {ex.Message}");
+                        ApplyChatTitle(chat, generatedTitle, expectedCurrentTitle);
+                    });
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[Lumi] Title generation attempt {attempt}/{maxAttempts} failed: {ex.Message}");
+            }
+
+            if (attempt < maxAttempts)
+                await Task.Delay(TimeSpan.FromSeconds(2 * attempt)).ConfigureAwait(false);
         }
     }
 
@@ -2892,6 +3621,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (HasPersistedChatFile(chat) && _dataStore.Data.Settings.AutoSaveChats)
             _ = SaveIndexAsync();
         ChatTitleChanged?.Invoke(chat.Id, chat.Title);
+    }
+
+    private static string BuildProvisionalChatTitle(string prompt)
+    {
+        if (prompt.Length <= 40)
+            return prompt;
+
+        var end = 40;
+        // Avoid splitting a surrogate pair when truncating (would leave a lone surrogate).
+        if (char.IsHighSurrogate(prompt[end - 1]))
+            end--;
+        return prompt[..end].Trim() + "…";
     }
 
     private static string? NormalizeChatTitle(string? title)
@@ -3116,108 +3857,69 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         Guid? latestUserMessageId,
         IReadOnlyDictionary<Guid, IReadOnlyList<ChatMessage>> loadedMessageSnapshots)
     {
-        var userPromptHistory = await _dataStore.GetUserPromptHistoryAsync(
-            SuggestionHistoryScanLimit,
-            loadedMessageSnapshots);
+        var userPromptHistory = await GetUserPromptHistoryCachedAsync(loadedMessageSnapshots);
 
         var historyItems = userPromptHistory
             .Where(item => item.MessageId != latestUserMessageId);
 
-        return FormatSuggestionHistorySummary(historyItems, SuggestionHistorySummaryMaxItems);
+        // Deterministic, conversation-agnostic prep only: the model decides what (if anything) fits.
+        return SuggestionHistoryRanker.BuildFrequentRequestsBlock(
+            historyItems,
+            SuggestionFrequentRequestMaxItems);
     }
 
-    private static string? FormatSuggestionHistorySummary(
-        IEnumerable<UserPromptHistoryItem> historyItems,
-        int maxItems)
+    /// <summary>Returns the cross-chat user-prompt history, served from cache when fresh. A stale
+    /// snapshot is returned immediately while a single background refresh updates it, so suggestion
+    /// generation only pays the disk scan on the very first call (cold cache).</summary>
+    private async Task<IReadOnlyList<UserPromptHistoryItem>> GetUserPromptHistoryCachedAsync(
+        IReadOnlyDictionary<Guid, IReadOnlyList<ChatMessage>> loadedMessageSnapshots)
     {
-        ArgumentNullException.ThrowIfNull(historyItems);
-        if (maxItems <= 0)
-            throw new ArgumentOutOfRangeException(nameof(maxItems), "History item limit must be greater than zero.");
-
-        var groups = historyItems
-            .Select(static item => new
-            {
-                Key = NormalizeSuggestionHistoryContent(item.Content),
-                Content = TrimSuggestionHistoryContent(item.Content),
-                item.Timestamp
-            })
-            .Where(static item => !string.IsNullOrWhiteSpace(item.Key)
-                                  && !string.IsNullOrWhiteSpace(item.Content))
-            .GroupBy(static item => item.Key, StringComparer.Ordinal)
-            .Select(static group =>
-            {
-                var latest = group.OrderByDescending(static item => item.Timestamp).First();
-                return new SuggestionHistoryGroup(
-                    group.Key,
-                    latest.Content,
-                    group.Count(),
-                    group.Max(static item => item.Timestamp));
-            })
-            .OrderByDescending(static group => group.LastUsedAt)
-            .ToList();
-
-        if (groups.Count == 0)
-            return null;
-
-        var frequentGroups = groups
-            .Where(static group => group.Count > 1)
-            .OrderByDescending(static group => group.Count)
-            .ThenByDescending(static group => group.LastUsedAt)
-            .Take(Math.Min(8, maxItems))
-            .ToList();
-
-        var frequentKeys = frequentGroups
-            .Select(static group => group.Key)
-            .ToHashSet(StringComparer.Ordinal);
-
-        var recentGroups = groups
-            .Where(group => !frequentKeys.Contains(group.Key))
-            .OrderByDescending(static group => group.LastUsedAt)
-            .Take(Math.Max(0, maxItems - frequentGroups.Count))
-            .ToList();
-
-        var summary = new StringBuilder();
-        if (frequentGroups.Count > 0)
+        var cached = _cachedUserPromptHistory;
+        if (cached is not null)
         {
-            summary.AppendLine("Frequent user requests:");
-            foreach (var group in frequentGroups)
-                summary.AppendLine($"- {group.Content} (used {group.Count}x)");
+            var ageTicks = DateTimeOffset.UtcNow.UtcTicks - Interlocked.Read(ref _cachedUserPromptHistoryAtTicks);
+            if (ageTicks >= SuggestionHistoryCacheTtl.Ticks)
+                QueueUserPromptHistoryRefresh(loadedMessageSnapshots);
+
+            return cached;
         }
 
-        if (recentGroups.Count > 0)
-        {
-            if (summary.Length > 0)
-                summary.AppendLine();
+        var history = await _dataStore.GetUserPromptHistoryAsync(
+            SuggestionHistoryScanLimit,
+            loadedMessageSnapshots);
 
-            summary.AppendLine("Recent user requests:");
-            foreach (var group in recentGroups)
-                summary.AppendLine($"- {group.Content}");
-        }
-
-        return summary.Length > 0 ? summary.ToString().TrimEnd() : null;
+        _cachedUserPromptHistory = history;
+        Interlocked.Exchange(ref _cachedUserPromptHistoryAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+        return history;
     }
 
-    private static string CollapseSuggestionHistoryWhitespace(string content)
-        => Regex.Replace(content.Trim(), @"\s+", " ");
-
-    private static string NormalizeSuggestionHistoryContent(string content)
-        => CollapseSuggestionHistoryWhitespace(content)
-            .Trim(' ', '.', '!', '?', ':', ';', '"', '\'')
-            .ToLowerInvariant();
-
-    private static string TrimSuggestionHistoryContent(string content)
+    private void QueueUserPromptHistoryRefresh(
+        IReadOnlyDictionary<Guid, IReadOnlyList<ChatMessage>> loadedMessageSnapshots)
     {
-        var singleLine = CollapseSuggestionHistoryWhitespace(content);
-        return singleLine.Length <= SuggestionHistoryDisplayMaxLength
-            ? singleLine
-            : singleLine[..(SuggestionHistoryDisplayMaxLength - 3)].TrimEnd() + "...";
-    }
+        if (Interlocked.CompareExchange(ref _userPromptHistoryRefreshing, 1, 0) != 0)
+            return;
 
-    private sealed record SuggestionHistoryGroup(
-        string Key,
-        string Content,
-        int Count,
-        DateTimeOffset LastUsedAt);
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var fresh = await _dataStore.GetUserPromptHistoryAsync(
+                    SuggestionHistoryScanLimit,
+                    loadedMessageSnapshots);
+
+                _cachedUserPromptHistory = fresh;
+                Interlocked.Exchange(ref _cachedUserPromptHistoryAtTicks, DateTimeOffset.UtcNow.UtcTicks);
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[Lumi] Suggestion history refresh failed: {ex.Message}");
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _userPromptHistoryRefreshing, 0);
+            }
+        });
+    }
 
     private sealed record SuggestionGenerationContext(
         string AssistantMessage,
@@ -3311,7 +4013,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private async Task SaveChatAsync(Chat chat, bool saveIndex, bool releaseIfInactive = false, CancellationToken cancellationToken = default)
     {
-        var canEvictMessages = false;
         try
         {
             if (_dataStore.Data.Settings.AutoSaveChats)
@@ -3319,7 +4020,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 await _dataStore.SaveChatAsync(chat, cancellationToken);
                 if (saveIndex)
                     await _dataStore.SaveAsync(cancellationToken);
-                canEvictMessages = true;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -3334,9 +4034,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (releaseIfInactive)
         {
             if (Dispatcher.UIThread.CheckAccess())
-                ReleaseInactiveChatState(chat, canEvictMessages);
+                ReleaseInactiveChatState(chat);
             else
-                Dispatcher.UIThread.Post(() => ReleaseInactiveChatState(chat, canEvictMessages));
+                Dispatcher.UIThread.Post(() => ReleaseInactiveChatState(chat));
         }
     }
 
@@ -3469,7 +4169,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     private async Task ResendFromMessageAsync(
         ChatMessage userMessage,
         bool wasEdited,
-        List<UserMessageAttachment>? attachmentsOverride)
+        List<Attachment>? attachmentsOverride)
     {
         if (CurrentChat is null) return;
 
@@ -3505,7 +4205,6 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         RebuildTranscript();
 
         _transcriptBuilder.ShownFileChips.Clear();
-        _transcriptBuilder.PendingFetchedSkillRefs.Clear();
 
         // For edits: there is currently no public SDK API to rewind/remove prior
         // turns from the server-side history. To avoid leaking the pre-edit prompt,
@@ -3564,10 +4263,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         MessageOptions? resendOptions = null;
-        var (_, resendExternalSkillNames) = ResolveSkillSelectionsFromReferences(userMessage.ActiveSkills);
-        var promptAdditions = BuildSendPromptAdditions(
-            resendExternalSkillNames,
-            consumePendingSkillInjections: false);
+        var promptAdditions = BuildSendPromptAdditions(consumePendingSkillInjections: false);
         var localUserMessageCount = 0;
         var localAssistantMessageCount = 0;
         try
@@ -3633,12 +4329,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             }
 
             var runtime = GetOrCreateRuntimeState(CurrentChat.Id);
-            runtime.IsBusy = true;
-            runtime.IsStreaming = true;
-            runtime.StatusText = Loc.Status_Thinking;
-            IsBusy = runtime.IsBusy;
-            IsStreaming = runtime.IsStreaming;
-            StatusText = runtime.StatusText;
+            MarkRuntimeActive(runtime, Loc.Status_Thinking);
+            ApplyDisplayedRuntimeState(runtime);
 
             if (WorktreePath is { Length: > 0 } wtPath && attachments.Count > 0)
             {
@@ -3861,5 +4553,3 @@ public partial class ChatMessageViewModel : ObservableObject
         ToolStatus = Message.ToolStatus;
     }
 }
-
-

@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Localization;
 using Lumi.Models;
 
@@ -14,6 +14,12 @@ namespace Lumi.Services;
 /// </summary>
 public static partial class ToolDisplayHelper
 {
+    private const int MaxFailedToolOutputChars = 8000;
+    private const int MaxRawFailedToolOutputChars = MaxFailedToolOutputChars * 4;
+    private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
+    private static readonly string FailedToolOutputTruncationMarker =
+        $"{Environment.NewLine}{Environment.NewLine}[Output truncated]";
+
     /// <summary>Extensions for intermediary/script files that shouldn't appear as attachment chips.</summary>
     private static readonly HashSet<string> ScriptExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -48,10 +54,11 @@ public static partial class ToolDisplayHelper
             "delete_file" or "delete" or "rm" => fileName is not null ? string.Format(Loc.Tool_DeletingNamed, fileName) : Loc.Tool_DeletingFile,
             "move_file" or "rename_file" or "mv" or "rename" => fileName is not null ? string.Format(Loc.Tool_MovingNamed, fileName) : Loc.Tool_MovingFile,
             "get_errors" or "diagnostics" => fileName is not null ? string.Format(Loc.Tool_CheckingNamed, fileName) : Loc.Tool_CheckingErrors,
-            "browser" => Loc.Tool_OpeningPage,
-            "browser_look" => Loc.Tool_BrowserSnapshot,
-            "browser_do" => Loc.Tool_Action,
-            "browser_js" => Loc.Tool_BrowserEvaluate,
+            "browser" or BrowserOpenToolName => Loc.Tool_OpeningPage,
+            "browser_look" or BrowserLookToolName => Loc.Tool_BrowserSnapshot,
+            "browser_find" or BrowserFindToolName => Loc.Tool_FindingElement,
+            "browser_do" or BrowserDoToolName => Loc.Tool_Action,
+            "browser_js" or BrowserJsToolName => Loc.Tool_BrowserEvaluate,
             "save_memory" => Loc.Tool_Remembering,
             "update_memory" => Loc.Tool_UpdatingMemory,
             "delete_memory" => Loc.Tool_Forgetting,
@@ -129,7 +136,7 @@ public static partial class ToolDisplayHelper
 
     public static string TruncateInlineLabel(string text, int maxLength)
     {
-        var compact = Regex.Replace(text, @"\s+", " ").Trim();
+        var compact = Regex.Replace(text, @"\s+", " ", RegexOptions.CultureInvariant, RegexTimeout).Trim();
         if (compact.Length <= maxLength)
             return compact;
 
@@ -237,7 +244,12 @@ public static partial class ToolDisplayHelper
     public static string? CleanTerminalOutput(string? output)
     {
         if (string.IsNullOrEmpty(output)) return output;
-        return Regex.Replace(output, @"\s*<exited with exit code \d+>\s*$", "", RegexOptions.IgnoreCase).TrimEnd();
+        return Regex.Replace(
+            output,
+            @"\s*<exited with exit code \d+>\s*$",
+            "",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            RegexTimeout).TrimEnd();
     }
 
     public static string MergeTerminalOutput(string? existingOutput, string incomingOutput, bool replaceExistingOutput)
@@ -272,6 +284,176 @@ public static partial class ToolDisplayHelper
             return CleanTerminalOutput(contentsText);
 
         return CleanTerminalOutput(result.Content);
+    }
+
+    private static string? ExtractToolCompletionOutput(ToolExecutionCompleteResult? result)
+    {
+        if (result is null)
+            return null;
+
+        var parts = new List<string>();
+        var contentsText = CleanTerminalOutput(ExtractTerminalOutputFromContents(result.Contents));
+        AddDistinctOutputPart(parts, contentsText);
+        AddDistinctOutputPart(parts, CleanTerminalOutput(result.DetailedContent));
+        AddDistinctOutputPart(parts, CleanTerminalOutput(result.Content));
+
+        return parts.Count == 0
+            ? null
+            : string.Join($"{Environment.NewLine}{Environment.NewLine}", parts);
+    }
+
+    public static string? ExtractFailedToolOutput(ToolExecutionCompleteError? error, ToolExecutionCompleteResult? result)
+    {
+        var errorOutput = LimitFailedToolOutput(FormatToolErrorOutput(error));
+        var completionOutput = LimitFailedToolOutput(ExtractToolCompletionOutput(result));
+
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(errorOutput))
+            parts.Add(errorOutput);
+
+        if (!string.IsNullOrWhiteSpace(completionOutput)
+            && !parts.Any(part => string.Equals(part, completionOutput, StringComparison.Ordinal)))
+        {
+            parts.Add(completionOutput);
+        }
+
+        return LimitFailedToolOutput(parts.Count == 0
+            ? null
+            : string.Join($"{Environment.NewLine}{Environment.NewLine}", parts));
+    }
+
+    private static string? FormatToolErrorOutput(ToolExecutionCompleteError? error)
+    {
+        if (error is null || string.IsNullOrWhiteSpace(error.Message))
+            return null;
+
+        var message = NormalizeDisplayText(error.Message)?.Trim();
+        var code = NormalizeDisplayText(error.Code)?.Trim();
+        if (string.IsNullOrWhiteSpace(message))
+            return string.IsNullOrWhiteSpace(code) ? null : $"code: {code}";
+
+        return string.IsNullOrWhiteSpace(code)
+            ? message
+            : $"{message} (code: {code})";
+    }
+
+    private static string? LimitFailedToolOutput(string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+            return null;
+
+        var raw = SafeSubstring(output, MaxRawFailedToolOutputChars);
+        var trimmed = RedactCommonSecrets(NormalizeDisplayText(raw)?.Trim());
+        if (string.IsNullOrWhiteSpace(trimmed))
+            return null;
+
+        return trimmed.Length <= MaxFailedToolOutputChars
+            ? trimmed
+            : TrimToFailedOutputLimit(trimmed);
+    }
+
+    private static string TrimToFailedOutputLimit(string output)
+    {
+        var maxBodyLength = Math.Max(0, MaxFailedToolOutputChars - FailedToolOutputTruncationMarker.Length);
+        var body = SafeSubstring(output, maxBodyLength);
+        return body + FailedToolOutputTruncationMarker;
+    }
+
+    private static string SafeSubstring(string value, int maxLength)
+    {
+        if (value.Length <= maxLength)
+            return value;
+
+        var result = value[..maxLength];
+        if (result.Length > 0 && char.IsHighSurrogate(result[^1]))
+            result = result[..^1];
+
+        return result;
+    }
+
+    private static string? NormalizeDisplayText(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        var withoutAnsi = Regex.Replace(
+            value,
+            @"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\)|P[^\x1B]*(?:\x1B\\)|[_^][^\x1B]*(?:\x1B\\))",
+            string.Empty,
+            RegexOptions.CultureInvariant,
+            RegexTimeout);
+        return new string(withoutAnsi
+            .Where(IsAllowedDisplayChar)
+            .ToArray());
+    }
+
+    private static bool IsAllowedDisplayChar(char c)
+    {
+        if (c is '\r' or '\n' or '\t')
+            return true;
+
+        if (char.IsControl(c))
+            return false;
+
+        return c is not ('\u202A' or '\u202B' or '\u202C' or '\u202D' or '\u202E'
+            or '\u2066' or '\u2067' or '\u2068' or '\u2069');
+    }
+
+    private static string? RedactCommonSecrets(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return value;
+
+        var redacted = Regex.Replace(
+            value,
+            @"(?ix)
+              (?<prefix>[""']?)
+              \b
+              (?<key>
+                  [A-Z0-9_./-]*
+                  (api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|password|passwd|pwd|secret|client[_-]?secret|private[_-]?key)
+                  [A-Z0-9_./-]*
+              )
+              (?<suffix>[""']?)
+              (?<sep>\s*[:=]\s*)
+              (?:
+                  (?<quote>"")(?:\\.|[^""\\])*""
+                  | (?<quote>')(?:\\.|[^'\\])*'
+                  | (?:bearer|basic)\s+\S+
+                  | [^\s""',}]+
+              )",
+            match =>
+            {
+                var quote = match.Groups["quote"].Value;
+                return $"{match.Groups["prefix"].Value}{match.Groups["key"].Value}{match.Groups["suffix"].Value}{match.Groups["sep"].Value}{quote}[REDACTED]{quote}";
+            },
+            RegexOptions.CultureInvariant,
+            RegexTimeout);
+
+        return Regex.Replace(
+            redacted,
+            @"(?ix)
+              (?<name>[""']?\bauthorization\b[""']?\s*:\s*)
+              (?<quote>[""']?)
+              (?<scheme>bearer|basic)
+              \s+\S+
+              [""']?",
+            match =>
+            {
+                var quote = match.Groups["quote"].Value;
+                return $"{match.Groups["name"].Value}{quote}{match.Groups["scheme"].Value} [REDACTED]{quote}";
+            },
+            RegexOptions.CultureInvariant,
+            RegexTimeout);
+    }
+
+    private static void AddDistinctOutputPart(List<string> parts, string? output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+            return;
+
+        if (!parts.Any(part => string.Equals(part, output, StringComparison.Ordinal)))
+            parts.Add(output);
     }
 
     /// <summary>Extracts terminal/text output from tool execution result contents.</summary>

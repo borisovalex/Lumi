@@ -35,6 +35,10 @@ public partial class MainWindow : Window
     private const double DefaultSidebarWidth = 280;
     private const double MinSidebarWidth = 240;
     private const double MaxSidebarWidth = 420;
+    private static readonly TimeSpan ChatListDoubleClickThreshold = TimeSpan.FromMilliseconds(500);
+    private const double ChatListDoubleClickMaxDistance = 8;
+    private static readonly AttachedProperty<bool> ChatListHandlersAttachedProperty =
+        AvaloniaProperty.RegisterAttached<MainWindow, ListBox, bool>("ChatListHandlersAttached");
     private static readonly Thickness NavButtonBasePadding = new(6, 0);
     private static readonly Thickness NavButtonCompactPadding = new(1, 0);
     private const double NavLabelGap = 3;
@@ -43,11 +47,11 @@ public partial class MainWindow : Window
     private Panel? _onboardingPanel;
     private DockPanel? _mainPanel;
     private Border? _acrylicFallback;
-    private Border? _chatIsland;
     private Border? _windowContentRoot;
     private Control?[] _pages = [];
     private Panel?[] _sidebarPanels = [];
     private Button?[] _navButtons = [];
+    private Button?[] _railNavButtons = [];
     private Panel? _renameOverlay;
     private TextBox? _renameTextBox;
     private Border? _projectSwitcherRoot;
@@ -62,9 +66,8 @@ public partial class MainWindow : Window
     private TextBlock? _projectFilterMoreText;
     private ScrollViewer? _chatListScroller;
     private readonly List<(Project Project, PropertyChangedEventHandler Handler)> _projectFilterHandlers = [];
+    private ChatWorkspaceView? _chatWorkspace;
     private ChatView? _chatView;
-    private BrowserView? _browserView;
-    private ContentControl? _browserHost;
     private ContentControl? _jobsHost;
     private ContentControl? _projectsHost;
     private ContentControl? _skillsHost;
@@ -73,10 +76,8 @@ public partial class MainWindow : Window
     private ContentControl? _mcpServersHost;
     private ContentControl? _settingsHost;
     private SettingsView? _settingsView;
-    private Border? _browserIsland;
-    private GridSplitter? _browserSplitter;
-    private Grid? _chatContentGrid;
     private Border? _sidebarBorder;
+    private Border? _contentArea;
     private Thumb? _sidebarResizeThumb;
     private Border? _navPill;
     private TextBlock?[] _navLabels = [];
@@ -84,20 +85,12 @@ public partial class MainWindow : Window
     private ImplicitAnimationCollection?[] _navButtonOffsetAnimations = [];
     private CancellationTokenSource? _sidebarAnimCts;
     private CancellationTokenSource? _navHoverIntentCts;
-    private Border? _diffIsland;
-    private ContentControl? _diffHost;
-    private DiffView? _diffView;
-    private TextBlock? _diffFileNameText;
-    private List<GitFileChangeViewModel>? _lastGitChangesList;
-    private Border? _planIsland;
-    private CancellationTokenSource? _previewAnimCts;
     private CancellationTokenSource? _projectSwitcherDrawerCts;
     private bool _suppressSelectionSync;
     private bool _isProjectChatListRevealArmed;
     private bool _isProjectChatListRevealQueued;
     private bool _isProjectSwitcherOpen;
     private int _chatListRevealVersion;
-    private CancellationTokenSource? _browserAnimCts;
     private CancellationTokenSource? _shellAnimCts;
     private int _currentShellIndex = -1;
     private int _activeNavIndex = -1;
@@ -105,7 +98,11 @@ public partial class MainWindow : Window
     private int _pendingNavHoverIndex = -1;
     private int _navPillScaleAnimationVersion;
     private bool _isNavPillWidthLocked;
+    private bool _navHoverInitPending;
     private double _expandedSidebarWidth = DefaultSidebarWidth;
+    private Guid? _lastChatListClickChatId;
+    private DateTimeOffset _lastChatListClickAt;
+    private Point _lastChatListClickPosition;
     private sealed record ProjectFilterCandidate(Project Project, int ChatCount, DateTimeOffset? LastActivity, double SearchScore);
 
     private double[] _navBaseButtonWidths = [];
@@ -120,6 +117,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        WindowChromeInterop.EnableNativeMinMaxAnimations(this);
         ExtendClientAreaToDecorationsHint = true;
         ExtendClientAreaTitleBarHeightHint = 38;
 
@@ -169,10 +167,9 @@ public partial class MainWindow : Window
         DisposeCancellationTokenSource(ref _sidebarAnimCts);
         DisposeCancellationTokenSource(ref _navHoverIntentCts);
         DisposeCancellationTokenSource(ref _titleAnimCts);
-        DisposeCancellationTokenSource(ref _browserAnimCts);
-        DisposeCancellationTokenSource(ref _previewAnimCts);
         DisposeCancellationTokenSource(ref _chatListRevealCts);
         DisposeCancellationTokenSource(ref _projectSwitcherDrawerCts);
+        _chatWorkspace?.Dispose();
     }
 
     private static CancellationTokenSource ReplaceCancellationTokenSource(ref CancellationTokenSource? source)
@@ -216,15 +213,15 @@ public partial class MainWindow : Window
         _onboardingPanel = this.FindControl<Panel>("OnboardingPanel");
         _mainPanel = this.FindControl<DockPanel>("MainPanel");
         _acrylicFallback = this.FindControl<Border>("AcrylicFallback");
-        _chatIsland = this.FindControl<Border>("ChatIsland");
         _windowContentRoot = this.FindControl<Border>("WindowContentRoot");
         _sidebarBorder = this.FindControl<Border>("SidebarBorder");
+        _contentArea = this.FindControl<Border>("ContentArea");
         _sidebarResizeThumb = this.FindControl<Thumb>("SidebarResizeThumb");
         _navPill = this.FindControl<Border>("NavPill");
 
         _pages =
         [
-            this.FindControl<Grid>("ChatContentGrid"),         // 0 = Chat (container grid)
+            this.FindControl<Control>("ChatContentGrid"),      // 0 = Chat workspace
             this.FindControl<Control>("PageJobs"),             // 1
             this.FindControl<Control>("PageProjects"),         // 2
             this.FindControl<Control>("PageSkills"),           // 3
@@ -256,6 +253,18 @@ public partial class MainWindow : Window
             this.FindControl<Button>("NavMemories"),
             this.FindControl<Button>("NavMcpServers"),
             this.FindControl<Button>("NavSettings"),
+        ];
+
+        _railNavButtons =
+        [
+            this.FindControl<Button>("RailChat"),
+            this.FindControl<Button>("RailJobs"),
+            this.FindControl<Button>("RailProjects"),
+            this.FindControl<Button>("RailSkills"),
+            this.FindControl<Button>("RailAgents"),
+            this.FindControl<Button>("RailMemories"),
+            this.FindControl<Button>("RailMcpServers"),
+            this.FindControl<Button>("RailSettings"),
         ];
 
         ApplyAgentAutomationLandmarks();
@@ -294,14 +303,14 @@ public partial class MainWindow : Window
         if (_chatListScroller is not null)
             _chatListScroller.ScrollChanged += OnChatListScrollChanged;
 
-        _chatView = this.FindControl<ChatView>("PageChat");
+        _chatWorkspace = this.FindControl<ChatWorkspaceView>("ChatContentGrid");
+        _chatView = _chatWorkspace?.ChatView;
 
         // Set OS-specific shortcut label
         var shortcutLabel = this.FindControl<TextBlock>("SearchButtonShortcut");
         if (shortcutLabel is not null && RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             shortcutLabel.Text = "⌘K";
 
-        _browserHost = this.FindControl<ContentControl>("BrowserHost");
         _jobsHost = this.FindControl<ContentControl>("PageJobsHost");
         _projectsHost = this.FindControl<ContentControl>("PageProjectsHost");
         _skillsHost = this.FindControl<ContentControl>("PageSkillsHost");
@@ -309,13 +318,6 @@ public partial class MainWindow : Window
         _memoriesHost = this.FindControl<ContentControl>("PageMemoriesHost");
         _mcpServersHost = this.FindControl<ContentControl>("PageMcpServersHost");
         _settingsHost = this.FindControl<ContentControl>("PageSettingsHost");
-        _browserIsland = this.FindControl<Border>("BrowserIsland");
-        _browserSplitter = this.FindControl<GridSplitter>("BrowserSplitter");
-        _chatContentGrid = this.FindControl<Grid>("ChatContentGrid");
-        _diffIsland = this.FindControl<Border>("DiffIsland");
-        _diffHost = this.FindControl<ContentControl>("DiffHost");
-        _diffFileNameText = this.FindControl<TextBlock>("DiffFileNameText");
-        _planIsland = this.FindControl<Border>("PlanIsland");
 
         if (_sidebarResizeThumb is not null)
         {
@@ -573,6 +575,9 @@ public partial class MainWindow : Window
         if (_sidebarBorder is not null)
             _sidebarBorder.Width = vm.IsSidebarCollapsed ? 0 : _expandedSidebarWidth;
 
+        if (_contentArea is not null)
+            _contentArea.Margin = GetContentAreaMargin(vm.IsSidebarCollapsed);
+
         if (_sidebarResizeThumb is not null)
             _sidebarResizeThumb.IsVisible = !vm.IsSidebarCollapsed;
     }
@@ -608,6 +613,18 @@ public partial class MainWindow : Window
 
         var clampedWidth = ClampSidebarWidth(_expandedSidebarWidth);
         vm.DataStore.Data.Settings.SidebarWidth = clampedWidth;
+        _ = vm.DataStore.SaveAsync();
+    }
+
+    private void PersistSidebarCollapsed()
+    {
+        if (!IsPrimaryWindow)
+            return;
+
+        if (DataContext is not MainViewModel vm)
+            return;
+
+        vm.DataStore.Data.Settings.SidebarCollapsed = vm.IsSidebarCollapsed;
         _ = vm.DataStore.SaveAsync();
     }
 
@@ -671,6 +688,17 @@ public partial class MainWindow : Window
         {
             vm.NewChatCommand.Execute(null);
             Dispatcher.UIThread.Post(() => _chatView?.FocusComposer(), DispatcherPriority.Input);
+            e.Handled = true;
+            return;
+        }
+
+        // ── Ctrl+Shift+N — Open active chat, or a new chat, in a new window ──
+        if (ctrl && !alt && shift && e.Key == Key.N)
+        {
+            if (vm.ChatVM.CurrentChat is null)
+                vm.OpenNewChatInNewWindowCommand.Execute(null);
+            else
+                vm.OpenChatInNewWindowCommand.Execute(vm.ChatVM.CurrentChat);
             e.Handled = true;
             return;
         }
@@ -839,6 +867,31 @@ public partial class MainWindow : Window
         // no manual padding workaround needed.
     }
 
+    private void AttachChatWorkspace(MainViewModel vm)
+    {
+        if (_chatWorkspace is null)
+            return;
+
+        _chatWorkspace.EnsureChatVisible = () =>
+        {
+            if (vm.SelectedNavIndex != 0)
+                vm.SelectedNavIndex = 0;
+        };
+        _chatWorkspace.CanShowBrowserPanel = chatId => vm.ActiveChatId == chatId;
+        _chatWorkspace.DataStore = vm.DataStore;
+
+        if (!ReferenceEquals(_chatWorkspace.DataContext, vm.ChatVM))
+            _chatWorkspace.DataContext = vm.ChatVM;
+
+        _chatView = _chatWorkspace.ChatView;
+        foreach (var svc in vm.ChatVM.ChatBrowserServices.Values)
+            svc.SetTheme(vm.IsDarkTheme);
+        HideBrowserPanel();
+        HideDiffPanel();
+        HidePlanPanel();
+        HideSkillPanel();
+    }
+
     protected override void OnDataContextChanged(EventArgs e)
     {
         base.OnDataContextChanged(e);
@@ -875,6 +928,10 @@ public partial class MainWindow : Window
             {
                 Dispatcher.UIThread.Post(() => AnimateSidebarTitle(chatId, newTitle));
             };
+            vm.ChatSelectionSyncRequested += activeChatId =>
+            {
+                Dispatcher.UIThread.Post(() => SyncListBoxSelection(activeChatId), DispatcherPriority.Loaded);
+            };
 
             // Wire search overlay result selection
             vm.SearchOverlayVM.ResultSelected += result => OnSearchResultSelected(vm, result);
@@ -888,65 +945,7 @@ public partial class MainWindow : Window
 
             // Apply initial font size
             ApplyFontSize(vm.SettingsVM.FontSize);
-
-            // Wire browser panel show/hide (per-chat aware)
-            vm.ChatVM.BrowserShowRequested += (chatId) =>
-            {
-                Dispatcher.UIThread.Post(() =>
-                {
-                    // Only show browser panel if the requesting chat is currently active
-                    if (vm.ActiveChatId == chatId)
-                    {
-                        ShowBrowserPanel(chatId);
-                        vm.ChatVM.IsBrowserOpen = IsBrowserOpen;
-                    }
-                });
-            };
-            vm.ChatVM.BrowserHideRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => { HideBrowserPanel(); vm.ChatVM.IsBrowserOpen = IsBrowserOpen; });
-            };
-
-            // Close browser button
-            var closeBrowserBtn = this.FindControl<Button>("CloseBrowserButton");
-            if (closeBrowserBtn is not null)
-                closeBrowserBtn.Click += (_, _) => { HideBrowserPanel(); vm.ChatVM.IsBrowserOpen = false; };
-
-            // Wire diff panel show/hide
-            vm.ChatVM.DiffShowRequested += (item) =>
-            {
-                Dispatcher.UIThread.Post(() => ShowDiffPanel(item));
-            };
-            vm.ChatVM.DiffHideRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => HideDiffPanel());
-            };
-
-            // Close diff button
-            var closeDiffBtn = this.FindControl<Button>("CloseDiffButton");
-            if (closeDiffBtn is not null)
-                closeDiffBtn.Click += (_, _) => { HideDiffPanel(); if (DataContext is MainViewModel m) m.ChatVM.IsDiffOpen = false; };
-
-            // Wire git changes panel show
-            vm.ChatVM.GitChangesShowRequested += (files) =>
-            {
-                Dispatcher.UIThread.Post(() => ShowGitChangesPanel(files));
-            };
-
-            // Wire plan panel show/hide
-            vm.ChatVM.PlanShowRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => ShowPlanPanel());
-            };
-            vm.ChatVM.PlanHideRequested += () =>
-            {
-                Dispatcher.UIThread.Post(() => HidePlanPanel());
-            };
-
-            // Plan close button
-            var closePlanBtn = this.FindControl<Button>("ClosePlanButton");
-            if (closePlanBtn is not null)
-                closePlanBtn.Click += (_, _) => { HidePlanPanel(); if (DataContext is MainViewModel m) m.ChatVM.IsPlanOpen = false; };
+            AttachChatWorkspace(vm);
 
             // Sync initial browser theme
             vm.SettingsBrowserService.SetTheme(vm.IsDarkTheme);
@@ -997,8 +996,14 @@ public partial class MainWindow : Window
                     HideBrowserPanel();
                     HideDiffPanel();
                     HidePlanPanel();
+                    HideSkillPanel();
                     Dispatcher.UIThread.Post(() => SyncListBoxSelection(vm.ActiveChatId),
                         DispatcherPriority.Loaded);
+                }
+                else if (args.PropertyName == nameof(MainViewModel.ChatVM))
+                {
+                    AttachChatWorkspace(vm);
+                    Dispatcher.UIThread.Post(() => _chatView?.FocusComposer(), DispatcherPriority.Loaded);
                 }
                 else if (args.PropertyName == nameof(MainViewModel.RenamingChat))
                 {
@@ -1023,6 +1028,7 @@ public partial class MainWindow : Window
                 else if (args.PropertyName == nameof(MainViewModel.IsSidebarCollapsed))
                 {
                     AnimateSidebarCollapse(vm.IsSidebarCollapsed);
+                    PersistSidebarCollapsed();
                 }
             };
 
@@ -1095,12 +1101,12 @@ public partial class MainWindow : Window
             HideBrowserPanel();
             HideDiffPanel();
             HidePlanPanel();
+            HideSkillPanel();
         }
-        else if (_browserIsland is { IsVisible: true })
+        else if (_chatWorkspace?.IsBrowserOpen == true)
         {
             // Returning to chat with browser open — show the overlay and refresh bounds
-            _browserView?.ShowCurrentController();
-            Dispatcher.UIThread.Post(() => _browserView?.RefreshBounds(), DispatcherPriority.Loaded);
+            _chatWorkspace.ShowCurrentBrowserController();
         }
 
         // When projects tab is shown, update chat counts and refresh selected project chats
@@ -1210,10 +1216,13 @@ public partial class MainWindow : Window
         var from = collapse ? GetCurrentSidebarWidth() : 0.0;
         var to = collapse ? 0.0 : _expandedSidebarWidth;
 
+        var easing = new SplineEasing(0.16, 1, 0.3, 1);
+        var duration = TimeSpan.FromMilliseconds(200);
+
         var anim = new Avalonia.Animation.Animation
         {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new SplineEasing(0.16, 1, 0.3, 1),
+            Duration = duration,
+            Easing = easing,
             FillMode = FillMode.Forward,
             Children =
             {
@@ -1230,18 +1239,60 @@ public partial class MainWindow : Window
             }
         };
 
+        // Inset the content area so the chat island keeps a margin from the window edge while the
+        // sidebar is collapsed, and so the floating toggle button sits in a gutter to its left
+        // instead of overlapping the chat title. Animated in sync with the width collapse.
+        var toMargin = GetContentAreaMargin(collapse);
+        Avalonia.Animation.Animation? marginAnim = null;
+        if (_contentArea is not null)
+        {
+            marginAnim = new Avalonia.Animation.Animation
+            {
+                Duration = duration,
+                Easing = easing,
+                FillMode = FillMode.Forward,
+                Children =
+                {
+                    new KeyFrame
+                    {
+                        Cue = new Cue(0),
+                        Setters = { new Setter(MarginProperty, _contentArea.Margin) }
+                    },
+                    new KeyFrame
+                    {
+                        Cue = new Cue(1),
+                        Setters = { new Setter(MarginProperty, toMargin) }
+                    },
+                }
+            };
+        }
+
         try
         {
-            await anim.RunAsync(_sidebarBorder, ct);
+            var widthTask = anim.RunAsync(_sidebarBorder, ct);
+            var marginTask = marginAnim is not null && _contentArea is not null
+                ? marginAnim.RunAsync(_contentArea, ct)
+                : Task.CompletedTask;
+            await Task.WhenAll(widthTask, marginTask);
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
 
         _sidebarBorder.Width = to;
+        if (_contentArea is not null)
+            _contentArea.Margin = toMargin;
 
         if (_sidebarResizeThumb is not null)
             _sidebarResizeThumb.IsVisible = !collapse;
+
+        // Nav-pill hover metrics can't be measured while the sidebar is collapsed (zero width).
+        // Once it's expanded again, run the initialization that was deferred at startup/collapse.
+        if (!collapse && _navHoverInitPending)
+            Dispatcher.UIThread.Post(InitializeNavHoverVisuals, DispatcherPriority.Render);
     }
+
+    private static Thickness GetContentAreaMargin(bool collapsed)
+        => collapsed ? new Thickness(54, 0, 6, 6) : new Thickness(0, 0, 6, 6);
 
     private void OnSidebarResizeThumbDragDelta(object? sender, VectorEventArgs e)
     {
@@ -1273,17 +1324,42 @@ public partial class MainWindow : Window
                 btn.Classes.Remove("active");
         }
 
+        for (int i = 0; i < _railNavButtons.Length; i++)
+        {
+            var btn = _railNavButtons[i];
+            if (btn is null) continue;
+
+            if (i == index)
+                btn.Classes.Add("active");
+            else
+                btn.Classes.Remove("active");
+        }
+
         if (_hoveredNavIndex >= 0)
             ApplyNavButtonLayout(_hoveredNavIndex);
     }
 
     private void InitializeNavHoverVisuals()
     {
+        // The nav pill and its buttons live inside the sidebar. While the sidebar is collapsed
+        // they report zero width, and the metric/lock helpers below would re-post themselves
+        // every frame waiting for a non-zero width — pegging the UI thread. Defer the whole
+        // initialization until the sidebar is expanded again (see AnimateSidebarCollapse).
+        if (IsSidebarCollapsedNow())
+        {
+            _navHoverInitPending = true;
+            return;
+        }
+
+        _navHoverInitPending = false;
         CaptureNavLayoutMetrics();
         InitNavLabelVisuals();
         LockNavPillWidth();
         ApplyNavButtonLayout(-1);
     }
+
+    private bool IsSidebarCollapsedNow()
+        => DataContext is MainViewModel { IsSidebarCollapsed: true };
 
     private void InitNavLabelVisuals()
     {
@@ -1306,7 +1382,10 @@ public partial class MainWindow : Window
 
         if (_navButtons.Any(static button => button?.Bounds.Width <= 0))
         {
-            Dispatcher.UIThread.Post(InitializeNavHoverVisuals, DispatcherPriority.Render);
+            if (IsSidebarCollapsedNow())
+                _navHoverInitPending = true;
+            else
+                Dispatcher.UIThread.Post(InitializeNavHoverVisuals, DispatcherPriority.Render);
             return;
         }
 
@@ -1360,7 +1439,10 @@ public partial class MainWindow : Window
         var width = _navPill.Bounds.Width;
         if (width <= 0)
         {
-            Dispatcher.UIThread.Post(LockNavPillWidth, DispatcherPriority.Render);
+            if (IsSidebarCollapsedNow())
+                _navHoverInitPending = true;
+            else
+                Dispatcher.UIThread.Post(LockNavPillWidth, DispatcherPriority.Render);
             return;
         }
 
@@ -1754,42 +1836,71 @@ public partial class MainWindow : Window
         foreach (var lb in this.GetVisualDescendants().OfType<ListBox>())
         {
             if (!lb.Classes.Contains("chat-list")) continue;
-            if (lb.Tag is "hooked") continue;
-            lb.Tag = "hooked";
+            if (lb.GetValue(ChatListHandlersAttachedProperty)) continue;
+            lb.SetValue(ChatListHandlersAttachedProperty, true);
             lb.SelectionChanged += OnChatListBoxSelectionChanged;
-
-            // Intercept right-click to prevent selection change.
-            // Use ContainerPrepared to hook each ListBoxItem as it's created.
-            lb.ContainerPrepared += (_, args) =>
-            {
-                if (args.Container is ListBoxItem item)
-                {
-                    item.AddHandler(
-                        PointerPressedEvent,
-                        (_, pe) =>
-                        {
-                            if (pe.GetCurrentPoint(item).Properties.IsRightButtonPressed)
-                                pe.Handled = true;
-                        },
-                        Avalonia.Interactivity.RoutingStrategies.Tunnel,
-                        handledEventsToo: true);
-                }
-            };
-
-            // Hook items already materialized
-            foreach (var item in lb.GetVisualDescendants().OfType<ListBoxItem>())
-            {
-                item.AddHandler(
-                    PointerPressedEvent,
-                    (_, pe) =>
-                    {
-                        if (pe.GetCurrentPoint(item).Properties.IsRightButtonPressed)
-                            pe.Handled = true;
-                    },
-                    Avalonia.Interactivity.RoutingStrategies.Tunnel,
-                    handledEventsToo: true);
-            }
+            lb.AddHandler(
+                PointerPressedEvent,
+                OnChatListPointerPressed,
+                Avalonia.Interactivity.RoutingStrategies.Tunnel,
+                handledEventsToo: true);
         }
+    }
+
+    private void OnChatListPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (e.Source is not Visual source)
+            return;
+
+        var item = source.FindAncestorOfType<ListBoxItem>();
+        if (item is null)
+            return;
+
+        var point = e.GetCurrentPoint(item);
+        if (point.Properties.IsRightButtonPressed)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        if (!IsLeftPointerPress(point.Properties))
+            return;
+
+        if (item.DataContext is not Chat chat || DataContext is not MainViewModel vm)
+            return;
+
+        if (!IsChatListDoubleClick(chat, point.Position, e))
+            return;
+
+        if (vm.OpenChatInNewWindowCommand.CanExecute(chat))
+            vm.OpenChatInNewWindowCommand.Execute(chat);
+        e.Handled = true;
+    }
+
+    private bool IsChatListDoubleClick(Chat chat, Point position, PointerPressedEventArgs e)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var isSameChat = _lastChatListClickChatId == chat.Id;
+        var isRecent = isSameChat && now - _lastChatListClickAt <= ChatListDoubleClickThreshold;
+        var isNearby =
+            Math.Abs(position.X - _lastChatListClickPosition.X) <= ChatListDoubleClickMaxDistance &&
+            Math.Abs(position.Y - _lastChatListClickPosition.Y) <= ChatListDoubleClickMaxDistance;
+        var isDoubleClick = e.ClickCount >= 2 || (isRecent && isNearby);
+
+        _lastChatListClickChatId = chat.Id;
+        _lastChatListClickAt = now;
+        _lastChatListClickPosition = position;
+
+        if (isDoubleClick)
+            _lastChatListClickChatId = null;
+
+        return isDoubleClick;
+    }
+
+    private static bool IsLeftPointerPress(PointerPointProperties properties)
+    {
+        return properties.IsLeftButtonPressed ||
+               properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed;
     }
 
     private void OnChatListBoxSelectionChanged(object? sender, SelectionChangedEventArgs e)
@@ -1823,10 +1934,15 @@ public partial class MainWindow : Window
             {
                 if (!lb.Classes.Contains("chat-list")) continue;
 
-                if (lb.Tag is not "hooked")
+                if (!lb.GetValue(ChatListHandlersAttachedProperty))
                 {
-                    lb.Tag = "hooked";
+                    lb.SetValue(ChatListHandlersAttachedProperty, true);
                     lb.SelectionChanged += OnChatListBoxSelectionChanged;
+                    lb.AddHandler(
+                        PointerPressedEvent,
+                        OnChatListPointerPressed,
+                        Avalonia.Interactivity.RoutingStrategies.Tunnel,
+                        handledEventsToo: true);
                 }
 
                 if (activeChatId is null)
@@ -2872,7 +2988,7 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Whether the browser panel is currently visible.</summary>
-    private bool IsBrowserOpen => _browserIsland is { IsVisible: true };
+    private bool IsBrowserOpen => _chatWorkspace?.IsBrowserOpen == true;
 
     private void EnsurePageViewLoaded(int index)
     {
@@ -2918,727 +3034,22 @@ public partial class MainWindow : Window
         }
     }
 
-    private void EnsureBrowserViewLoaded(MainViewModel vm, BrowserService browserService)
-    {
-        if (_browserView is null)
-        {
-            if (_browserHost is null) return;
-            _browserView = new BrowserView();
-            _browserHost.Content = _browserView;
-        }
-        _browserView.SetBrowserService(browserService, vm.DataStore);
-    }
-
-    private async void ShowBrowserPanel(Guid chatId)
-    {
-        if (_browserIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        var vm = DataContext as MainViewModel;
-        if (vm is null) return;
-
-        // Get the per-chat browser service
-        var browserService = vm.ChatVM.GetBrowserServiceForChat(chatId);
-        if (browserService is null) return;
-
-        // Hide diff panel if open (they share column 2)
-        if (_diffIsland is { IsVisible: true })
-        {
-            _diffIsland.IsVisible = false;
-            _diffIsland.Opacity = 1;
-            _diffIsland.RenderTransform = null;
-            vm.ChatVM.IsDiffOpen = false;
-        }
-
-        // Hide plan panel if open (they share column 2)
-        if (_planIsland is { IsVisible: true })
-        {
-            _planIsland.IsVisible = false;
-            _planIsland.Opacity = 1;
-            _planIsland.RenderTransform = null;
-            vm.ChatVM.IsPlanOpen = false;
-        }
-
-        // Switch to the correct per-chat BrowserService
-        EnsureBrowserViewLoaded(vm, browserService);
-
-        // If browser panel is already visible (switching chats), just refresh bounds
-        if (_browserIsland.IsVisible)
-        {
-            // Hide old controller, show new one
-            _browserView?.RefreshBounds();
-            if (browserService.Controller is not null)
-                browserService.Controller.IsVisible = true;
-            return;
-        }
-
-        // Cancel any in-progress animation
-        var ct = ReplaceCancellationTokenSource(ref _browserAnimCts).Token;
-
-        // Ensure we're on the Chat tab
-        if (vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        // Switch to split layout: chat (1*) | splitter (Auto) | browser (1*)
-        const double browserOffsetX = 40.0;
-
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3)
-            defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_browserIsland, 2);
-
-        // Prepare initial state — transparent + shifted from the outer edge
-        _browserIsland.RenderTransform = new TranslateTransform(browserOffsetX, 0);
-        _browserIsland.Opacity = 0;
-        _browserIsland.IsVisible = true;
-        if (_browserSplitter is not null)
-            _browserSplitter.IsVisible = true;
-
-        // Animate fade-in + slide from the outer edge (both on the Border visual)
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame
-                {
-                    Cue = new Cue(0),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 0.0),
-                        new Setter(TranslateTransform.XProperty, browserOffsetX),
-                    }
-                },
-                new KeyFrame
-                {
-                    Cue = new Cue(1),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 1.0),
-                        new Setter(TranslateTransform.XProperty, 0.0),
-                    }
-                },
-            }
-        };
-
-        try { await anim.RunAsync(_browserIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        // Finalize — clear transform and show WebView2 overlay after animation
-        _browserIsland.Opacity = 1;
-        _browserIsland.RenderTransform = null;
-
-        if (browserService.Controller is not null)
-            browserService.Controller.IsVisible = true;
-        Dispatcher.UIThread.Post(() => _browserView?.RefreshBounds(), DispatcherPriority.Loaded);
-    }
-
-    /// <summary>Hides the browser panel and returns to single-column chat layout.</summary>
-    private async void HideBrowserPanel()
-    {
-        if (_browserIsland is null || _chatContentGrid is null) return;
-        if (!_browserIsland.IsVisible) return;
-
-        // Cancel any in-progress animation
-        var ct = ReplaceCancellationTokenSource(ref _browserAnimCts).Token;
-
-        // Hide WebView2 overlay immediately so it doesn't float during animation
-        _browserView?.ClearBrowserService();
-
-        const double browserOffsetX = 40.0;
-
-        // Animate fade-out + slide to the outer edge
-        _browserIsland.RenderTransform = new TranslateTransform(0, 0);
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new CubicEaseIn(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame
-                {
-                    Cue = new Cue(0),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 1.0),
-                        new Setter(TranslateTransform.XProperty, 0.0),
-                    }
-                },
-                new KeyFrame
-                {
-                    Cue = new Cue(1),
-                    Setters =
-                    {
-                        new Setter(OpacityProperty, 0.0),
-                        new Setter(TranslateTransform.XProperty, browserOffsetX),
-                    }
-                },
-            }
-        };
-
-        try { await anim.RunAsync(_browserIsland, ct); }
-        catch (OperationCanceledException) { /* cancelled — cleanup below */ }
-
-        // Collapse regardless of cancellation
-        _browserIsland.IsVisible = false;
-        _browserIsland.Opacity = 1;
-        _browserIsland.RenderTransform = null;
-        if (_browserSplitter is not null && !(_diffIsland?.IsVisible ?? false) && !(_planIsland?.IsVisible ?? false))
-            _browserSplitter.IsVisible = false;
-
-        // Reset to single-column layout if nothing else is open
-        if (!(_diffIsland?.IsVisible ?? false) && !(_planIsland?.IsVisible ?? false))
-        {
-            var defs = _chatContentGrid.ColumnDefinitions;
-            while (defs.Count < 3)
-                defs.Add(new ColumnDefinition());
-            defs[0].Width = new GridLength(1, GridUnitType.Star);
-            defs[1].Width = new GridLength(0);
-            defs[2].Width = new GridLength(0);
-
-            if (_chatIsland is not null)
-                Grid.SetColumn(_chatIsland, 0);
-        }
-        Grid.SetColumn(_browserIsland, 2);
-    }
+    private void ShowBrowserPanel(Guid chatId) => _chatWorkspace?.ShowBrowserPanel(chatId);
+    private void HideBrowserPanel() => _chatWorkspace?.HideBrowserPanel();
 
     /// <summary>Whether the diff panel is currently visible.</summary>
-    private bool IsDiffOpen => _diffIsland is { IsVisible: true };
+    private bool IsDiffOpen => _chatWorkspace?.IsDiffOpen == true;
 
-    private void EnsureDiffViewLoaded()
-    {
-        if (_diffHost is null) return;
-        if (_diffView is null)
-            _diffView = new DiffView();
-        // Always restore DiffView as the host content (may have been swapped for git changes list)
-        if (_diffHost.Content != _diffView)
-            _diffHost.Content = _diffView;
-    }
-
-    private async void ShowDiffPanel(FileChangeItem fileChange)
-    {
-        if (_diffIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        // Hide browser panel if it's open (they share column 2)
-        if (_browserIsland is { IsVisible: true })
-        {
-            _browserIsland.IsVisible = false;
-            _browserIsland.Opacity = 1;
-            _browserIsland.RenderTransform = null;
-            if (_browserSplitter is not null) _browserSplitter.IsVisible = false;
-            _browserView?.ClearBrowserService();
-            if (DataContext is MainViewModel vmb)
-                vmb.ChatVM.IsBrowserOpen = false;
-        }
-
-        // Hide plan panel if open (they share column 2)
-        if (_planIsland is { IsVisible: true })
-        {
-            _planIsland.IsVisible = false;
-            _planIsland.Opacity = 1;
-            _planIsland.RenderTransform = null;
-            if (DataContext is MainViewModel vmp) vmp.ChatVM.IsPlanOpen = false;
-        }
-
-        // Cancel any in-progress animation
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        var vm = DataContext as MainViewModel;
-
-        // Ensure we're on the Chat tab
-        if (vm is not null && vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        EnsureDiffViewLoaded();
-
-        // Update header text
-        if (_diffFileNameText is not null)
-            _diffFileNameText.Text = System.IO.Path.GetFileName(fileChange.FilePath);
-
-        // Set diff content
-        _diffView?.SetFileChangeDiff(fileChange);
-
-        // Switch to split layout
-        const double offsetX = 40.0;
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3) defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_diffIsland, 2);
-
-        _diffIsland.RenderTransform = new TranslateTransform(offsetX, 0);
-        _diffIsland.Opacity = 0;
-        _diffIsland.IsVisible = true;
-        if (_browserSplitter is not null) _browserSplitter.IsVisible = true;
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-            }
-        };
-
-        try { await anim.RunAsync(_diffIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        _diffIsland.Opacity = 1;
-        _diffIsland.RenderTransform = null;
-
-        if (vm is not null) vm.ChatVM.IsDiffOpen = true;
-    }
-
-    private async void HideDiffPanel()
-    {
-        if (_diffIsland is null || _chatContentGrid is null) return;
-        if (!_diffIsland.IsVisible) return;
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        const double offsetX = 40.0;
-        _diffIsland.RenderTransform = new TranslateTransform(0, 0);
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new CubicEaseIn(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-            }
-        };
-
-        try { await anim.RunAsync(_diffIsland, ct); }
-        catch (OperationCanceledException) { }
-
-        _diffIsland.IsVisible = false;
-        _diffIsland.Opacity = 1;
-        _diffIsland.RenderTransform = null;
-        if (_browserSplitter is not null && !(_browserIsland?.IsVisible ?? false))
-            _browserSplitter.IsVisible = false;
-
-        // Reset to single-column if nothing else is open
-        if (!(_browserIsland?.IsVisible ?? false) && !(_planIsland?.IsVisible ?? false))
-        {
-            var defs = _chatContentGrid.ColumnDefinitions;
-            while (defs.Count < 3) defs.Add(new ColumnDefinition());
-            defs[0].Width = new GridLength(1, GridUnitType.Star);
-            defs[1].Width = new GridLength(0);
-            defs[2].Width = new GridLength(0);
-            if (_chatIsland is not null) Grid.SetColumn(_chatIsland, 0);
-        }
-
-        if (DataContext is MainViewModel vm) vm.ChatVM.IsDiffOpen = false;
-    }
-
-    /// <summary>Shows a list of git changed files in the diff panel. Clicking a file opens its diff.</summary>
+    private void ShowDiffPanel(FileChangeItem fileChange) => _chatWorkspace?.ShowDiffPanel(fileChange);
+    private void HideDiffPanel() => _chatWorkspace?.HideDiffPanel();
     private void ShowGitChangesPanel(List<GitFileChangeViewModel> files)
-    {
-        if (_diffIsland is null || _chatContentGrid is null || _chatIsland is null) return;
+        => _chatWorkspace?.ShowGitChangesPanel(files);
 
-        _lastGitChangesList = files;
+    private bool IsPlanOpen => _chatWorkspace?.IsPlanOpen == true;
+    private void ShowPlanPanel() => _chatWorkspace?.ShowPlanPanel();
+    private void HidePlanPanel() => _chatWorkspace?.HidePlanPanel();
 
-        var tertiaryBrush = Avalonia.Media.Brushes.Gray as Avalonia.Media.IBrush;
-        if (this.TryFindResource("Brush.TextTertiary", this.ActualThemeVariant, out var tObj) && tObj is Avalonia.Media.IBrush tBrush)
-            tertiaryBrush = tBrush;
-
-        // Build a file list panel
-        var listPanel = new StackPanel { Spacing = 2, Margin = new Thickness(8, 4) };
-        foreach (var file in files)
-        {
-            var kindColor = file.Kind switch
-            {
-                GitChangeKind.Added or GitChangeKind.Untracked => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(63, 185, 80)),
-                GitChangeKind.Deleted => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(248, 81, 73)),
-                GitChangeKind.Renamed => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(88, 166, 255)),
-                _ => new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(210, 153, 34))
-            };
-
-            var row = new Button
-            {
-                Name = CreateGitDiffRowName(file.FileName, listPanel.Children.Count),
-                HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch,
-                HorizontalContentAlignment = Avalonia.Layout.HorizontalAlignment.Left,
-                Padding = new Thickness(10, 8),
-                Background = Avalonia.Media.Brushes.Transparent,
-                Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
-            };
-            AutomationProperties.SetName(row, $"Open diff for {file.FileName}");
-            row.Classes.Add("subtle");
-
-            var content = new DockPanel();
-
-            // Status letter badge
-            var badge = new Border
-            {
-                Width = 22, Height = 22,
-                CornerRadius = new CornerRadius(4),
-                Background = new Avalonia.Media.SolidColorBrush(kindColor.Color, 0.15),
-                VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 10, 0),
-                Child = new TextBlock
-                {
-                    Text = file.KindIcon,
-                    FontSize = 11,
-                    FontWeight = Avalonia.Media.FontWeight.Bold,
-                    Foreground = kindColor,
-                    HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
-                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center
-                }
-            };
-            DockPanel.SetDock(badge, Dock.Left);
-            content.Children.Add(badge);
-
-            var textStack = new StackPanel { Spacing = 1, VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center };
-            textStack.Children.Add(new TextBlock
-            {
-                Text = file.FileName,
-                FontSize = 12,
-                FontWeight = Avalonia.Media.FontWeight.Medium,
-            });
-            if (!string.IsNullOrEmpty(file.Directory))
-            {
-                textStack.Children.Add(new TextBlock
-                {
-                    Text = file.Directory,
-                    FontSize = 10,
-                    Foreground = tertiaryBrush,
-                });
-            }
-            content.Children.Add(textStack);
-
-            // Line stats on the right
-            if (file.HasStats)
-            {
-                var statsPanel = new StackPanel
-                {
-                    Orientation = Avalonia.Layout.Orientation.Horizontal,
-                    Spacing = 6,
-                    VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center,
-                    Margin = new Thickness(8, 0, 0, 0),
-                };
-                DockPanel.SetDock(statsPanel, Dock.Right);
-                if (file.LinesAdded > 0)
-                    statsPanel.Children.Add(new TextBlock
-                    {
-                        Text = $"+{file.LinesAdded}",
-                        FontSize = 11,
-                        FontFamily = new Avalonia.Media.FontFamily("Cascadia Code, Consolas, monospace"),
-                        Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(63, 185, 80)),
-                    });
-                if (file.LinesRemoved > 0)
-                    statsPanel.Children.Add(new TextBlock
-                    {
-                        Text = $"−{file.LinesRemoved}",
-                        FontSize = 11,
-                        FontFamily = new Avalonia.Media.FontFamily("Cascadia Code, Consolas, monospace"),
-                        Foreground = new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.FromRgb(248, 81, 73)),
-                    });
-                // Insert before textStack so DockPanel docks it right
-                content.Children.Insert(1, statsPanel);
-            }
-
-            row.Content = content;
-
-            // Click opens the diff for this file with a back button
-            var capturedFile = file;
-            row.Click += (_, _) => ShowGitFileDiffWithBackNav(capturedFile);
-
-            listPanel.Children.Add(row);
-        }
-
-        // Update header
-        if (_diffFileNameText is not null)
-            _diffFileNameText.Text = $"Changes ({files.Count})";
-
-        // Show the list in the diff host (bypass EnsureDiffViewLoaded since we want custom content)
-        if (_diffHost is not null)
-        {
-            _diffHost.Content = new ScrollViewer
-            {
-                Content = listPanel,
-                HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Disabled,
-            };
-        }
-
-        // Show the diff panel (reuse the same show animation logic)
-        ShowDiffPanelAnimated();
-    }
-
-    private static string CreateGitDiffRowName(string fileName, int rowIndex)
-    {
-        var safeFileName = new string(fileName.Select(ch => char.IsLetterOrDigit(ch) ? ch : '_').ToArray());
-        return $"GitDiffRow_{rowIndex}_{safeFileName}";
-    }
-
-    /// <summary>Opens a single file diff with breadcrumb back-nav in the header.</summary>
-    private void ShowGitFileDiffWithBackNav(GitFileChangeViewModel file)
-    {
-        if (_diffHost is null) return;
-
-        // Create a fresh DiffView for this file
-        var diffView = new DiffView();
-        _diffHost.Content = diffView;
-
-        // Update header: clickable "Changes" breadcrumb + file name
-        if (_diffFileNameText is not null)
-        {
-            _diffFileNameText.Text = null;
-            _diffFileNameText.Inlines?.Clear();
-            var inlines = _diffFileNameText.Inlines ??= new Avalonia.Controls.Documents.InlineCollection();
-
-            var accentBrush = Avalonia.Media.Brushes.DodgerBlue as Avalonia.Media.IBrush;
-            var tertiaryBrush = Avalonia.Media.Brushes.Gray as Avalonia.Media.IBrush;
-            if (this.TryFindResource("Brush.AccentDefault", this.ActualThemeVariant, out var accentObj) && accentObj is Avalonia.Media.IBrush ab)
-                accentBrush = ab;
-            if (this.TryFindResource("Brush.TextTertiary", this.ActualThemeVariant, out var tertiaryObj) && tertiaryObj is Avalonia.Media.IBrush tb)
-                tertiaryBrush = tb;
-
-            var changesRun = new Avalonia.Controls.Documents.Run("Changes")
-            {
-                Foreground = accentBrush,
-            };
-            inlines.Add(changesRun);
-            inlines.Add(new Avalonia.Controls.Documents.Run("  ›  ") { Foreground = tertiaryBrush });
-            inlines.Add(new Avalonia.Controls.Documents.Run(file.FileName));
-
-            _diffFileNameText.Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand);
-
-            _diffFileNameText.PointerPressed -= OnDiffBreadcrumbClick;
-            _diffFileNameText.PointerPressed += OnDiffBreadcrumbClick;
-        }
-
-        // Build the diff view
-        if (file.Change.Kind is GitChangeKind.Added or GitChangeKind.Untracked)
-        {
-            _ = ShowAddedGitFileDiffAsync(file.Change.FullPath, diffView);
-        }
-        else
-        {
-            _ = LoadGitUnifiedDiffAsync(file.Change, diffView);
-        }
-    }
-
-    private async Task ShowAddedGitFileDiffAsync(string filePath, DiffView diffView)
-    {
-        var content = await Task.Run(() =>
-        {
-            try { return System.IO.File.Exists(filePath) ? System.IO.File.ReadAllText(filePath) : string.Empty; }
-            catch { return string.Empty; }
-        });
-        Dispatcher.UIThread.Post(() => diffView.SetSnapshotDiff(filePath, string.Empty, content));
-    }
-
-    private void OnDiffBreadcrumbClick(object? sender, Avalonia.Input.PointerPressedEventArgs e)
-    {
-        if (_lastGitChangesList is not null)
-            ShowGitChangesPanel(_lastGitChangesList);
-    }
-
-    private async Task LoadGitUnifiedDiffAsync(GitFileChange change, DiffView diffView)
-    {
-        var repoDir = System.IO.Path.GetDirectoryName(change.FullPath) ?? "";
-        var diff = await GitService.GetFileDiffAsync(repoDir, System.IO.Path.GetFileName(change.FullPath));
-        if (diff is null)
-            diff = await GitService.GetFileDiffAsync(repoDir, change.RelativePath);
-        Dispatcher.UIThread.Post(() => diffView.SetUnifiedDiffText(change.FullPath, diff));
-    }
-
-    /// <summary>Shows the diff island with animation (shared by file diff and git changes list).</summary>
-    private async void ShowDiffPanelAnimated()
-    {
-        if (_diffIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        // Hide browser panel if it's open
-        if (_browserIsland is { IsVisible: true })
-        {
-            _browserIsland.IsVisible = false;
-            _browserIsland.Opacity = 1;
-            _browserIsland.RenderTransform = null;
-            if (_browserSplitter is not null) _browserSplitter.IsVisible = false;
-            _browserView?.ClearBrowserService();
-            if (DataContext is MainViewModel vmb)
-                vmb.ChatVM.IsBrowserOpen = false;
-        }
-
-        // Hide plan panel if open
-        if (_planIsland is { IsVisible: true })
-        {
-            _planIsland.IsVisible = false;
-            _planIsland.Opacity = 1;
-            _planIsland.RenderTransform = null;
-            if (DataContext is MainViewModel vmp) vmp.ChatVM.IsPlanOpen = false;
-        }
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-        var vm = DataContext as MainViewModel;
-        if (vm is not null && vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        const double offsetX = 40.0;
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3) defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_diffIsland, 2);
-
-        _diffIsland.RenderTransform = new TranslateTransform(offsetX, 0);
-        _diffIsland.Opacity = 0;
-        _diffIsland.IsVisible = true;
-        if (_browserSplitter is not null) _browserSplitter.IsVisible = true;
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-            }
-        };
-
-        try { await anim.RunAsync(_diffIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        _diffIsland.Opacity = 1;
-        _diffIsland.RenderTransform = null;
-        if (vm is not null) vm.ChatVM.IsDiffOpen = true;
-    }
-
-    private bool IsPlanOpen => _planIsland is { IsVisible: true };
-
-    private async void ShowPlanPanel()
-    {
-        if (_planIsland is null || _chatContentGrid is null || _chatIsland is null) return;
-
-        // Hide browser panel if open (they share column 2)
-        if (_browserIsland is { IsVisible: true })
-        {
-            _browserIsland.IsVisible = false;
-            _browserIsland.Opacity = 1;
-            _browserIsland.RenderTransform = null;
-            if (_browserSplitter is not null) _browserSplitter.IsVisible = false;
-            _browserView?.ClearBrowserService();
-            if (DataContext is MainViewModel vmb)
-                vmb.ChatVM.IsBrowserOpen = false;
-        }
-
-        // Hide diff panel if open
-        if (_diffIsland is { IsVisible: true })
-        {
-            _diffIsland.IsVisible = false;
-            _diffIsland.Opacity = 1;
-            _diffIsland.RenderTransform = null;
-            if (DataContext is MainViewModel vmd) vmd.ChatVM.IsDiffOpen = false;
-        }
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        var vm = DataContext as MainViewModel;
-        if (vm is not null && vm.SelectedNavIndex != 0)
-            vm.SelectedNavIndex = 0;
-
-        // Switch to split layout
-        const double offsetX = 40.0;
-        var defs = _chatContentGrid.ColumnDefinitions;
-        while (defs.Count < 3) defs.Add(new ColumnDefinition());
-        defs[0].Width = new GridLength(1, GridUnitType.Star);
-        defs[1].Width = GridLength.Auto;
-        defs[2].Width = new GridLength(1, GridUnitType.Star);
-        Grid.SetColumn(_chatIsland, 0);
-        Grid.SetColumn(_planIsland, 2);
-
-        _planIsland.RenderTransform = new TranslateTransform(offsetX, 0);
-        _planIsland.Opacity = 0;
-        _planIsland.IsVisible = true;
-        if (_browserSplitter is not null) _browserSplitter.IsVisible = true;
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(300),
-            Easing = new CubicEaseOut(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-            }
-        };
-
-        try { await anim.RunAsync(_planIsland, ct); }
-        catch (OperationCanceledException) { return; }
-        if (ct.IsCancellationRequested) return;
-
-        _planIsland.Opacity = 1;
-        _planIsland.RenderTransform = null;
-
-        if (vm is not null) vm.ChatVM.IsPlanOpen = true;
-    }
-
-    private async void HidePlanPanel()
-    {
-        if (_planIsland is null || _chatContentGrid is null) return;
-        if (!_planIsland.IsVisible) return;
-
-        var ct = ReplaceCancellationTokenSource(ref _previewAnimCts).Token;
-
-        const double offsetX = 40.0;
-        _planIsland.RenderTransform = new TranslateTransform(0, 0);
-
-        var anim = new Avalonia.Animation.Animation
-        {
-            Duration = TimeSpan.FromMilliseconds(200),
-            Easing = new CubicEaseIn(),
-            FillMode = FillMode.Forward,
-            Children =
-            {
-                new KeyFrame { Cue = new Cue(0), Setters = { new Setter(OpacityProperty, 1.0), new Setter(TranslateTransform.XProperty, 0.0) } },
-                new KeyFrame { Cue = new Cue(1), Setters = { new Setter(OpacityProperty, 0.0), new Setter(TranslateTransform.XProperty, offsetX) } },
-            }
-        };
-
-        try { await anim.RunAsync(_planIsland, ct); }
-        catch (OperationCanceledException) { }
-
-        _planIsland.IsVisible = false;
-        _planIsland.Opacity = 1;
-        _planIsland.RenderTransform = null;
-        if (_browserSplitter is not null && !(_browserIsland?.IsVisible ?? false))
-            _browserSplitter.IsVisible = false;
-
-        // Reset to single-column if nothing else is open
-        if (!(_browserIsland?.IsVisible ?? false) && !(_diffIsland?.IsVisible ?? false))
-        {
-            var defs = _chatContentGrid.ColumnDefinitions;
-            while (defs.Count < 3) defs.Add(new ColumnDefinition());
-            defs[0].Width = new GridLength(1, GridUnitType.Star);
-            defs[1].Width = new GridLength(0);
-            defs[2].Width = new GridLength(0);
-            if (_chatIsland is not null) Grid.SetColumn(_chatIsland, 0);
-        }
-
-        if (DataContext is MainViewModel vm) vm.ChatVM.IsPlanOpen = false;
-    }
+    private bool IsSkillOpen => _chatWorkspace?.IsSkillOpen == true;
+    private void ShowSkillPanel() => _chatWorkspace?.ShowSkillPanel();
+    private void HideSkillPanel() => _chatWorkspace?.HideSkillPanel();
 }

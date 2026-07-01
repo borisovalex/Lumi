@@ -4,7 +4,7 @@ using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Services;
 
 namespace Lumi.ViewModels;
@@ -29,6 +29,8 @@ internal sealed class PendingTurnRecoveryAnalysis
     public PendingTurnTerminalState TerminalState { get; init; }
 
     public string? ErrorMessage { get; init; }
+
+    public bool AssistantTurnEnded { get; init; }
 
     public IReadOnlyList<RecoveredAssistantMessage> AssistantMessages { get; init; } = [];
 
@@ -69,26 +71,49 @@ internal static class PendingTurnRecoveryAnalyzer
         var failedToolCallIds = new HashSet<string>();
         var activeToolCallIds = new HashSet<string>();
         var externalToolCallIdByRequestId = new Dictionary<string, string>();
+        var assistantTurnEnded = false;
         var terminalState = PendingTurnTerminalState.None;
         string? errorMessage = null;
+
+        void InvalidateAssistantTurnEnd() => assistantTurnEnded = false;
 
         for (var i = turnStartIndex + 1; i < events.Count; i++)
         {
             switch (events[i])
             {
-                case AssistantMessageEvent assistantMessage
-                    when string.IsNullOrWhiteSpace(assistantMessage.Data.ParentToolCallId)
-                         && !string.IsNullOrWhiteSpace(assistantMessage.Data.Content):
-                    assistantMessages.Add(new RecoveredAssistantMessage(assistantMessage.Data.Content));
+                case AssistantTurnStartEvent:
+                case AssistantMessageStartEvent:
+                case AssistantMessageDeltaEvent:
+                case AssistantStreamingDeltaEvent:
+                case AssistantReasoningDeltaEvent:
+                case AssistantReasoningEvent:
+                    InvalidateAssistantTurnEnd();
+                    break;
+
+                case AssistantMessageEvent assistantMessage:
+                    InvalidateAssistantTurnEnd();
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required to detect sub-agent assistant messages.
+                    if (string.IsNullOrWhiteSpace(assistantMessage.Data.ParentToolCallId)
+                        && !string.IsNullOrWhiteSpace(assistantMessage.Data.Content))
+                    {
+                        assistantMessages.Add(new RecoveredAssistantMessage(assistantMessage.Data.Content));
+                    }
+#pragma warning restore CS0618
+                    break;
+
+                case AssistantTurnEndEvent:
+                    assistantTurnEnded = true;
                     break;
 
                 case ToolExecutionStartEvent toolStart
                     when !string.IsNullOrWhiteSpace(toolStart.Data.ToolCallId):
+                    InvalidateAssistantTurnEnd();
                     activeToolCallIds.Add(toolStart.Data.ToolCallId);
                     break;
 
                 case ToolExecutionCompleteEvent toolComplete
                     when !string.IsNullOrWhiteSpace(toolComplete.Data.ToolCallId):
+                    InvalidateAssistantTurnEnd();
                     activeToolCallIds.Remove(toolComplete.Data.ToolCallId);
                     if (toolComplete.Data.Success == true)
                         completedToolCallIds.Add(toolComplete.Data.ToolCallId);
@@ -99,6 +124,7 @@ internal static class PendingTurnRecoveryAnalyzer
                 case ExternalToolRequestedEvent externalToolRequested
                     when !string.IsNullOrWhiteSpace(externalToolRequested.Data.RequestId)
                          && !string.IsNullOrWhiteSpace(externalToolRequested.Data.ToolCallId):
+                    InvalidateAssistantTurnEnd();
                     externalToolCallIdByRequestId[externalToolRequested.Data.RequestId] = externalToolRequested.Data.ToolCallId;
                     activeToolCallIds.Add(externalToolRequested.Data.ToolCallId);
                     break;
@@ -106,9 +132,19 @@ internal static class PendingTurnRecoveryAnalyzer
                 case ExternalToolCompletedEvent externalToolCompleted
                     when !string.IsNullOrWhiteSpace(externalToolCompleted.Data.RequestId)
                          && externalToolCallIdByRequestId.TryGetValue(externalToolCompleted.Data.RequestId, out var externalToolCallId):
+                    InvalidateAssistantTurnEnd();
                     activeToolCallIds.Remove(externalToolCallId);
                     completedToolCallIds.Add(externalToolCallId);
                     externalToolCallIdByRequestId.Remove(externalToolCompleted.Data.RequestId);
+                    break;
+
+                case SessionBackgroundTasksChangedEvent:
+                case SubagentSelectedEvent:
+                case SubagentDeselectedEvent:
+                case SubagentStartedEvent:
+                case SubagentCompletedEvent:
+                case SubagentFailedEvent:
+                    InvalidateAssistantTurnEnd();
                     break;
 
                 case SessionIdleEvent:
@@ -135,6 +171,7 @@ internal static class PendingTurnRecoveryAnalyzer
             UserMessageObserved = true,
             TerminalState = terminalState,
             ErrorMessage = errorMessage,
+            AssistantTurnEnded = assistantTurnEnded,
             AssistantMessages = assistantMessages,
             CompletedToolCallIds = completedToolCallIds,
             FailedToolCallIds = failedToolCallIds,
@@ -289,6 +326,8 @@ internal static class PendingTurnRecoveryAnalyzer
         var assistantMessages = persistedAnalysis.AssistantMessages.Count >= liveAnalysis.AssistantMessages.Count
             ? persistedAnalysis.AssistantMessages
             : liveAnalysis.AssistantMessages;
+        var assistantTurnEnded = terminalState == PendingTurnTerminalState.None
+            && (liveAnalysis.AssistantTurnEnded || persistedAnalysis.AssistantTurnEnded);
 
         var activeToolCount = terminalState == PendingTurnTerminalState.None
             ? persistedAnalysis.UserMessageObserved
@@ -301,6 +340,7 @@ internal static class PendingTurnRecoveryAnalyzer
             UserMessageObserved = liveAnalysis.UserMessageObserved || persistedAnalysis.UserMessageObserved,
             TerminalState = terminalState,
             ErrorMessage = errorMessage,
+            AssistantTurnEnded = assistantTurnEnded,
             AssistantMessages = assistantMessages,
             CompletedToolCallIds = completedToolCallIds,
             FailedToolCallIds = failedToolCallIds,
@@ -358,6 +398,7 @@ internal static class PendingTurnRecoveryAnalyzer
             UserMessageObserved = true,
             TerminalState = state.TerminalState,
             ErrorMessage = state.ErrorMessage,
+            AssistantTurnEnded = state.AssistantTurnEnded,
             AssistantMessages = state.AssistantMessages,
             CompletedToolCallIds = state.CompletedToolCallIds,
             FailedToolCallIds = state.FailedToolCallIds,
@@ -393,19 +434,38 @@ internal static class PendingTurnRecoveryAnalyzer
                 return;
 
             root.TryGetProperty("data", out var data);
+            void InvalidateAssistantTurnEnd() => state.AssistantTurnEnded = false;
+
             switch (eventType)
             {
+                case "assistant.turn_start":
+                case "assistant.message_start":
+                case "assistant.message_delta":
+                case "assistant.streaming_delta":
+                case "assistant.reasoning_delta":
+                case "assistant.reasoning":
+                    InvalidateAssistantTurnEnd();
+                    break;
+
                 case "assistant.message":
+                    InvalidateAssistantTurnEnd();
                     var parentToolCallId = TryGetString(data, "parentToolCallId");
                     var content = TryGetString(data, "content");
                     if (string.IsNullOrWhiteSpace(parentToolCallId) && !string.IsNullOrWhiteSpace(content))
                         state.AssistantMessages.Add(new RecoveredAssistantMessage(content));
                     break;
 
+                case "assistant.turn_end":
+                    state.AssistantTurnEnded = true;
+                    break;
+
                 case "tool.execution_start":
                     var startedToolCallId = TryGetString(data, "toolCallId");
                     if (!string.IsNullOrWhiteSpace(startedToolCallId))
+                    {
+                        InvalidateAssistantTurnEnd();
                         state.ActiveToolCallIds.Add(startedToolCallId);
+                    }
                     break;
 
                 case "tool.execution_complete":
@@ -413,6 +473,7 @@ internal static class PendingTurnRecoveryAnalyzer
                     if (string.IsNullOrWhiteSpace(completedToolCallId))
                         break;
 
+                    InvalidateAssistantTurnEnd();
                     state.ActiveToolCallIds.Remove(completedToolCallId);
                     if (TryGetBoolean(data, "success") == true)
                         state.CompletedToolCallIds.Add(completedToolCallId);
@@ -426,6 +487,7 @@ internal static class PendingTurnRecoveryAnalyzer
                     if (string.IsNullOrWhiteSpace(requestId) || string.IsNullOrWhiteSpace(externalToolCallId))
                         break;
 
+                    InvalidateAssistantTurnEnd();
                     state.ExternalToolCallIdByRequestId[requestId] = externalToolCallId;
                     state.ActiveToolCallIds.Add(externalToolCallId);
                     break;
@@ -438,9 +500,20 @@ internal static class PendingTurnRecoveryAnalyzer
                         break;
                     }
 
+                    InvalidateAssistantTurnEnd();
                     state.ExternalToolCallIdByRequestId.Remove(completedRequestId);
                     state.ActiveToolCallIds.Remove(completedExternalToolCallId);
                     state.CompletedToolCallIds.Add(completedExternalToolCallId);
+                    break;
+
+                case "session.background_tasks_changed":
+                case "session.background_tasks.changed":
+                case "subagent.selected":
+                case "subagent.deselected":
+                case "subagent.started":
+                case "subagent.completed":
+                case "subagent.failed":
+                    InvalidateAssistantTurnEnd();
                     break;
 
                 case "session.idle":
@@ -503,5 +576,7 @@ internal static class PendingTurnRecoveryAnalyzer
         public PendingTurnTerminalState TerminalState { get; set; }
 
         public string? ErrorMessage { get; set; }
+
+        public bool AssistantTurnEnded { get; set; }
     }
 }

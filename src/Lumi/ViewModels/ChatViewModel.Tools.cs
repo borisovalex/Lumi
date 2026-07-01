@@ -7,7 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
@@ -20,9 +20,10 @@ namespace Lumi.ViewModels;
 /// </summary>
 public partial class ChatViewModel
 {
-    private List<CustomAgentConfig> BuildCustomAgents()
+    private List<CustomAgentConfig> BuildCustomAgents(ProjectContextCatalogSnapshot? projectContextCatalog = null)
     {
         var agents = new List<CustomAgentConfig>();
+        var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var agent in _dataStore.Data.Agents)
         {
             var agentConfig = new CustomAgentConfig
@@ -34,19 +35,54 @@ public partial class ChatViewModel
             };
 
             if (agent.ToolNames.Count > 0)
-                agentConfig.Tools = agent.ToolNames;
+                agentConfig.Tools = [.. ToolDisplayHelper.ToRuntimeToolNames(agent.ToolNames)];
 
             agents.Add(agentConfig);
+            seenNames.Add(agent.Name);
         }
+
+        // Register discovered project-scoped Copilot agents (e.g. .github/agents/*/AGENT.md) as
+        // delegatable subagents, matching the GitHub Copilot CLI which exposes .github/agents in
+        // the Task tool's custom-agent roster. Without this they could only be picked as the active
+        // persona, never delegated to. Lumi's own agents win on a name collision.
+        if (projectContextCatalog is not null)
+        {
+            foreach (var external in projectContextCatalog.Agents)
+            {
+                if (string.IsNullOrWhiteSpace(external.Name)
+                    || string.IsNullOrWhiteSpace(external.Content)
+                    || !seenNames.Add(external.Name))
+                    continue;
+
+                agents.Add(new CustomAgentConfig
+                {
+                    Name = external.Name,
+                    DisplayName = external.Name,
+                    Description = external.Description,
+                    Prompt = external.Content,
+                });
+            }
+        }
+
         return agents;
     }
 
     private static readonly HashSet<string> CodingToolNames = ["code_review", "generate_tests", "explain_code", "analyze_project"];
-    private static readonly HashSet<string> BrowserToolNames = ["browser", "browser_look", "browser_find", "browser_do", "browser_js"];
+    private static readonly HashSet<string> BrowserToolNames =
+    [
+        ToolDisplayHelper.BrowserOpenToolName,
+        ToolDisplayHelper.BrowserLookToolName,
+        ToolDisplayHelper.BrowserFindToolName,
+        ToolDisplayHelper.BrowserDoToolName,
+        ToolDisplayHelper.BrowserJsToolName
+    ];
     private static readonly HashSet<string> UIToolNames = ["ui_list_windows", "ui_inspect", "ui_find", "ui_click", "ui_type", "ui_press_keys", "ui_read"];
     private LumiFeatureManager? _lumiFeatureManager;
     private readonly HashSet<Guid> _pendingSessionInvalidations = [];
     private LumiFeatureManager FeatureManager => _lumiFeatureManager ??= new LumiFeatureManager(_dataStore);
+
+    private ChatHistoryService? _chatHistoryService;
+    private ChatHistoryService ChatHistory => _chatHistoryService ??= new ChatHistoryService(_dataStore, _globalSearchService);
 
     private CancellationToken GetCurrentCancellationToken()
     {
@@ -69,15 +105,18 @@ public partial class ChatViewModel
     {
         // No active agent or no restrictions → allow everything
         if (agent is not { ToolNames.Count: > 0 }) return true;
-        return agent.ToolNames.Exists(toolGroup.Contains);
+        return ToolDisplayHelper.ToRuntimeToolNames(agent.ToolNames).Any(toolGroup.Contains);
     }
 
-    private List<AIFunction> BuildCustomTools(Guid chatId, LumiAgent? activeAgent, string workDir)
+    private List<AIFunction> BuildCustomTools(
+        Guid chatId,
+        LumiAgent? activeAgent,
+        ProjectContextCatalogSnapshot projectContextCatalog)
     {
         var tools = new List<AIFunction>();
         tools.AddRange(BuildMemoryTools());
         tools.Add(BuildAnnounceFileTool(chatId));
-        tools.Add(BuildFetchSkillTool(workDir));
+        tools.Add(BuildFetchSkillTool());
         tools.Add(BuildAskQuestionTool(chatId));
         tools.AddRange(BuildLumiManagementTools(chatId));
         tools.AddRange(BuildWebTools());
@@ -90,158 +129,26 @@ public partial class ChatViewModel
         return tools;
     }
 
-    private async Task<Dictionary<string, McpServerConfig>> BuildMcpServersAsync(
+    private Dictionary<string, McpServerConfig> BuildMcpServers(
         string workDir,
+        ProjectContextCatalogSnapshot projectContextCatalog,
         Chat chat,
-        LumiAgent? activeAgent,
-        CancellationToken ct)
+        LumiAgent? activeAgent)
     {
-        var allServers = _dataStore.Data.McpServers.Where(s => s.IsEnabled).ToList();
-
-        var selectedServerNames = chat.ActiveMcpServerNames;
+        IReadOnlyCollection<string>? selectedServerNames = null;
         if (CurrentChat?.Id == chat.Id)
-            selectedServerNames = ActiveMcpServerNames;
+            selectedServerNames = ActiveMcpServerNames.ToList();
 
-        // Existing chats without saved MCP selections default to all enabled servers,
-        // matching the composer state restored when the chat is opened.
-        if (selectedServerNames.Count > 0)
-            allServers = allServers.Where(s => selectedServerNames.Contains(s.Name)).ToList();
-        else if (CurrentChat?.Id == chat.Id)
-            allServers.Clear();
+        var proxyRuntime = McpSessionPlanner.SelectProxyRuntime(_dataStore.Data.Settings, McpProxyRuntime.Shared);
 
-        // If an active agent restricts MCP servers, apply that as an intersection
-        // with the user's current selection rather than overriding it.
-        if (activeAgent is { McpServerIds.Count: > 0 })
-        {
-            var agentServerIds = activeAgent.McpServerIds;
-            allServers = allServers.Where(s => agentServerIds.Contains(s.Id)).ToList();
-        }
-
-        var dict = new Dictionary<string, McpServerConfig>();
-
-        // Add Lumi-configured MCP servers
-        foreach (var server in allServers)
-        {
-            if (server.ServerType == "remote")
-            {
-                var remote = new McpHttpServerConfig
-                {
-                    Url = server.Url,
-                    Tools = server.Tools.Count > 0 ? server.Tools.ToList() : ["*"]
-                };
-                if (server.Headers.Count > 0)
-                    remote.Headers = new Dictionary<string, string>(server.Headers);
-                if (server.Timeout.HasValue)
-                    remote.Timeout = server.Timeout.Value;
-                dict[server.Name] = remote;
-            }
-            else
-            {
-                var local = new McpStdioServerConfig
-                {
-                    Command = server.Command,
-                    Args = server.Args.ToList(),
-                    Cwd = workDir,
-                    Tools = server.Tools.Count > 0 ? server.Tools.ToList() : ["*"]
-                };
-                if (server.Env.Count > 0)
-                    local.Env = new Dictionary<string, string>(server.Env);
-                if (server.Timeout.HasValue)
-                    local.Timeout = server.Timeout.Value;
-                dict[server.Name] = local;
-            }
-        }
-
-        // Add workspace MCP servers from .vscode/mcp.json (VS Code convention)
-        await MergeWorkspaceMcpServersAsync(workDir, dict, ct);
-
-        GitHubMcpWebSearchBootstrap.Ensure(dict, CopilotService.TryGetGitHubTokenForMcp());
-
-        return dict;
-    }
-
-    /// <summary>
-    /// Reads .vscode/mcp.json from the working directory and merges any servers
-    /// not already present into the MCP server dictionary. This allows workspace
-    /// MCP configs (VS Code convention) to be available in Copilot sessions.
-    /// Supports both local (stdio) and remote (sse/http) server types, and
-    /// forwards env variables and headers from the JSON config.
-    /// </summary>
-    private static async Task MergeWorkspaceMcpServersAsync(string workDir, Dictionary<string, McpServerConfig> dict, CancellationToken ct)
-    {
-        var mcpJsonPath = Path.Combine(workDir, ".vscode", "mcp.json");
-        if (!File.Exists(mcpJsonPath)) return;
-
-        try
-        {
-            var json = await File.ReadAllTextAsync(mcpJsonPath, ct);
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
-
-            if (!doc.RootElement.TryGetProperty("servers", out var servers)) return;
-
-            foreach (var server in servers.EnumerateObject())
-            {
-                if (dict.ContainsKey(server.Name)) continue; // Lumi config takes precedence
-
-                var type = server.Value.TryGetProperty("type", out var typeProp)
-                    ? typeProp.GetString() ?? "stdio"
-                    : "stdio"; // Default to stdio when type is omitted
-
-                if (type is "sse" or "http")
-                {
-                    var url = server.Value.TryGetProperty("url", out var urlProp) ? urlProp.GetString() ?? "" : "";
-                    if (string.IsNullOrWhiteSpace(url)) continue;
-
-                    var remote = new McpHttpServerConfig
-                    {
-                        Url = url,
-                        Tools = ["*"]
-                    };
-
-                    if (server.Value.TryGetProperty("headers", out var headersProp) && headersProp.ValueKind == System.Text.Json.JsonValueKind.Object)
-                    {
-                        var headers = new Dictionary<string, string>();
-                        foreach (var header in headersProp.EnumerateObject())
-                            headers[header.Name] = header.Value.GetString() ?? "";
-                        if (headers.Count > 0)
-                            remote.Headers = headers;
-                    }
-
-                    dict[server.Name] = remote;
-                }
-                else
-                {
-                    // stdio / local
-                    var command = server.Value.TryGetProperty("command", out var cmdProp) ? cmdProp.GetString() ?? "" : "";
-                    var args = new List<string>();
-                    if (server.Value.TryGetProperty("args", out var argsProp))
-                    {
-                        foreach (var arg in argsProp.EnumerateArray())
-                            args.Add(arg.GetString() ?? "");
-                    }
-
-                    var local = new McpStdioServerConfig
-                    {
-                        Command = command,
-                        Args = args,
-                        Cwd = workDir,
-                        Tools = ["*"]
-                    };
-
-                    if (server.Value.TryGetProperty("env", out var envProp) && envProp.ValueKind == System.Text.Json.JsonValueKind.Object)
-                    {
-                        var env = new Dictionary<string, string>();
-                        foreach (var entry in envProp.EnumerateObject())
-                            env[entry.Name] = entry.Value.GetString() ?? "";
-                        if (env.Count > 0)
-                            local.Env = env;
-                    }
-
-                    dict[server.Name] = local;
-                }
-            }
-        }
-        catch { /* best effort — malformed JSON or missing fields */ }
+        return McpSessionPlanner.Build(
+            _dataStore.Data,
+            workDir,
+            projectContextCatalog,
+            chat,
+            selectedServerNames,
+            activeAgent,
+            proxyRuntime);
     }
 
     private List<AIFunction> BuildWebTools()
@@ -266,8 +173,6 @@ public partial class ChatViewModel
                 ([Description("The full URL to navigate to (e.g. https://mail.google.com)")] string url) =>
                 {
                     var svc = GetOrCreateBrowserService(chatId);
-                    var runtime = GetOrCreateRuntimeState(chatId);
-                    runtime.HasUsedBrowser = true;
                     Dispatcher.UIThread.Post(() =>
                     {
                         if (CurrentChat?.Id == chatId) HasUsedBrowser = true;
@@ -275,8 +180,8 @@ public partial class ChatViewModel
                     });
                     return svc.OpenAndSnapshotAsync(url);
                 },
-                "browser",
-                "Open a URL in the browser and return the page with numbered interactive elements and a text preview. The browser has persistent cookies/sessions — the user may already be logged in. Returns element numbers you can use with browser_do. If the URL triggers a file download (e.g. an export URL), the download is detected automatically and reported instead of a page snapshot."),
+                ToolDisplayHelper.BrowserOpenToolName,
+                "Open a URL in the browser and return the page with numbered interactive elements and a text preview. The browser has persistent cookies/sessions — the user may already be logged in. Returns element numbers you can use with lumi_browser_do. If the URL triggers a file download (e.g. an export URL), the download is detected automatically and reported instead of a page snapshot."),
 
             AIFunctionFactory.Create(
                 ([Description("Optional text filter to narrow elements (e.g. 'button', 'download', 'search', 'Export'). Omit to see all.")] string? filter = null) =>
@@ -284,7 +189,7 @@ public partial class ChatViewModel
                     var svc = GetOrCreateBrowserService(chatId);
                     return svc.LookAsync(filter);
                 },
-                "browser_look",
+                ToolDisplayHelper.BrowserLookToolName,
                 "Returns the current page state: numbered interactive elements and text preview. Use filter to narrow results."),
 
             AIFunctionFactory.Create(
@@ -296,20 +201,18 @@ public partial class ChatViewModel
                     var svc = GetOrCreateBrowserService(chatId);
                     return svc.FindElementsAsync(query, limit, preferDialog: true);
                 },
-                "browser_find",
-                "Find and rank interactive elements by query. Matches against text, aria-label, tooltip, title, and href. Returns stable element indices usable with browser_do."),
+                ToolDisplayHelper.BrowserFindToolName,
+                "Find and rank interactive elements by query. Matches against text, aria-label, tooltip, title, and href. Returns stable element indices usable with lumi_browser_do."),
 
             AIFunctionFactory.Create(
-                ([Description("Action to perform: click, type, press, select, scroll, back, wait, download, clear, fill, read_form, steps")] string action,
-                 [Description("Target: element number from browser/browser_look (e.g. '3'), button text (e.g. 'Export'), CSS selector (e.g. '.btn'), key name (for press), direction (for scroll), or file pattern (for download). Append ' quiet' to suppress auto-snapshot (e.g. '3 quiet').")] string? target = null,
-                 [Description("Value: text to type (for type action), option text (for select), pixels (for scroll), JSON object for fill, JSON array for steps (e.g. [{\"action\":\"click\",\"target\":\"Next\"},{\"action\":\"click\",\"target\":\"25\"}]), or 'quiet' to suppress snapshot")] string? value = null) =>
+                ([Description("Action to perform: click, type, press, select, scroll, back, wait, download, clear, fill, read_form, upload, steps")] string action,
+                 [Description("Target: element number from lumi_browser_open/lumi_browser_look (e.g. '3'), button text (e.g. 'Export'), CSS selector (e.g. '.btn'), key name (for press), direction (for scroll), or file pattern (for download). For upload: optional locator for the <input type=file> (CSS selector or the upload button/label text) — omit to use the page's only file input. Append ' quiet' to suppress auto-snapshot (e.g. '3 quiet').")] string? target = null,
+                 [Description("Value: text to type (for type action), option text (for select), pixels (for scroll), JSON object for fill, absolute file path(s) for upload (a JSON array for multiple files, or a single path; multiple paths may also be newline-separated — commas are NOT separators), JSON array for steps (e.g. [{\"action\":\"click\",\"target\":\"Next\"},{\"action\":\"click\",\"target\":\"25\"}]), or 'quiet' to suppress snapshot")] string? value = null) =>
                 {
                     var svc = GetOrCreateBrowserService(chatId);
                     var act = (action ?? "").Trim().ToLowerInvariant();
-                    if (act is "click" or "type" or "press" or "select" or "download" or "back" or "clear" or "fill" or "steps")
+                    if (act is "click" or "type" or "press" or "select" or "download" or "back" or "clear" or "fill" or "upload" or "steps")
                     {
-                        var runtime = GetOrCreateRuntimeState(chatId);
-                        runtime.HasUsedBrowser = true;
                         Dispatcher.UIThread.Post(() =>
                         {
                             if (CurrentChat?.Id == chatId) HasUsedBrowser = true;
@@ -318,8 +221,8 @@ public partial class ChatViewModel
                     }
                     return svc.DoAsync(action ?? "", target, value);
                 },
-                "browser_do",
-                "Interact with the page. Actions: click, type, press, select, scroll, back, wait, download, clear, fill, read_form, steps. Use 'steps' to batch multiple actions in ONE call (value: JSON array like [{\"action\":\"click\",\"target\":\"Next month\"},{\"action\":\"click\",\"target\":\"25\"}]) — only snapshots once at end, drastically reducing tokens. Append ' quiet' to target or set value='quiet' on click/press/scroll to skip the auto-snapshot entirely."),
+                ToolDisplayHelper.BrowserDoToolName,
+                "Interact with the page. Actions: click, type, press, select, scroll, back, wait, download, clear, fill, read_form, upload, steps. Use 'upload' to attach local file(s) to a file input WITHOUT the native OS file picker (value = absolute file path(s); target = optional file-input locator) — this is the only way to upload, never try to drive the native dialog. Use 'steps' to batch multiple actions in ONE call (value: JSON array like [{\"action\":\"click\",\"target\":\"Next month\"},{\"action\":\"click\",\"target\":\"25\"}]) — only snapshots once at end, drastically reducing tokens. Append ' quiet' to target or set value='quiet' on click/press/scroll to skip the auto-snapshot entirely."),
 
             AIFunctionFactory.Create(
                 ([Description("JavaScript code to execute in the page context")] string script) =>
@@ -327,7 +230,7 @@ public partial class ChatViewModel
                     var svc = GetOrCreateBrowserService(chatId);
                     return svc.EvaluateAsync(script);
                 },
-                "browser_js",
+                ToolDisplayHelper.BrowserJsToolName,
                 "Run JavaScript in the browser page context."),
         ];
     }
@@ -373,6 +276,7 @@ public partial class ChatViewModel
     partial void OnSelectedModelChanged(string? value)
     {
         UpdateQualityLevels(value);
+        UpdateContextWindowTiers(value);
         if (CurrentChat is { } activeChat)
         {
             var runtime = GetOrCreateRuntimeState(activeChat.Id);
@@ -383,6 +287,7 @@ public partial class ChatViewModel
             return;
 
         var reasoningEffort = GetPersistedReasoningEffortPreference();
+        var contextTier = GetSelectedContextWindowTier();
 
         // New chats (no messages yet) update the global default model.
         // Existing chats only update their per-chat model.
@@ -390,14 +295,18 @@ public partial class ChatViewModel
         {
             _dataStore.Data.Settings.PreferredModel = value;
             _dataStore.Data.Settings.ReasoningEffort = reasoningEffort ?? string.Empty;
+            if (contextTier is not null)
+                _dataStore.Data.Settings.ContextWindowTier = contextTier;
             _dataStore.Save();
-            DefaultModelSelectionChanged?.Invoke(value, reasoningEffort);
+            DefaultModelSelectionChanged?.Invoke(value, reasoningEffort, contextTier);
         }
 
         if (CurrentChat is { } chat)
         {
             chat.LastModelUsed = value;
             chat.LastReasoningEffortUsed = reasoningEffort;
+            if (contextTier is not null)
+                chat.LastContextWindowTierUsed = contextTier;
         }
 
         QueueModelSelectionSave();
@@ -432,26 +341,31 @@ public partial class ChatViewModel
 
         var modelId = SelectedModel;
         var reasoningEffort = GetSelectedReasoningEffort();
+        var contextTier = GetSelectedContextWindowTier();
         _modelSelectionSyncCts = new CancellationTokenSource();
         var cts = _modelSelectionSyncCts;
         _ = Task.Delay(75, cts.Token).ContinueWith(
-            _ => SwitchModelMidSessionAsync(modelId, reasoningEffort),
+            _ => SwitchModelMidSessionAsync(modelId, reasoningEffort, contextTier),
             cts.Token,
             TaskContinuationOptions.OnlyOnRanToCompletion,
             TaskScheduler.Default).Unwrap();
     }
 
-    private async Task SwitchModelMidSessionAsync(string modelId, string? reasoningEffort)
+    private async Task SwitchModelMidSessionAsync(string modelId, string? reasoningEffort, string? contextTier)
     {
         if (_activeSession is null)
             return;
 
         try
         {
-            if (string.IsNullOrWhiteSpace(reasoningEffort))
-                await _activeSession.SetModelAsync(modelId);
-            else
-                await _activeSession.SetModelAsync(modelId, reasoningEffort);
+            await _activeSession.SetModelAsync(
+                modelId,
+                new SetModelOptions
+                {
+                    ReasoningEffort = string.IsNullOrWhiteSpace(reasoningEffort) ? null : reasoningEffort,
+                    ReasoningSummary = SessionConfigBuilder.DefaultReasoningSummary,
+                    ContextTier = SessionConfigBuilder.CreateContextTier(contextTier)
+                });
         }
         catch
         {
@@ -533,7 +447,7 @@ public partial class ChatViewModel
             "Show a file attachment chip to the user for a file you created or produced. Call this ONCE for each final deliverable file (e.g. the PDF, DOCX, PPTX, image, etc.). Do NOT call for intermediate/temporary files like scripts.");
     }
 
-    private AIFunction BuildFetchSkillTool(string workDir)
+    private AIFunction BuildFetchSkillTool()
     {
         return AIFunctionFactory.Create(
             ([Description("The exact name of the skill to retrieve (as listed in Available Skills)")] string name) =>
@@ -542,10 +456,6 @@ public partial class ChatViewModel
                     .FirstOrDefault(s => s.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
                 if (skill is not null)
                     return $"# {skill.Name}\n\n{skill.Content}";
-
-                var externalSkill = FindExternalSkillByName(name, workDir);
-                if (externalSkill is not null)
-                    return externalSkill.Content;
 
                 return $"Skill not found: {name}. Check the Available Skills list for exact names.";
             },
@@ -571,10 +481,14 @@ public partial class ChatViewModel
 
                 Dispatcher.UIThread.Post(() =>
                 {
-                    if (CurrentChat?.Id != chatId) return;
-                    _transcriptBuilder.AddQuestionToTranscript(questionId, question, optionsList, freeText, multiSelect);
-                    QuestionAsked?.Invoke(questionId, question, optionsJson, freeText);
-                    ScrollToEndRequested?.Invoke();
+                    NotifyQuestionAsked(chatId, question);
+
+                    if (CurrentChat?.Id == chatId)
+                    {
+                        _transcriptBuilder.AddQuestionToTranscript(questionId, question, optionsList, freeText, multiSelect);
+                        QuestionAsked?.Invoke(questionId, question, optionsJson, freeText);
+                        ScrollToEndRequested?.Invoke();
+                    }
                 });
 
                 // Store questionId and question data on the tool message so it can be recovered during rebuild.
@@ -642,6 +556,15 @@ public partial class ChatViewModel
             tcs.TrySetResult(answer);
     }
 
+    private void NotifyQuestionAsked(Guid chatId, string question)
+    {
+        if (!_dataStore.Data.Settings.NotificationsEnabled)
+            return;
+
+        var chatTitle = _dataStore.Data.Chats.FirstOrDefault(c => c.Id == chatId)?.Title;
+        NotificationService.ShowQuestion(question, chatTitle, chatId);
+    }
+
     private List<AIFunction> BuildLumiManagementTools(Guid chatId)
     {
         return
@@ -654,9 +577,20 @@ public partial class ChatViewModel
                     [Description("Project instructions or custom prompt text.")] string? instructions = null,
                     [Description("Working directory path for the project.")] string? workingDirectory = null,
                     [Description("Set to true to clear the project's working directory during update.")] bool? clearWorkingDirectory = null,
+                    [Description("Optional folders to scan for project-scoped .github skills/agents and .vscode/mcp.json. Pass an empty array to clear on update.")] string[]? additionalContextDirectories = null,
+                    [Description("Set to true to clear the project's additional context folders during update.")] bool? clearAdditionalContextDirectories = null,
                     [Description("Optional text query for list filtering.")] string? query = null) =>
                 {
-                    var result = FeatureManager.ManageProjects(action, identifier, name, instructions, workingDirectory, clearWorkingDirectory, query);
+                    var result = FeatureManager.ManageProjects(
+                        action,
+                        identifier,
+                        name,
+                        instructions,
+                        workingDirectory,
+                        clearWorkingDirectory,
+                        additionalContextDirectories,
+                        clearAdditionalContextDirectories,
+                        query);
                     return await ApplyFeatureChangeAsync(result);
                 },
                 "manage_projects",
@@ -772,6 +706,28 @@ public partial class ChatViewModel
                 "manage_memories",
                 "List, create, update, or delete Lumi memories. Use this only when the user explicitly asks to manage memories directly.",
                 Lumi.Models.AppDataJsonContext.Default.Options),
+
+            AIFunctionFactory.Create(
+                async (
+                    [Description("What to look for: a topic, keyword, phrase, person, or time hint (e.g. 'honeymoon hotel deal', 'the OLED tv chat', 'last week'). Leave empty to list the most recently active chats.")] string? query = null,
+                    [Description("Maximum number of chats to return (1-25, default 8).")] int? limit = null) =>
+                {
+                    return await ChatHistory.SearchChatsAsync(query, limit, GetCurrentCancellationToken());
+                },
+                "search_chats",
+                "Search the user's past Lumi chats by topic, keyword, phrase, name, or time hint. Returns the most relevant conversations with a stable chat id, title, project, last-active time, and a snippet of the matching text. Use this whenever the user refers to a previous conversation ('the chat where we…', 'what did we decide about…') so you can then open it with read_chat. Pass an empty query to list the most recent chats."),
+
+            AIFunctionFactory.Create(
+                async (
+                    [Description("Which chat to read: a chat id from search_chats (preferred), an exact chat title, or a descriptive phrase to look up.")] string chat,
+                    [Description("Maximum number of most-recent messages to include (1-400, default 60).")] int? maxMessages = null,
+                    [Description("Include the assistant's internal reasoning text. Default false.")] bool includeReasoning = false,
+                    [Description("Include a short summary of tool calls made in the chat. Default true.")] bool includeToolCalls = true) =>
+                {
+                    return await ChatHistory.ReadChatAsync(chat, maxMessages, includeReasoning, includeToolCalls, GetCurrentCancellationToken());
+                },
+                "read_chat",
+                "Read the full transcript of one of the user's past chats so you can recall exactly what was discussed. Accepts a chat id (preferred — get it from search_chats), an exact title, or a descriptive phrase (it will search and either open the clear match or return candidates to pick from). Returns a clean, role-labelled transcript windowed to the most recent messages. The header also reports the chat's workspace (git worktree path or project folder), additional context directories, any saved plan, active skills/MCP servers, and model/token usage — use the workspace path when the user wants you to act on that chat's files or uncommitted code (e.g. 'implement it like the uncommitted code in that chat'). Use after search_chats, or directly when the user names a specific chat."),
         ];
     }
 
@@ -787,7 +743,7 @@ public partial class ChatViewModel
 
         Dispatcher.UIThread.Post(() =>
         {
-            RefreshComposerCatalogs(syncWorkspaceMcpSelections: false);
+            RefreshComposerCatalogs(syncProjectContextMcpSelections: false);
             var chatMetadataChanged = RefreshCurrentChatFeatureState(result);
             if (chatMetadataChanged)
                 _ = SaveIndexAsync();
@@ -833,11 +789,7 @@ public partial class ChatViewModel
     private bool RefreshActiveSkillChipsFromState()
     {
         var skillsById = _dataStore.Data.Skills.ToDictionary(skill => skill.Id);
-        var externalCatalog = GetExternalCatalog(GetEffectiveWorkingDirectory());
-        var externalSkillsByName = externalCatalog.Skills
-            .ToDictionary(skill => skill.Name, StringComparer.OrdinalIgnoreCase);
         var filteredIds = new List<Guid>();
-        var filteredExternalNames = new List<string>();
         var chips = new List<StrataTheme.Controls.StrataComposerChip>();
 
         foreach (var skillId in ActiveSkillIds.ToList())
@@ -849,32 +801,21 @@ public partial class ChatViewModel
             chips.Add(new StrataTheme.Controls.StrataComposerChip(skill.Name, skill.IconGlyph));
         }
 
-        foreach (var skillName in _activeExternalSkillNames.ToList())
-        {
-            if (!externalSkillsByName.TryGetValue(skillName, out var skill))
-                continue;
-
-            filteredExternalNames.Add(skill.Name);
-            chips.Add(new StrataTheme.Controls.StrataComposerChip(skill.Name, ExternalSkillGlyph));
-        }
-
         ActiveSkillIds.Clear();
         _activeExternalSkillNames.Clear();
         ActiveSkillChips.Clear();
         foreach (var skillId in filteredIds)
             ActiveSkillIds.Add(skillId);
-        foreach (var skillName in filteredExternalNames)
-            _activeExternalSkillNames.Add(skillName);
         foreach (var chip in chips)
             ActiveSkillChips.Add(chip);
 
         var changed = false;
         if (CurrentChat is not null
             && (!CurrentChat.ActiveSkillIds.SequenceEqual(filteredIds)
-                || !SkillNameListsEqual(CurrentChat.ActiveExternalSkillNames, filteredExternalNames)))
+                || CurrentChat.ActiveExternalSkillNames.Count > 0))
         {
             CurrentChat.ActiveSkillIds = new List<Guid>(filteredIds);
-            CurrentChat.ActiveExternalSkillNames = new List<string>(filteredExternalNames);
+            CurrentChat.ActiveExternalSkillNames = [];
             _dataStore.MarkChatChanged(CurrentChat);
             changed = true;
         }
@@ -934,6 +875,7 @@ public partial class ChatViewModel
             && !CurrentChat.ActiveMcpServerNames.SequenceEqual(activeNames, StringComparer.OrdinalIgnoreCase))
         {
             CurrentChat.ActiveMcpServerNames = new List<string>(activeNames);
+            CurrentChat.HasExplicitMcpServerSelection = true;
             _dataStore.MarkChatChanged(CurrentChat);
             return true;
         }

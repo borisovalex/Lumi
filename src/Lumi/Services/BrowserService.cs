@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,9 +50,12 @@ public sealed partial class BrowserService : IAsyncDisposable
     private CoreWebView2? _webView;
     private IntPtr _parentHwnd;
     private bool _initialized;
+    private volatile bool _isDisposed;
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private readonly SemaphoreSlim _actionLock = new(1, 1);
+    private readonly object _parentHwndSync = new();
     private IntPtr _webViewHwnd;
+    private bool _isReparentQueued;
 
     // Navigation completion tracking — deterministic via WebView2 events
     private TaskCompletionSource<bool>? _navigationTcs;
@@ -90,6 +94,17 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// <summary>Raised when the browser is first initialized or needs to show.</summary>
     public event Action? BrowserReady;
 
+    // ----- File upload policy (security limits enforced before any DOM.setFileInputFiles) -----
+
+    /// <summary>Maximum number of files that may be attached in a single upload action.</summary>
+    private const int MaxUploadFiles = 20;
+
+    /// <summary>Maximum size of any single uploaded file (100 MB).</summary>
+    private const long MaxUploadFileBytes = 100L * 1024 * 1024;
+
+    /// <summary>Maximum combined size of all files in a single upload action (250 MB).</summary>
+    private const long MaxTotalUploadBytes = 250L * 1024 * 1024;
+
     /// <summary>The current URL loaded in the browser.</summary>
     public string CurrentUrl => _webView?.Source ?? "about:blank";
 
@@ -109,6 +124,9 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// </summary>
     public void SetTheme(bool isDark)
     {
+        if (_isDisposed)
+            return;
+
         _isDark = isDark;
         if (_controller is not null)
             _controller.DefaultBackgroundColor = isDark
@@ -133,10 +151,12 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// </summary>
     public async Task InitializeAsync(IntPtr parentHwnd)
     {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_initialized) return;
         await _initLock.WaitAsync();
         try
         {
+            ObjectDisposedException.ThrowIf(_isDisposed, this);
             if (_initialized) return;
             _parentHwnd = parentHwnd;
 
@@ -331,6 +351,9 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// <summary>Updates the bounds of the WebView2 controller to fill the given area.</summary>
     public void SetBounds(int x, int y, int width, int height, int cornerRadiusPx = 0)
     {
+        if (_isDisposed)
+            return;
+
         if (_controller is null) return;
         _controller.Bounds = new System.Drawing.Rectangle(x, y, width, height);
 
@@ -369,6 +392,17 @@ public sealed partial class BrowserService : IAsyncDisposable
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);
 
+    private async Task WaitForActionLockAsync()
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        await _actionLock.WaitAsync().ConfigureAwait(false);
+        if (!_isDisposed)
+            return;
+
+        _actionLock.Release();
+        throw new ObjectDisposedException(GetType().FullName);
+    }
+
     // ═══════════════════════════════════════════════════════════════
     // Tool Methods — called by the LLM via AIFunction tools
     // ═══════════════════════════════════════════════════════════════
@@ -377,7 +411,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> NavigateAsync(string url)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             TaskCompletionSource<bool> navTcs = new();
@@ -425,7 +459,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ClickAsync(string selector)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escaped = EscapeJs(selector);
@@ -471,7 +505,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ClickTextAsync(string text, bool exact = true, bool preferDialog = true)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedText = EscapeJs(text);
@@ -516,7 +550,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> PressKeyAsync(string key, string? selector = null)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedKey = EscapeJs(key);
@@ -551,7 +585,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> TypeAsync(string selector, string text)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedSel = EscapeJs(selector);
@@ -584,7 +618,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> EvaluateAsync(string javascript)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             // Wrap the user script in a synchronous try/catch so errors are returned as text instead of null.
@@ -625,7 +659,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> WaitForAsync(string selector, int timeoutMs = 10000)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var start = Environment.TickCount64;
@@ -653,7 +687,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> SelectAsync(string selector, string value)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedSel = EscapeJs(selector);
@@ -815,7 +849,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<string> LookAsync(string? filter = null)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedFilter = EscapeJs(filter ?? "");
@@ -855,12 +889,12 @@ public sealed partial class BrowserService : IAsyncDisposable
 
     /// <summary>
     /// Find and rank interactive elements by query across text/aria/tooltip/title/href.
-    /// Returns stable element indices that can be used with browser_do(click, target).
+    /// Returns stable element indices that can be used with lumi_browser_do(click, target).
     /// </summary>
     public async Task<string> FindElementsAsync(string query, int limit = 12, bool preferDialog = true)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedQuery = EscapeJs(query ?? string.Empty);
@@ -963,7 +997,7 @@ public sealed partial class BrowserService : IAsyncDisposable
         }
 
         // Actions that change page state — auto-append a snapshot so the LLM sees the result.
-        var autoLook = !quiet && act is "click" or "type" or "press" or "select" or "back" or "clear";
+        var autoLook = !quiet && act is "click" or "type" or "press" or "select" or "back" or "clear" or "upload";
 
         // Record time before the action so we can detect click-triggered downloads.
         var beforeAction = DateTime.UtcNow;
@@ -984,7 +1018,8 @@ public sealed partial class BrowserService : IAsyncDisposable
             "clear" => await ClearFieldAsync(target),
             "fill" => await FillFormAsync(value),
             "read_form" => await ReadFormAsync(),
-            _ => $"Unknown action '{act}'. Valid: click, type, press, select, scroll, back, wait, download, clear, fill, read_form, steps"
+            "upload" => await UploadFileAsync(target, value),
+            _ => $"Unknown action '{act}'. Valid: click, type, press, select, scroll, back, wait, download, clear, fill, read_form, upload, steps"
         };
 
         if (result.StartsWith("Error", StringComparison.Ordinal))
@@ -1073,6 +1108,7 @@ public sealed partial class BrowserService : IAsyncDisposable
                 "clear" => await ClearFieldAsync(step.Target),
                 "fill" => await FillFormAsync(step.Value),
                 "read_form" => await ReadFormAsync(),
+                "upload" => await UploadFileAsync(step.Target, step.Value),
                 _ => $"Unknown action: {act}"
             };
 
@@ -1126,7 +1162,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> ClickByNumberAsync(int index)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var script =
@@ -1162,7 +1198,7 @@ public sealed partial class BrowserService : IAsyncDisposable
     private async Task<string> TypeByNumberAsync(int index, string text)
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedText = EscapeJs(text);
@@ -1191,6 +1227,403 @@ public sealed partial class BrowserService : IAsyncDisposable
     }
 
 
+    /// <summary>
+    /// Attach local file(s) to a file input on the page WITHOUT opening the native OS file picker.
+    /// Uses the Chrome DevTools Protocol (Runtime.evaluate to locate the input, then
+    /// DOM.setFileInputFiles to set the files) — the same technique Playwright/Puppeteer use.
+    /// This is the only reliable way to upload because the native file dialog is an OS window that
+    /// JavaScript cannot drive.
+    ///
+    /// Security: because this is reachable from LLM tool calls it is a potential local-file
+    /// exfiltration vector, so it enforces a policy before attaching anything — paths must be
+    /// fully-qualified and are canonicalized, and the file count and per-file/total sizes are capped.
+    ///
+    /// <paramref name="target"/> is an optional locator for the file input: a CSS selector, or the
+    /// visible text/aria-label of the upload button or label. If it is omitted and the page has more
+    /// than one file input, an ambiguity error listing the candidates is returned instead of guessing.
+    /// <paramref name="filesValue"/> is one or more absolute file paths: a JSON array (preferred for
+    /// multiple files), or — for a single file — a plain path. Non-JSON input is split only on
+    /// newlines so paths containing commas remain intact.
+    /// </summary>
+    public async Task<string> UploadFileAsync(string? target, string? filesValue)
+    {
+        var rawPaths = ParseFilePaths(filesValue);
+        if (rawPaths.Count == 0)
+            return "Error: upload needs file path(s) in the value parameter (absolute paths; a JSON array for multiple files, or a single path)";
+
+        var paths = ValidateUploadPaths(rawPaths, out var policyError);
+        if (policyError is not null)
+            return policyError;
+
+        await EnsureInitializedAsync();
+        await WaitForActionLockAsync();
+        string? objectId = null;
+        try
+        {
+            // 1. Resolve the file input by value first so we can detect ambiguity / capability issues
+            //    BEFORE obtaining a remote handle or attaching anything.
+            var metaExpr = BuildFileInputMetaExpression(target);
+            var metaParams = "{\"expression\":" + JsonQuote(metaExpr) + ",\"returnByValue\":true}";
+            string metaJson;
+            try
+            {
+                metaJson = await InvokeOnUiThreadAsync(() =>
+                    _webView!.CallDevToolsProtocolMethodAsync("Runtime.evaluate", metaParams));
+            }
+            catch (Exception ex)
+            {
+                return $"Error: could not evaluate page to find the file input — {ex.Message}";
+            }
+
+            string status;
+            bool inputMultiple;
+            JsonElement candidates = default;
+            var hasCandidates = false;
+            try
+            {
+                using var doc = JsonDocument.Parse(metaJson);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("exceptionDetails", out _))
+                    return "Error: page script error while locating the file input";
+                var meta = root.GetProperty("result").GetProperty("value");
+                status = meta.TryGetProperty("status", out var st) ? st.GetString() ?? "none" : "none";
+                inputMultiple = meta.TryGetProperty("multiple", out var mu) && mu.ValueKind == JsonValueKind.True;
+                if (meta.TryGetProperty("candidates", out var cand) && cand.ValueKind == JsonValueKind.Array)
+                {
+                    candidates = cand.Clone();
+                    hasCandidates = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                return $"Error: could not interpret file-input lookup result — {ex.Message}";
+            }
+
+            if (status == "none")
+            {
+                return target is null
+                    ? "Error: no file input (<input type=file>) found on the page. Click the page's upload button first so the input appears, then retry — or pass a CSS selector / button text as the target."
+                    : $"Error: no file input found for target '{target}'. Pass a CSS selector for the <input type=file>, the upload button's visible text, or omit the target if the page has exactly one file input.";
+            }
+
+            if (status == "ambiguous")
+                return BuildAmbiguityError(candidates, hasCandidates);
+
+            // 2. Enforce the input's own capability: a single-file input must not receive many files.
+            if (paths.Count > 1 && !inputMultiple)
+                return $"Error: the selected file input does not accept multiple files, but {paths.Count} were provided. Upload a single file, or target an input with the 'multiple' attribute.";
+
+            // 3. Obtain a CDP remote handle for the resolved input, then set the files on it. No native
+            //    dialog is shown; CDP dispatches input/change events so framework components react.
+            var elemExpr = BuildFileInputElementExpression(target);
+            var elemParams = "{\"expression\":" + JsonQuote(elemExpr) + ",\"returnByValue\":false}";
+            string elemJson;
+            try
+            {
+                elemJson = await InvokeOnUiThreadAsync(() =>
+                    _webView!.CallDevToolsProtocolMethodAsync("Runtime.evaluate", elemParams));
+            }
+            catch (Exception ex)
+            {
+                return $"Error: could not obtain a handle to the file input — {ex.Message}";
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(elemJson);
+                if (doc.RootElement.TryGetProperty("result", out var resObj) &&
+                    resObj.TryGetProperty("objectId", out var oid))
+                    objectId = oid.GetString();
+            }
+            catch
+            {
+                // handled by the null check below
+            }
+
+            if (string.IsNullOrEmpty(objectId))
+                return "Error: the file input could not be resolved to a live element (the page may have changed). Re-open the page and retry.";
+
+            var filesJson = string.Join(",", paths.Select(JsonQuote));
+            var setParams = "{\"objectId\":" + JsonQuote(objectId) + ",\"files\":[" + filesJson + "]}";
+            try
+            {
+                await InvokeOnUiThreadAsync(() =>
+                    _webView!.CallDevToolsProtocolMethodAsync("DOM.setFileInputFiles", setParams));
+            }
+            catch (Exception ex)
+            {
+                return $"Error: failed to set files on the input — {ex.Message}";
+            }
+
+            // 4. Read back what actually got attached for a trustworthy confirmation.
+            var attached = string.Join(", ", paths.Select(Path.GetFileName));
+            try
+            {
+                var fnParams = "{\"objectId\":" + JsonQuote(objectId) +
+                    ",\"functionDeclaration\":" + JsonQuote("function(){return Array.from(this.files||[]).map(function(f){return f.name;}).join(', ');}") +
+                    ",\"returnByValue\":true}";
+                var fnJson = await InvokeOnUiThreadAsync(() =>
+                    _webView!.CallDevToolsProtocolMethodAsync("Runtime.callFunctionOn", fnParams));
+                using var doc = JsonDocument.Parse(fnJson);
+                if (doc.RootElement.TryGetProperty("result", out var r) &&
+                    r.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.String)
+                {
+                    var names = v.GetString();
+                    if (!string.IsNullOrWhiteSpace(names))
+                        attached = names!;
+                }
+            }
+            catch
+            {
+                // confirmation read-back is best-effort
+            }
+
+            await Task.Delay(200);
+            return $"Uploaded {paths.Count} file(s) to the file input: {attached}";
+        }
+        finally
+        {
+            // Always release the DevTools remote object so repeated uploads don't leak handles.
+            if (!string.IsNullOrEmpty(objectId))
+            {
+                try
+                {
+                    var releaseParams = "{\"objectId\":" + JsonQuote(objectId) + "}";
+                    await InvokeOnUiThreadAsync(() =>
+                        _webView!.CallDevToolsProtocolMethodAsync("Runtime.releaseObject", releaseParams));
+                }
+                catch
+                {
+                    // best-effort cleanup
+                }
+            }
+            _actionLock.Release();
+        }
+    }
+
+    /// <summary>Formats the multi-file-input ambiguity error with enough metadata to choose a target.</summary>
+    private static string BuildAmbiguityError(JsonElement candidates, bool hasCandidates)
+    {
+        var sb = new StringBuilder();
+        sb.Append("Error: the page has multiple file inputs — specify a target to choose one. Candidates:");
+        if (hasCandidates)
+        {
+            foreach (var c in candidates.EnumerateArray())
+            {
+                var id = c.TryGetProperty("id", out var idv) ? idv.GetString() : "";
+                var name = c.TryGetProperty("name", out var nv) ? nv.GetString() : "";
+                var accept = c.TryGetProperty("accept", out var av) ? av.GetString() : "";
+                var mult = c.TryGetProperty("multiple", out var mv) && mv.ValueKind == JsonValueKind.True;
+                var visible = c.TryGetProperty("visible", out var vv) && vv.ValueKind == JsonValueKind.True;
+                var label = c.TryGetProperty("label", out var lv) ? lv.GetString() : "";
+                var sel = !string.IsNullOrEmpty(id) ? $"#{id}" :
+                          !string.IsNullOrEmpty(name) ? $"input[name=\"{name}\"]" : "(no id/name)";
+                sb.Append("\n - ").Append(sel);
+                if (!string.IsNullOrEmpty(label)) sb.Append($" label=\"{label}\"");
+                if (!string.IsNullOrEmpty(accept)) sb.Append($" accept=\"{accept}\"");
+                sb.Append(mult ? " [multiple]" : "");
+                sb.Append(visible ? " [visible]" : " [hidden]");
+            }
+            sb.Append("\nPass one of the selectors above (or its label text) as the target.");
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Validates and canonicalizes the requested upload paths against the upload policy. Returns the
+    /// canonical paths to hand to CDP, or sets <paramref name="error"/> (and returns an empty list).
+    /// </summary>
+    private static List<string> ValidateUploadPaths(List<string> rawPaths, out string? error)
+    {
+        error = null;
+        var canonical = new List<string>(rawPaths.Count);
+
+        if (rawPaths.Count > MaxUploadFiles)
+        {
+            error = $"Error: too many files ({rawPaths.Count}); the maximum per upload is {MaxUploadFiles}.";
+            return canonical;
+        }
+
+        long total = 0;
+        foreach (var raw in rawPaths)
+        {
+            var p = raw.Trim();
+            if (p.Length == 0)
+                continue;
+
+            if (!Path.IsPathFullyQualified(p))
+            {
+                error = $"Error: upload paths must be absolute (fully-qualified). '{p}' is not — pass a full path like C:\\Users\\you\\file.pdf.";
+                return [];
+            }
+
+            string full;
+            try
+            {
+                full = Path.GetFullPath(p);
+            }
+            catch (Exception ex)
+            {
+                error = $"Error: invalid file path '{p}' — {ex.Message}";
+                return [];
+            }
+
+            if (!File.Exists(full))
+            {
+                error = $"Error: file not found: {full}";
+                return [];
+            }
+
+            long len;
+            try
+            {
+                len = new FileInfo(full).Length;
+            }
+            catch (Exception ex)
+            {
+                error = $"Error: could not read file '{full}' — {ex.Message}";
+                return [];
+            }
+
+            if (len > MaxUploadFileBytes)
+            {
+                error = $"Error: '{Path.GetFileName(full)}' is {len / (1024 * 1024)} MB, over the {MaxUploadFileBytes / (1024 * 1024)} MB per-file limit.";
+                return [];
+            }
+
+            total += len;
+            canonical.Add(full);
+        }
+
+        if (canonical.Count == 0)
+        {
+            error = "Error: no valid file path was provided.";
+            return [];
+        }
+
+        if (total > MaxTotalUploadBytes)
+        {
+            error = $"Error: total upload size {total / (1024 * 1024)} MB exceeds the {MaxTotalUploadBytes / (1024 * 1024)} MB limit.";
+            return [];
+        }
+
+        return canonical;
+    }
+
+    /// <summary>JS that defines the shared file-input resolution logic and leaves the chosen element in `resolved`.</summary>
+    private static string FileInputResolutionPreambleJs(string? target)
+    {
+        var targetLiteral = string.IsNullOrWhiteSpace(target) ? "null" : JsonQuote(target.Trim());
+        return
+            " var target=" + targetLiteral + ";" +
+            " function vis(el){if(!el)return false;var r=el.getBoundingClientRect();if(r.width<=0||r.height<=0)return false;var cs=getComputedStyle(el);return cs.display!=='none'&&cs.visibility!=='hidden'&&cs.opacity!=='0';}" +
+            " function asFileInput(el){" +
+            "  if(!el) return null;" +
+            "  if(el.tagName==='INPUT' && (el.type||'').toLowerCase()==='file') return el;" +
+            "  if(el.tagName==='LABEL'){ if(el.htmlFor){var lf=document.getElementById(el.htmlFor); if(lf&&(lf.type||'').toLowerCase()==='file')return lf;} var li=el.querySelector('input[type=file]'); if(li)return li; }" +
+            "  if(el.querySelector){var qi=el.querySelector('input[type=file]'); if(qi)return qi;}" +
+            "  if(el.closest){var lab=el.closest('label'); if(lab){var lq=lab.querySelector('input[type=file]'); if(lq)return lq; if(lab.htmlFor){var lg=document.getElementById(lab.htmlFor); if(lg&&(lg.type||'').toLowerCase()==='file')return lg;}}}" +
+            "  return null;" +
+            " }" +
+            " function lbl(el){ try{ if(el.labels&&el.labels.length){return (el.labels[0].textContent||'').replace(/\\s+/g,' ').trim().slice(0,60);} }catch(e){} return ((el.getAttribute&&el.getAttribute('aria-label'))||el.name||el.id||'').slice(0,60); }" +
+            " var allInputs=Array.from(document.querySelectorAll('input[type=file]'));" +
+            " var resolved=null; var status='none'; var cands=[];" +
+            " if(target){" +
+            "  try{ resolved=asFileInput(document.querySelector(target)); }catch(e){}" +
+            "  if(!resolved){" +
+            "   var c2=Array.from(document.querySelectorAll('button,label,a,[role=\"button\"],div,span,input'));" +
+            "   var tl=target.toLowerCase();" +
+            "   for(var i=0;i<c2.length;i++){ var c=c2[i]; var t=((c.textContent||'')+' '+((c.getAttribute&&c.getAttribute('aria-label'))||'')).replace(/\\s+/g,' ').trim().toLowerCase(); if(t && t.indexOf(tl)>=0){ var f=asFileInput(c); if(f){resolved=f;break;} } }" +
+            "  }" +
+            "  status=resolved?'ok':'none';" +
+            " } else {" +
+            "  if(allInputs.length===0){ status='none'; }" +
+            "  else if(allInputs.length===1){ resolved=allInputs[0]; status='ok'; }" +
+            "  else { status='ambiguous'; cands=allInputs.map(function(el,i){ return {index:i+1,id:el.id||'',name:el.name||'',accept:(el.getAttribute('accept')||''),multiple:!!el.multiple,visible:vis(el),label:lbl(el)}; }); }" +
+            " }";
+    }
+
+    /// <summary>JS expression returning a by-value description of the file-input resolution (status, capability, candidates).</summary>
+    private static string BuildFileInputMetaExpression(string? target) =>
+        "(function(){" + FileInputResolutionPreambleJs(target) +
+        " return {status:status, multiple: resolved?!!resolved.multiple:false," +
+        " candidates:cands};" +
+        "})()";
+
+    /// <summary>JS expression returning the resolved file-input element itself (for a CDP remote objectId).</summary>
+    private static string BuildFileInputElementExpression(string? target) =>
+        "(function(){" + FileInputResolutionPreambleJs(target) + " return resolved;})()";
+
+    /// <summary>Parses upload paths: a JSON array (preferred for multiple files), otherwise a single
+    /// path or newline-separated paths. Commas/semicolons are NOT treated as separators so paths
+    /// containing them (e.g. "report, final.pdf") stay intact.</summary>
+    private static List<string> ParseFilePaths(string? value)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(value))
+            return result;
+        value = value.Trim();
+
+        if (value.StartsWith('['))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(value);
+                if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var el in doc.RootElement.EnumerateArray())
+                    {
+                        var s = el.ValueKind == JsonValueKind.String ? el.GetString() : el.ToString();
+                        if (!string.IsNullOrWhiteSpace(s))
+                            result.Add(s!.Trim());
+                    }
+                    return result;
+                }
+            }
+            catch
+            {
+                // not valid JSON — fall through to newline parsing
+            }
+        }
+
+        foreach (var part in value.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var s = part.Trim().Trim('"');
+            if (s.Length > 0)
+                result.Add(s);
+        }
+        return result;
+    }
+
+    /// <summary>Produces a JSON-encoded, double-quoted string literal (trim-safe, no reflection).</summary>
+    private static string JsonQuote(string value)
+    {
+        var sb = new StringBuilder(value.Length + 2);
+        sb.Append('"');
+        foreach (var c in value)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    if (c < 0x20)
+                        sb.Append("\\u").Append(((int)c).ToString("x4"));
+                    else
+                        sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
+        return sb.ToString();
+    }
+
+
     /// <summary>Clear a field's value using the framework-aware approach.</summary>
     private async Task<string> ClearFieldAsync(string? target)
     {
@@ -1199,7 +1632,7 @@ public sealed partial class BrowserService : IAsyncDisposable
         target = target.Trim();
 
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             string script;
@@ -1253,7 +1686,7 @@ public sealed partial class BrowserService : IAsyncDisposable
             return "Error: fill needs a value parameter — JSON object mapping field identifiers to values, e.g. {\"3\": \"John\", \"4\": \"john@email.com\", \"5\": true}";
 
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var escapedJson = EscapeJs(fieldsJson);
@@ -1360,12 +1793,12 @@ public sealed partial class BrowserService : IAsyncDisposable
 
     /// <summary>
     /// Read all form fields on the page — names, values, types, required/validation state.
-    /// Returns a structured summary that eliminates the need for manual browser_js inspection.
+    /// Returns a structured summary that eliminates the need for manual lumi_browser_js inspection.
     /// </summary>
     private async Task<string> ReadFormAsync()
     {
         await EnsureInitializedAsync();
-        await _actionLock.WaitAsync();
+        await WaitForActionLockAsync();
         try
         {
             var script =
@@ -1546,14 +1979,66 @@ public sealed partial class BrowserService : IAsyncDisposable
     /// <summary>Store the HWND for lazy initialization (called by BrowserView or MainWindow).</summary>
     public void SetParentHwnd(IntPtr hwnd)
     {
-        if (hwnd != IntPtr.Zero)
+        if (_isDisposed || hwnd == IntPtr.Zero)
+            return;
+
+        lock (_parentHwndSync)
+        {
             _pendingParentHwnd = hwnd;
+            if (!_initialized || _controller is null || _parentHwnd == hwnd)
+                return;
+        }
+
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+        {
+            ReparentController(hwnd);
+        }
+        else
+        {
+            lock (_parentHwndSync)
+            {
+                if (_isReparentQueued)
+                    return;
+                _isReparentQueued = true;
+            }
+
+            Avalonia.Threading.Dispatcher.UIThread.Post(
+                ReparentToPendingParent,
+                Avalonia.Threading.DispatcherPriority.Loaded);
+        }
+    }
+
+    private void ReparentToPendingParent()
+    {
+        IntPtr hwnd;
+        lock (_parentHwndSync)
+        {
+            _isReparentQueued = false;
+            hwnd = _pendingParentHwnd;
+        }
+
+        ReparentController(hwnd);
+    }
+
+    private void ReparentController(IntPtr hwnd)
+    {
+        if (_isDisposed || hwnd == IntPtr.Zero || _controller is null || _parentHwnd == hwnd)
+            return;
+
+        var wasVisible = _controller.IsVisible;
+        _controller.IsVisible = false;
+        _controller.ParentWindow = hwnd;
+        _parentHwnd = hwnd;
+        _webViewHwnd = IntPtr.Zero;
+        _controller.IsVisible = wasVisible;
+        _controller.NotifyParentWindowPositionChanged();
     }
 
     /// <summary>Ensures the browser is initialized, using the stored HWND if needed.
     /// Marshals to the UI thread if called from a background thread.</summary>
     private async Task EnsureInitializedAsync()
     {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (_initialized && _webView is not null) return;
 
         if (_pendingParentHwnd == IntPtr.Zero)
@@ -1830,27 +2315,56 @@ public sealed partial class BrowserService : IAsyncDisposable
     public async Task<int> ImportCookiesAsync(BrowserCookieService.BrowserProfile profile)
     {
         await EnsureInitializedAsync();
-        return await InvokeOnUiThreadAsync(() => BrowserCookieService.ImportCookiesAsync(profile, _webView!));
+        await WaitForActionLockAsync();
+        try
+        {
+            return await InvokeOnUiThreadAsync(() => BrowserCookieService.ImportCookiesAsync(profile, _webView!));
+        }
+        finally
+        {
+            _actionLock.Release();
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_webView is not null)
+        if (_isDisposed)
+            return;
+
+        _isDisposed = true;
+
+        await _initLock.WaitAsync().ConfigureAwait(false);
+        await _actionLock.WaitAsync().ConfigureAwait(false);
+        try
         {
-            _webView.NavigationCompleted -= OnNavigationCompleted;
-            _webView.SourceChanged -= OnSourceChanged;
-            _webView.NewWindowRequested -= OnNewWindowRequested;
-            _webView.DownloadStarting -= OnDownloadStarting;
+            lock (_parentHwndSync)
+            {
+                _isReparentQueued = false;
+                _pendingParentHwnd = IntPtr.Zero;
+            }
+
+            if (_webView is not null)
+            {
+                _webView.NavigationCompleted -= OnNavigationCompleted;
+                _webView.SourceChanged -= OnSourceChanged;
+                _webView.NewWindowRequested -= OnNewWindowRequested;
+                _webView.DownloadStarting -= OnDownloadStarting;
+            }
+            if (_controller is not null)
+            {
+                _controller.Close();
+                _controller = null;
+            }
+            _webView = null;
+            _environment = null;
+            _initialized = false;
         }
-        if (_controller is not null)
+        finally
         {
-            _controller.Close();
-            _controller = null;
+            _actionLock.Release();
+            _initLock.Release();
+            // Do not dispose these semaphores: late browser/tool calls may already be
+            // waiting and need to observe _isDisposed cleanly instead of racing disposal.
         }
-        _webView = null;
-        _environment = null;
-        _initialized = false;
-        _initLock.Dispose();
-        _actionLock.Dispose();
     }
 }

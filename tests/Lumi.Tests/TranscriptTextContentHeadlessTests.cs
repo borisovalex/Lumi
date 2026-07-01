@@ -90,8 +90,8 @@ public sealed class TranscriptTextContentHeadlessTests
             await Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.Background);
 
             var textBlocks = markdown.GetVisualDescendants().OfType<SelectableTextBlock>().ToList();
-            var heading = Assert.Single(textBlocks.Where(tb => tb.Classes.Contains("strata-md-heading")));
-            var body = Assert.Single(textBlocks.Where(tb => tb.Text == "Body text"));
+            var heading = Assert.Single(textBlocks, tb => tb.Classes.Contains("strata-md-heading"));
+            var body = Assert.Single(textBlocks, tb => tb.Text == "Body text");
 
             Assert.Equal("Heading", heading.Text);
             Assert.Contains("strata-md-paragraph", body.Classes);

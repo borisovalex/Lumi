@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,9 +50,10 @@ public partial class SearchOverlayViewModel : ObservableObject
     private long _searchRequestId;
     private long _lastAppliedRequestId = -1;
     private int _lastAppliedPhaseRank = -1;
+    private int _activeFinalPhaseRank = -1;
 
-    private const int FastSearchDelayMs = 28;
-    private const int FullSearchDelayMs = 90;
+    private const int FastSearchDelayMs = 32;
+    private const int InteractiveSearchDelayMs = 120;
 
     private const string IconChat = "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H7l-4 3V6a2 2 0 0 1 2-2z";
     private const string IconClock = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm1 5h-2v6l5 3 .9-1.6-3.9-2.3V7z";
@@ -65,6 +67,7 @@ public partial class SearchOverlayViewModel : ObservableObject
     [ObservableProperty] private bool _isOpen;
     [ObservableProperty] private string _searchQuery = "";
     [ObservableProperty] private int _selectedIndex;
+    [ObservableProperty] private bool _isSearching;
 
     public ObservableCollection<SearchResultGroup> ResultGroups { get; } = [];
 
@@ -100,6 +103,7 @@ public partial class SearchOverlayViewModel : ObservableObject
         ResultGroups.Clear();
         FlatResults.Clear();
         SelectedIndex = -1;
+        StopSearchActivity();
     }
 
     public void SelectCurrent()
@@ -144,15 +148,29 @@ public partial class SearchOverlayViewModel : ObservableObject
 
         if (string.IsNullOrEmpty(query))
         {
+            _activeFinalPhaseRank = 1;
+            StartSearchActivity();
             _ = RunSearchAsync(
                 query,
                 requestId,
                 token,
                 GlobalSearchExecutionMode.Full,
                 delayMs: 0,
-                phaseRank: 1);
+                phaseRank: 1,
+                DispatcherPriority.Input);
             return;
         }
+
+        _activeFinalPhaseRank = 2;
+        StartSearchActivity();
+        _ = RunSearchAsync(
+            query,
+            requestId,
+            token,
+            GlobalSearchExecutionMode.Preview,
+            delayMs: 0,
+            phaseRank: 0,
+            DispatcherPriority.Input);
 
         _ = RunSearchAsync(
             query,
@@ -160,15 +178,17 @@ public partial class SearchOverlayViewModel : ObservableObject
             token,
             GlobalSearchExecutionMode.Fast,
             delayMs: immediate ? 0 : FastSearchDelayMs,
-            phaseRank: 0);
+            phaseRank: 1,
+            DispatcherPriority.Input);
 
         _ = RunSearchAsync(
             query,
             requestId,
             token,
-            GlobalSearchExecutionMode.Full,
-            delayMs: FullSearchDelayMs,
-            phaseRank: 1);
+            GlobalSearchExecutionMode.Interactive,
+            delayMs: InteractiveSearchDelayMs,
+            phaseRank: 2,
+            DispatcherPriority.Background);
     }
 
     private async Task RunSearchAsync(
@@ -177,7 +197,8 @@ public partial class SearchOverlayViewModel : ObservableObject
         CancellationToken cancellationToken,
         GlobalSearchExecutionMode executionMode,
         int delayMs,
-        int phaseRank)
+        int phaseRank,
+        DispatcherPriority applyPriority)
     {
         try
         {
@@ -192,11 +213,26 @@ public partial class SearchOverlayViewModel : ObservableObject
 
             await Dispatcher.UIThread.InvokeAsync(
                 () => ApplyResults(query, requestId, phaseRank, matches),
-                DispatcherPriority.Background);
+                applyPriority);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // A newer query superseded this one.
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Search phase '{executionMode}' failed for query '{query}': {ex}");
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (!IsOpen
+                    || requestId != _searchRequestId
+                    || !string.Equals(query, SearchQuery?.Trim() ?? "", StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                UpdateSearchStatusAfterApplied(phaseRank);
+            });
         }
     }
 
@@ -250,6 +286,7 @@ public partial class SearchOverlayViewModel : ObservableObject
             SelectedIndex = selectedIndex;
             _lastAppliedRequestId = requestId;
             _lastAppliedPhaseRank = phaseRank;
+            UpdateSearchStatusAfterApplied(phaseRank);
             return;
         }
 
@@ -262,6 +299,7 @@ public partial class SearchOverlayViewModel : ObservableObject
 
         _lastAppliedRequestId = requestId;
         _lastAppliedPhaseRank = phaseRank;
+        UpdateSearchStatusAfterApplied(phaseRank);
     }
 
     private void CancelPendingSearch(bool disposeOnly = false)
@@ -275,9 +313,31 @@ public partial class SearchOverlayViewModel : ObservableObject
 
         _lastAppliedRequestId = -1;
         _lastAppliedPhaseRank = -1;
+        _activeFinalPhaseRank = -1;
 
         if (!disposeOnly)
             Interlocked.Increment(ref _searchRequestId);
+    }
+
+    private void StartSearchActivity()
+    {
+        IsSearching = true;
+    }
+
+    private void StopSearchActivity()
+    {
+        IsSearching = false;
+    }
+
+    private void UpdateSearchStatusAfterApplied(int phaseRank)
+    {
+        if (phaseRank >= _activeFinalPhaseRank)
+        {
+            StopSearchActivity();
+            return;
+        }
+
+        StartSearchActivity();
     }
 
     private int ResolveSelectedIndex(SearchResultItem? previousSelectedItem, IReadOnlyList<SearchResultItem> flatResults)

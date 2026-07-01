@@ -37,6 +37,8 @@ internal static class AppDataSnapshotFactory
                 AutoGenerateTitles = settings.AutoGenerateTitles,
                 PreferredModel = settings.PreferredModel,
                 ReasoningEffort = settings.ReasoningEffort,
+                UseMcpProxy = settings.UseMcpProxy,
+                ContextWindowTier = settings.ContextWindowTier,
                 EnableMemoryAutoSave = settings.EnableMemoryAutoSave,
                 EnableMemoryAutoMaintenance = settings.EnableMemoryAutoMaintenance,
                 AutoSaveChats = settings.AutoSaveChats,
@@ -45,6 +47,7 @@ internal static class AppDataSnapshotFactory
                 WindowLeft = settings.WindowLeft,
                 WindowTop = settings.WindowTop,
                 SidebarWidth = settings.SidebarWidth,
+                SidebarCollapsed = settings.SidebarCollapsed,
                 IsMaximized = settings.IsMaximized,
                 HasImportedBrowserCookies = settings.HasImportedBrowserCookies,
             },
@@ -53,14 +56,15 @@ internal static class AppDataSnapshotFactory
                 .ToList(),
             Projects = source.Projects
                 .Select(static p => new Project
-                {
-                    Id = p.Id,
-                    Name = p.Name,
-                    Instructions = p.Instructions,
-                    WorkingDirectory = p.WorkingDirectory,
-                    CreatedAt = p.CreatedAt
-                })
-                .ToList(),
+                 {
+                     Id = p.Id,
+                     Name = p.Name,
+                     Instructions = p.Instructions,
+                     WorkingDirectory = p.WorkingDirectory,
+                     AdditionalContextDirectories = [..p.AdditionalContextDirectories],
+                     CreatedAt = p.CreatedAt
+                 })
+                 .ToList(),
             Skills = source.Skills
                 .Select(static s => new Skill
                 {
@@ -236,11 +240,13 @@ internal static class AppDataSnapshotFactory
             ActiveSkillIds = [..source.ActiveSkillIds],
             ActiveExternalSkillNames = [..source.ActiveExternalSkillNames],
             ActiveMcpServerNames = [..source.ActiveMcpServerNames],
+            HasExplicitMcpServerSelection = source.HasExplicitMcpServerSelection,
             SessionMode = source.SessionMode,
             SdkAgentName = source.SdkAgentName,
             WorktreePath = source.WorktreePath,
             LastModelUsed = source.LastModelUsed,
             LastReasoningEffortUsed = source.LastReasoningEffortUsed,
+            LastContextWindowTierUsed = source.LastContextWindowTierUsed,
             TotalInputTokens = source.TotalInputTokens,
             TotalOutputTokens = source.TotalOutputTokens,
             ContextCurrentTokens = source.ContextCurrentTokens,

@@ -165,23 +165,33 @@
         <!-- Search input area -->
         <Border DockPanel.Dock="Top" BorderBrush="{DynamicResource Brush.BorderSubtle}"
                 BorderThickness="0,0,0,1" Padding="0,2">
-          <DockPanel>
-            <PathIcon DockPanel.Dock="Left"
-                      Data="M10 3a7 7 0 1 0 4.2 12.6l4.1 4.1a1 1 0 0 0 1.4-1.4l-4.1-4.1A7 7 0 0 0 10 3zm-5 7a5 5 0 1 1 10 0 5 5 0 0 1-10 0z"
-                      Width="14" Height="14"
-                      Foreground="{DynamicResource Brush.TextTertiary}"
-                      Margin="16,0,0,0" VerticalAlignment="Center" />
-            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="4"
-                        VerticalAlignment="Center" Margin="0,0,12,0">
-              <Border Classes="kbd">
-                <TextBlock Text="Esc" FontSize="10"
-                           Foreground="{DynamicResource Brush.TextTertiary}" />
-              </Border>
-            </StackPanel>
-            <TextBox x:Name="SearchInput" Classes="search-input"
-                     Text="{Binding SearchQuery, Mode=TwoWay}"
-                     PlaceholderText="Search everything…" />
-          </DockPanel>
+          <Grid RowDefinitions="*,2">
+            <DockPanel Grid.Row="0">
+              <PathIcon DockPanel.Dock="Left"
+                        Data="M10 3a7 7 0 1 0 4.2 12.6l4.1 4.1a1 1 0 0 0 1.4-1.4l-4.1-4.1A7 7 0 0 0 10 3zm-5 7a5 5 0 1 1 10 0 5 5 0 0 1-10 0z"
+                        Width="14" Height="14"
+                        Foreground="{DynamicResource Brush.TextTertiary}"
+                        Margin="16,0,0,0" VerticalAlignment="Center" />
+              <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Spacing="4"
+                          VerticalAlignment="Center" Margin="0,0,12,0">
+                <Border Classes="kbd">
+                  <TextBlock Text="Esc" FontSize="10"
+                             Foreground="{DynamicResource Brush.TextTertiary}" />
+                </Border>
+              </StackPanel>
+              <TextBox x:Name="SearchInput" Classes="search-input"
+                       Text="{Binding SearchQuery, Mode=TwoWay}"
+                       PlaceholderText="Search everything…" />
+            </DockPanel>
+
+            <ProgressBar Grid.Row="1"
+                         IsIndeterminate="{Binding IsSearching}"
+                         IsVisible="{Binding IsSearching}"
+                         Height="2"
+                         Margin="16,0,16,0"
+                         Foreground="{DynamicResource Brush.AccentDefault}"
+                         Background="Transparent" />
+          </Grid>
         </Border>
 
         <!-- Footer — keyboard hints -->

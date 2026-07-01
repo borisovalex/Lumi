@@ -1,7 +1,9 @@
 <UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:sa="using:StrataTheme.Animation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:model="using:Lumi.Models"
              xmlns:vm="using:Lumi.ViewModels"
+             xmlns:views="using:Lumi.Views"
              xmlns:services="using:Lumi.Services"
              xmlns:conv="using:Lumi.Converters"
              xmlns:lc="using:Lumi.Views.Controls"
@@ -13,6 +15,118 @@
 
   <UserControl.Resources>
     <conv:ModelDisplayConverter x:Key="ModelDisplayConverter" />
+    <conv:ChartBrushConverter x:Key="ChartBrush" />
+    <!-- Shared reading-column width: the transcript and composer both cap at this
+         and center, so on large/maximized windows content stays a balanced column
+         instead of clinging to the edges. On narrow windows it grows to full width. -->
+    <x:Double x:Key="Chat.ReadingColumnWidth">900</x:Double>
+
+    <!-- Shared chip for files Lumi produced/announced. Right-click exposes file actions
+         (open, reveal in folder, copy the file, copy path/name). Used by both the user and
+         assistant attachment lists so the context menu stays consistent across the transcript. -->
+    <DataTemplate x:Key="SharedFileAttachmentTemplate" DataType="vm:FileAttachmentItem">
+      <sc:StrataFileAttachment FileName="{Binding FileName}"
+                               FileSize="{Binding FileSize}"
+                               IconImage="{Binding IconImage}"
+                               Status="Completed"
+                               IsRemovable="False">
+        <sc:StrataFileAttachment.ContextMenu>
+          <ContextMenu x:CompileBindings="False">
+            <MenuItem Header="{loc:Str FileMenu_Open}" Command="{Binding OpenCommand}">
+              <MenuItem.Icon>
+                <PathIcon Width="14" Height="14" Data="M14 3h7v7h-2V6.41l-8.29 8.3-1.42-1.42L17.59 5H14V3zM5 5h5v2H5v12h12v-5h2v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z" />
+              </MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="{loc:Str FileMenu_ShowInFolder}" Command="{Binding ShowInFolderCommand}">
+              <MenuItem.Icon>
+                <PathIcon Width="14" Height="14" Data="M2 6a2 2 0 0 1 2-2h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6z" />
+              </MenuItem.Icon>
+            </MenuItem>
+            <Separator />
+            <MenuItem Header="{loc:Str FileMenu_Copy}" Command="{Binding CopyCommand}">
+              <MenuItem.Icon>
+                <PathIcon Width="14" Height="14" Data="M16 1H4a2 2 0 0 0-2 2v12a1 1 0 0 0 2 0V3h12a1 1 0 0 0 0-2zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z" />
+              </MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="{loc:Str FileMenu_CopyPath}" Command="{Binding CopyPathCommand}">
+              <MenuItem.Icon>
+                <PathIcon Width="14" Height="14" Data="M3.9 12a3.1 3.1 0 0 1 3.1-3.1h4V7H7a5 5 0 0 0 0 10h4v-1.9H7A3.1 3.1 0 0 1 3.9 12zM8 13h8v-2H8v2zm5-6h4a5 5 0 0 1 0 10h-4v-1.9h4a3.1 3.1 0 0 0 0-6.2h-4V7z" />
+              </MenuItem.Icon>
+            </MenuItem>
+            <MenuItem Header="{loc:Str FileMenu_CopyName}" Command="{Binding CopyNameCommand}">
+              <MenuItem.Icon>
+                <PathIcon Width="14" Height="14" Data="M21.41 11.58l-9-9A2 2 0 0 0 11 2H4a2 2 0 0 0-2 2v7a2 2 0 0 0 .59 1.42l9 9a2 2 0 0 0 2.82 0l7-7a2 2 0 0 0 0-2.84zM6.5 8A1.5 1.5 0 1 1 8 6.5 1.5 1.5 0 0 1 6.5 8z" />
+              </MenuItem.Icon>
+            </MenuItem>
+          </ContextMenu>
+        </sc:StrataFileAttachment.ContextMenu>
+      </sc:StrataFileAttachment>
+    </DataTemplate>
+
+    <!-- ── Loaded-skill chip (Strata-style, clickable → opens the skill markdown in the right island) ── -->
+    <ControlTheme x:Key="SkillChipButton" TargetType="Button">
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Focusable" Value="True" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="Template">
+        <ControlTemplate>
+          <Border Name="PART_Root"
+                  Background="{DynamicResource Brush.SurfaceCard}"
+                  BorderBrush="{DynamicResource Brush.BorderSubtle}"
+                  BorderThickness="1"
+                  CornerRadius="999"
+                  Padding="4,3,10,3"
+                  RenderTransformOrigin="0.5,0.5"
+                  RenderTransform="scale(1)">
+            <Border.Transitions>
+              <Transitions>
+                <BrushTransition Property="Background" Duration="0:0:0.14" />
+                <BrushTransition Property="BorderBrush" Duration="0:0:0.14" />
+                <BoxShadowsTransition Property="BoxShadow" Duration="0:0:0.18" />
+                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" Easing="CubicEaseOut" />
+              </Transitions>
+            </Border.Transitions>
+            <ContentPresenter Content="{TemplateBinding Content}"
+                              VerticalAlignment="Center"
+                              HorizontalAlignment="Center" />
+          </Border>
+        </ControlTemplate>
+      </Setter>
+
+      <Style Selector="^:pointerover /template/ Border#PART_Root">
+        <Setter Property="Background" Value="{DynamicResource Brush.SurfaceCardHover}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderDefault}" />
+        <Setter Property="BoxShadow" Value="0 2 6 0 #0D000000" />
+      </Style>
+      <Style Selector="^:pressed /template/ Border#PART_Root">
+        <Setter Property="RenderTransform" Value="scale(0.97)" />
+        <Setter Property="BoxShadow" Value="0 0 0 0 #00000000" />
+      </Style>
+    </ControlTheme>
+
+    <DataTemplate x:Key="SkillChipTemplate" x:DataType="vm:SkillChipItem">
+      <Button Theme="{StaticResource SkillChipButton}"
+              Name="SkillChip"
+              Command="{Binding OpenCommand}"
+              Margin="0,0,6,6"
+              ToolTip.Tip="{Binding Description}">
+        <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+          <Border Width="20" Height="20" CornerRadius="6"
+                  Background="{DynamicResource Brush.AccentSubtle}"
+                  VerticalAlignment="Center">
+            <PathIcon Width="11" Height="11"
+                      Foreground="{DynamicResource Brush.AccentDefault}"
+                      Data="M7 2v11h3v9l7-12h-4l4-8z" />
+          </Border>
+          <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
+                     Foreground="{DynamicResource Brush.TextPrimary}"
+                     VerticalAlignment="Center" />
+          <PathIcon Width="9" Height="9" VerticalAlignment="Center"
+                    Foreground="{DynamicResource Brush.TextTertiary}"
+                    Data="M8.59 16.59 13.17 12 8.59 7.41 10 6l6 6-6 6z" />
+        </StackPanel>
+      </Button>
+    </DataTemplate>
   </UserControl.Resources>
 
   <UserControl.Styles>
@@ -51,6 +165,13 @@
       <Setter Property="TextTrimming" Value="CharacterEllipsis" />
       <Setter Property="MaxLines" Value="1" />
     </Style>
+    <Style Selector="sc|StrataChatShell.flat-window /template/ Border#PART_Root">
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="ClipToBounds" Value="False" />
+    </Style>
+    <Style Selector="sc|StrataChatShell.flat-window /template/ Border#PART_HeaderChrome">
+      <Setter Property="IsVisible" Value="False" />
+    </Style>
     <Style Selector="Border.job-wake-card">
       <Setter Property="Background" Value="{DynamicResource Brush.SurfaceRaised}" />
       <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderSubtle}" />
@@ -86,6 +207,12 @@
       <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
     </Style>
     <Style Selector="Button#BrowserToggleButton.open PathIcon#BrowserToggleIcon">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.AccentDefault}" />
+    </Style>
+    <Style Selector="Button#WorkspaceToggleButton.open">
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
+    </Style>
+    <Style Selector="Button#WorkspaceToggleButton.open PathIcon#WorkspaceToggleIcon">
       <Setter Property="Foreground" Value="{DynamicResource Brush.AccentDefault}" />
     </Style>
 
@@ -148,8 +275,9 @@
           <ThicknessTransition Property="Margin" Duration="0:0:0.55" Easing="0.2,0 0,1" />
         </Transitions>
       </Setter>
-      <!-- Default (active chat) state -->
-      <Setter Property="MaxWidth" Value="5000" />
+      <!-- Default (active chat) state — capped to the reading column so the composer
+           shares a vertical spine with the centered transcript on wide screens -->
+      <Setter Property="MaxWidth" Value="{DynamicResource Chat.ReadingColumnWidth}" />
       <Setter Property="Margin" Value="12,8,12,10" />
     </Style>
     <Style Selector="StackPanel#ComposerContainer.welcome">
@@ -189,7 +317,7 @@
       <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
       <Setter Property="Transitions">
         <Transitions>
-          <BrushTransition Property="Background" Duration="0:0:0.15" />
+          <sa:PremultipliedBrushTransition Property="Background" Duration="0:0:0.15" />
           <BrushTransition Property="BorderBrush" Duration="0:0:0.15" />
           <BrushTransition Property="Foreground" Duration="0:0:0.15" />
         </Transitions>
@@ -420,53 +548,20 @@
         <sc:StrataChatMessage.Content>
           <StackPanel Spacing="6">
             <lc:TranscriptTextContent Text="{Binding Content}" />
-            <ContentControl Content="{Binding DisplayAttachments}"
-                            IsVisible="{Binding HasAttachments}">
-              <ContentControl.DataTemplates>
-                <DataTemplate DataType="x:Object">
-                  <ItemsControl ItemsSource="{Binding}">
-                    <ItemsControl.ItemsPanel>
-                      <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                      <DataTemplate DataType="vm:FileAttachmentItem">
-                        <sc:StrataFileAttachment FileName="{Binding FileName}"
-                                                 FileSize="{Binding FileSize}"
-                                                 IconImage="{Binding IconImage}"
-                                                 Status="Completed"
-                                                 IsRemovable="False" />
-                      </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                  </ItemsControl>
-                </DataTemplate>
-              </ContentControl.DataTemplates>
-            </ContentControl>
-            <ContentControl Content="{Binding DisplaySkills}"
-                            IsVisible="{Binding HasSkills}">
-              <ContentControl.DataTemplates>
-                <DataTemplate DataType="x:Object">
-                  <ItemsControl ItemsSource="{Binding}">
-                    <ItemsControl.ItemsPanel>
-                      <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                      <DataTemplate DataType="model:SkillReference">
-                        <Border Background="{DynamicResource Brush.AccentSubtle}"
-                                CornerRadius="14" Padding="8,4,10,4" Margin="0,0,4,4">
-                          <StackPanel Orientation="Horizontal" Spacing="6">
-                            <TextBlock Text="{Binding Glyph}" FontSize="12"
-                                       VerticalAlignment="Center" />
-                            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="Medium"
-                                       Foreground="{DynamicResource Brush.TextSecondary}"
-                                       VerticalAlignment="Center" />
-                          </StackPanel>
-                        </Border>
-                      </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                  </ItemsControl>
-                </DataTemplate>
-              </ContentControl.DataTemplates>
-            </ContentControl>
+            <ItemsControl ItemsSource="{Binding DisplayAttachments}"
+                          IsVisible="{Binding HasAttachments}"
+                          ItemTemplate="{StaticResource SharedFileAttachmentTemplate}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+            </ItemsControl>
+            <ItemsControl ItemsSource="{Binding DisplaySkills}"
+                          IsVisible="{Binding HasSkills}"
+                          ItemTemplate="{StaticResource SkillChipTemplate}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+            </ItemsControl>
           </StackPanel>
         </sc:StrataChatMessage.Content>
       </sc:StrataChatMessage>
@@ -487,55 +582,22 @@
                                       RenderMarkdownWhileStreaming="True" />
 
             <!-- Skills section -->
-            <ContentControl Content="{Binding DisplaySkills}"
-                            IsVisible="{Binding HasSkills}">
-              <ContentControl.DataTemplates>
-                <DataTemplate DataType="x:Object">
-                  <ItemsControl ItemsSource="{Binding}">
-                    <ItemsControl.ItemsPanel>
-                      <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                      <DataTemplate DataType="model:SkillReference">
-                        <Border Background="{DynamicResource Brush.AccentSubtle}"
-                                CornerRadius="14" Padding="8,4,10,4" Margin="0,0,4,4">
-                          <StackPanel Orientation="Horizontal" Spacing="6">
-                            <TextBlock Text="{Binding Glyph}" FontSize="12"
-                                       VerticalAlignment="Center" />
-                            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="Medium"
-                                       Foreground="{DynamicResource Brush.TextSecondary}"
-                                       VerticalAlignment="Center" />
-                          </StackPanel>
-                        </Border>
-                      </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                  </ItemsControl>
-                </DataTemplate>
-              </ContentControl.DataTemplates>
-            </ContentControl>
+            <ItemsControl ItemsSource="{Binding DisplaySkills}"
+                          IsVisible="{Binding HasSkills}"
+                          ItemTemplate="{StaticResource SkillChipTemplate}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+            </ItemsControl>
 
             <!-- File attachments -->
-            <ContentControl Content="{Binding DisplayFileAttachments}"
-                            IsVisible="{Binding HasFileAttachments}">
-              <ContentControl.DataTemplates>
-                <DataTemplate DataType="x:Object">
-                  <ItemsControl ItemsSource="{Binding}">
-                    <ItemsControl.ItemsPanel>
-                      <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
-                    </ItemsControl.ItemsPanel>
-                    <ItemsControl.ItemTemplate>
-                      <DataTemplate DataType="vm:FileAttachmentItem">
-                        <sc:StrataFileAttachment FileName="{Binding FileName}"
-                                                 FileSize="{Binding FileSize}"
-                                                 IconImage="{Binding IconImage}"
-                                                 Status="Completed"
-                                                 IsRemovable="False" />
-                      </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                  </ItemsControl>
-                </DataTemplate>
-              </ContentControl.DataTemplates>
-            </ContentControl>
+            <ItemsControl ItemsSource="{Binding DisplayFileAttachments}"
+                          IsVisible="{Binding HasFileAttachments}"
+                          ItemTemplate="{StaticResource SharedFileAttachmentTemplate}">
+              <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+              </ItemsControl.ItemsPanel>
+            </ItemsControl>
 
             <!-- Sources section -->
             <ContentControl Content="{Binding DisplaySourcesSection}"
@@ -656,6 +718,15 @@
                      VerticalAlignment="Center" />
         </StackPanel>
       </Button>
+    </DataTemplate>
+
+    <!-- ── Loaded-skill chip (inline in transcript when a skill is fetched at runtime) ── -->
+    <DataTemplate DataType="vm:SkillLoadedItem">
+      <ContentControl x:Name="SkillLoadedChip"
+                      Content="{Binding Chip}"
+                      ContentTemplate="{StaticResource SkillChipTemplate}"
+                      HorizontalAlignment="Left"
+                      Margin="0,2,0,2" />
     </DataTemplate>
 
     <!-- ── Error message ─────────────────────────────── -->
@@ -856,6 +927,109 @@
         </sc:StrataThink>
     </DataTemplate>
 
+    <!-- ── Parallel agents group (native Strata pills) ── -->
+    <DataTemplate DataType="vm:SubagentGroupItem">
+      <sc:StrataThink Label="{Binding HeaderLabel}"
+                      Meta="{Binding Meta}"
+                      IsExpanded="{Binding IsExpanded}"
+                      IsActive="{Binding IsActive}"
+                      ProgressValue="{Binding ProgressValue}">
+        <sc:StrataThink.HeaderExtra>
+          <ItemsControl ItemsSource="{Binding Subagents}" VerticalAlignment="Center" Margin="2,0,0,0">
+            <ItemsControl.Styles>
+              <Style Selector="Border.cluster-avatar">
+                <Setter Property="Width" Value="18" />
+                <Setter Property="Height" Value="18" />
+                <Setter Property="CornerRadius" Value="9" />
+                <Setter Property="BorderThickness" Value="2" />
+                <Setter Property="BorderBrush" Value="{DynamicResource Brush.SurfaceCard}" />
+              </Style>
+              <Style Selector="Border.cluster-avatar > TextBlock">
+                <Setter Property="HorizontalAlignment" Value="Center" />
+                <Setter Property="VerticalAlignment" Value="Center" />
+                <Setter Property="FontSize" Value="9" />
+                <Setter Property="FontWeight" Value="Bold" />
+                <Setter Property="Foreground" Value="#FFFFFFFF" />
+              </Style>
+            </ItemsControl.Styles>
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="-6" /></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:SubagentToolCallItem">
+                <Border Classes="cluster-avatar"
+                        Background="{Binding AccentIndex, Converter={StaticResource ChartBrush}}">
+                  <TextBlock Text="{Binding Initial}" />
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </sc:StrataThink.HeaderExtra>
+        <sc:StrataThink.Content>
+          <ItemsControl ItemsSource="{Binding Subagents}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate><StackPanel Spacing="4" /></ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:SubagentToolCallItem">
+                <sc:StrataThink Label="{Binding Title}"
+                                Meta="{Binding AgentSubtitle}"
+                                IsExpanded="{Binding IsExpanded}"
+                                IsActive="{Binding IsActive}"
+                                ProgressValue="{Binding ProgressValue}">
+                  <sc:StrataThink.HeaderExtra>
+                    <Border Width="16" Height="16" CornerRadius="8" VerticalAlignment="Center"
+                            Background="{Binding AccentIndex, Converter={StaticResource ChartBrush}}">
+                      <TextBlock Text="{Binding Initial}" FontSize="8.5" FontWeight="Bold"
+                                 Foreground="#FFFFFFFF"
+                                 HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                  </sc:StrataThink.HeaderExtra>
+                  <sc:StrataThink.Content>
+                    <StackPanel Spacing="6">
+                      <sc:StrataThink Label="{loc:Str Tool_ReasoningLabel}"
+                                      IsExpanded="True"
+                                      IsActive="{Binding IsActive}"
+                                      IsVisible="{Binding HasReasoningText}">
+                        <sc:StrataThink.Content>
+                          <lc:TranscriptTextContent Text="{Binding ReasoningText}"
+                                                    PreferPlainText="{Binding IsActive}"
+                                                    RenderMarkdownWhileStreaming="True" />
+                        </sc:StrataThink.Content>
+                      </sc:StrataThink>
+                      <lc:TranscriptTextContent Text="{Binding TranscriptText}"
+                                                PreferPlainText="{Binding IsActive}"
+                                                RenderMarkdownWhileStreaming="True"
+                                                IsVisible="{Binding HasTranscriptText}" />
+                      <ItemsControl ItemsSource="{Binding Activities}"
+                                    IsVisible="{Binding HasActivities}">
+                        <ItemsControl.Styles>
+                          <Style Selector="ContentPresenter">
+                            <Setter Property="Margin" Value="0,0,6,6" />
+                          </Style>
+                          <Style Selector="sc|StrataAiToolCall">
+                            <Setter Property="MinWidth" Value="320" />
+                            <Setter Property="MaxWidth" Value="420" />
+                          </Style>
+                          <Style Selector="sc|StrataTerminalPreview">
+                            <Setter Property="MinWidth" Value="360" />
+                            <Setter Property="MaxWidth" Value="560" />
+                          </Style>
+                        </ItemsControl.Styles>
+                        <ItemsControl.ItemsPanel>
+                          <ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                      </ItemsControl>
+                    </StackPanel>
+                  </sc:StrataThink.Content>
+                </sc:StrataThink>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </sc:StrataThink.Content>
+      </sc:StrataThink>
+    </DataTemplate>
+
     <!-- ── Regular tool call (inside tool group) ────── -->
     <DataTemplate DataType="vm:ToolCallItem">
       <sc:StrataAiToolCall ToolName="{Binding ToolName}"
@@ -935,6 +1109,11 @@
   </UserControl.DataTemplates>
 
   <Panel DragDrop.AllowDrop="True">
+    <!-- Lumi's ambient "presence" glow is NOT here: it lives as a single decoupled layer
+         behind this whole chat/workspace surface, owned and driven by PresenceController
+         (Lumi.Presence). This view stays presence-free and shows the glow through its
+         translucent surfaces. -->
+
     <!-- Drop overlay -->
     <Panel x:Name="DropOverlay" IsVisible="False" IsHitTestVisible="False"
            ZIndex="100">
@@ -1020,15 +1199,18 @@
       </StackPanel>
     </Panel>
 
-    <!-- Loading overlay shown while chat history is being rebuilt (outside ChatPanel so it's visible even from welcome screen) -->
-    <Panel x:Name="LoadingOverlay" IsVisible="{Binding IsLoadingChat}" ZIndex="50" IsHitTestVisible="False">
-      <Border Background="{DynamicResource Brush.Surface0}" Opacity="0.85" />
-      <sc:StrataTypingIndicator x:Name="LoadingIndicator"
-                                Label="{loc:Str Chat_Loading}"
-                                IsActive="True"
-                                HorizontalAlignment="Center"
-                                VerticalAlignment="Center" />
-    </Panel>
+    <!-- Invisible click-guard, raised only while a chat loads / its transcript is still realizing
+         (outside ChatPanel so it also guards the welcome screen). It paints NOTHING: the loading
+         "look" is now the transcript itself materialising — it clears instantly on load and then
+         gently fades + rises back into place once settled (driven from ChatView code-behind). The
+         load gap therefore shows Lumi's real translucent, presence-lit surface (the ambient field
+         breathing through) instead of a dead opaque slab. The Transparent background still captures
+         pointer input so clicks can't reach a half-realized transcript, and the whole guard detaches
+         (collapsed + hit-invisible) the instant loading ends. -->
+    <Panel x:Name="LoadingOverlay" ZIndex="50"
+           Background="Transparent"
+           IsVisible="{Binding IsChatSurfaceLoading}"
+           IsHitTestVisible="{Binding IsChatSurfaceLoading}" />
 
     <!-- Active chat -->
     <Panel x:Name="ChatPanel" Classes.active="{Binding IsChatVisible}">
@@ -1085,12 +1267,31 @@
                           Foreground="{DynamicResource Brush.TextSecondary}"
                           Data="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" />
               </Button>
+
+              <Button x:Name="WorkspaceToggleButton"
+                      Classes="subtle"
+                      IsVisible="{Binding ShowWorkspaceToggle}"
+                      Classes.open="{Binding IsWorkspacePanelOpen}"
+                      Command="{Binding ToggleWorkspacePanelCommand}"
+                      ToolTip.Tip="Workspace"
+                      Width="30"
+                      Height="30"
+                      Padding="0"
+                      CornerRadius="7">
+                <PathIcon x:Name="WorkspaceToggleIcon"
+                          Width="14"
+                          Height="14"
+                          Foreground="{DynamicResource Brush.TextSecondary}"
+                          Data="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" />
+              </Button>
             </StackPanel>
 
             <TextBlock Classes="subtitle"
+                       x:CompileBindings="False"
                        FontSize="15.5"
                        FontWeight="SemiBold"
                        VerticalAlignment="Center"
+                       IsVisible="{Binding ShowInternalTitle, RelativeSource={RelativeSource AncestorType=views:ChatView}}"
                        Text="{Binding CurrentChatTitle}"
                        ToolTip.Tip="{Binding CurrentChatTitle}"
                        TextTrimming="CharacterEllipsis" />
@@ -1101,6 +1302,8 @@
 
         <sc:StrataChatShell.Transcript>
           <ItemsControl x:Name="Transcript"
+                        HorizontalAlignment="Stretch"
+                        MaxWidth="{DynamicResource Chat.ReadingColumnWidth}"
                         ItemsSource="{Binding MountedTranscriptTurns}">
             <ItemsControl.ItemTemplate>
               <DataTemplate DataType="vm:TranscriptTurn">
@@ -1208,18 +1411,24 @@
         <Button Classes="transcript-suggestion" Margin="0,0,8,4"
                 Command="{Binding SelectSuggestionCommand}"
                 CommandParameter="{Binding SuggestionA}"
+                ToolTip.Tip="{Binding SuggestionA}"
+                ToolTip.ShowDelay="350"
                 IsVisible="{Binding SuggestionA, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
           <TextBlock Text="{Binding SuggestionA}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </Button>
         <Button Classes="transcript-suggestion" Margin="0,0,8,4"
                 Command="{Binding SelectSuggestionCommand}"
                 CommandParameter="{Binding SuggestionB}"
+                ToolTip.Tip="{Binding SuggestionB}"
+                ToolTip.ShowDelay="350"
                 IsVisible="{Binding SuggestionB, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
           <TextBlock Text="{Binding SuggestionB}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </Button>
         <Button Classes="transcript-suggestion" Margin="0,0,8,4"
                 Command="{Binding SelectSuggestionCommand}"
                 CommandParameter="{Binding SuggestionC}"
+                ToolTip.Tip="{Binding SuggestionC}"
+                ToolTip.ShowDelay="350"
                 IsVisible="{Binding SuggestionC, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
           <TextBlock Text="{Binding SuggestionC}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxWidth="320" />
         </Button>
@@ -1236,7 +1445,7 @@
           <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="5"
                       IsVisible="{Binding IsCodingProject}">
           <Button Classes="subtle" Padding="5,1" MinHeight="0" Height="20" CornerRadius="4"
-                  IsVisible="{Binding GitBranch, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                  IsVisible="{Binding IsCodingProject}"
                   Cursor="Hand" Background="{DynamicResource Brush.Surface2}">
             <Button.Flyout>
               <MenuFlyout Placement="TopEdgeAlignedLeft">
@@ -1292,7 +1501,7 @@
             <StackPanel Orientation="Horizontal" Spacing="3">
               <PathIcon Width="8" Height="8" Foreground="{DynamicResource Brush.TextTertiary}"
                         Data="M6 3v6a3 3 0 0 0 3 3h2a1 1 0 0 1 1 1v2m0 0a2 2 0 1 0 4 0 2 2 0 0 0-4 0zM6 3a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm0 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0zm0 0V9" />
-              <TextBlock Text="{Binding GitBranch}" FontSize="10"
+              <TextBlock Text="{Binding GitBranchLabel}" FontSize="10"
                          Foreground="{DynamicResource Brush.TextTertiary}" VerticalAlignment="Center"
                          MaxWidth="120" TextTrimming="CharacterEllipsis" />
             </StackPanel>
@@ -1343,9 +1552,10 @@
             <TextBlock Text="{Binding GitChangesLabel}" FontSize="10" Foreground="{DynamicResource Brush.TextSecondary}" />
           </StackPanel>
         </Button>
-        <Border Background="{DynamicResource Brush.Surface2}" CornerRadius="4" Padding="5,1"
+        <Border Background="{DynamicResource Brush.Surface2}" CornerRadius="4" Padding="5,0"
+                Height="20" VerticalAlignment="Center"
                 IsVisible="{Binding IsRefreshingGitStatus}">
-          <StackPanel Orientation="Horizontal" Spacing="4">
+          <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
             <Border x:Name="GitRefreshDot" Width="6" Height="6" CornerRadius="3"
                     Background="{DynamicResource Brush.AccentDefault}" VerticalAlignment="Center">
               <Border.Styles>
@@ -1360,7 +1570,8 @@
               </Border.Styles>
             </Border>
             <TextBlock Text="{loc:Str Git_Refreshing}" FontSize="10"
-                       Foreground="{DynamicResource Brush.TextSecondary}" />
+                       Foreground="{DynamicResource Brush.TextSecondary}"
+                       VerticalAlignment="Center" />
           </StackPanel>
         </Border>
         <Button Classes="subtle" Padding="2,1" MinHeight="0" Height="20" Width="20" CornerRadius="4"
@@ -1504,6 +1715,8 @@
                              SelectedModel="{Binding SelectedModel, Mode=TwoWay}"
                              QualityLevels="{Binding QualityLevels}"
                              SelectedQuality="{Binding SelectedQuality, Mode=TwoWay}"
+                             ContextWindowTiers="{Binding ContextWindowTiers}"
+                             SelectedContextWindowTier="{Binding SelectedContextWindowTier, Mode=TwoWay}"
                              AgentName="{Binding SelectedAgentName, Mode=TwoWay}"
                              AgentGlyph="{Binding SelectedAgentGlyph}"
                              ProjectName="{Binding SelectedProjectName, Mode=TwoWay}"

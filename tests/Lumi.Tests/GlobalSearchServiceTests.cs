@@ -93,6 +93,116 @@ public class GlobalSearchServiceTests
     }
 
     [Fact]
+    public async Task SearchAsync_PreviewModeSkipsColdPersistedHistoryUntilFullPass()
+    {
+        var chat = new Chat
+        {
+            Id = Guid.NewGuid(),
+            Title = "Weekly sync",
+            UpdatedAt = Now.AddHours(-2)
+        };
+
+        var providerCalls = 0;
+        var snapshot = new ChatSearchSnapshot
+        {
+            Version = "persisted-preview-1",
+            Messages =
+            [
+                new ChatSearchMessage
+                {
+                    Text = "We discussed the application rollout plan in detail.",
+                    Timestamp = Now.AddHours(-1)
+                }
+            ]
+        };
+
+        var service = new GlobalSearchService(
+            () => new AppData { Chats = [chat] },
+            _ =>
+            {
+                providerCalls++;
+                return snapshot;
+            },
+            () => Now);
+
+        var previewResults = await service.SearchAsync("applic", GlobalSearchExecutionMode.Preview);
+        Assert.Empty(previewResults);
+        Assert.Equal(0, providerCalls);
+
+        var fullResults = await service.SearchAsync("applic", GlobalSearchExecutionMode.Full);
+        var match = Assert.Single(fullResults);
+        Assert.Same(chat, match.Item);
+        Assert.True(match.IsContentMatch);
+        Assert.Equal(1, providerCalls);
+    }
+
+    [Fact]
+    public async Task SearchAsync_PreviewModeSkipsSkillContentUntilFullPass()
+    {
+        var skill = new Skill
+        {
+            Name = "Document Creator",
+            Description = "Creates polished user-facing files.",
+            Content = "Can produce Word documents, Excel workbooks, and PowerPoint decks.",
+            CreatedAt = Now.AddDays(-2)
+        };
+
+        var service = CreateService(new AppData { Skills = [skill] });
+
+        var previewResults = await service.SearchAsync("excel", GlobalSearchExecutionMode.Preview);
+        Assert.Empty(previewResults);
+
+        var interactiveResults = await service.SearchAsync("excel", GlobalSearchExecutionMode.Interactive);
+        var interactiveMatch = Assert.Single(interactiveResults);
+        Assert.Equal(GlobalSearchCategory.Skills, interactiveMatch.Category);
+        Assert.True(interactiveMatch.IsContentMatch);
+
+        var fullResults = await service.SearchAsync("excel", GlobalSearchExecutionMode.Full);
+        var match = Assert.Single(fullResults);
+        Assert.Equal(GlobalSearchCategory.Skills, match.Category);
+        Assert.True(match.IsContentMatch);
+    }
+
+    [Fact]
+    public async Task SearchAsync_InteractiveModeBoundsColdPersistedHistoryReads()
+    {
+        var chats = Enumerable.Range(0, 70)
+            .Select(index => new Chat
+            {
+                Id = Guid.NewGuid(),
+                Title = $"Chat {index}",
+                UpdatedAt = Now.AddMinutes(-index)
+            })
+            .ToList();
+
+        var providerCalls = 0;
+        var service = new GlobalSearchService(
+            () => new AppData { Chats = chats },
+            _ =>
+            {
+                providerCalls++;
+                return new ChatSearchSnapshot
+                {
+                    Version = $"persisted-interactive-{providerCalls}",
+                    Messages =
+                    [
+                        new ChatSearchMessage
+                        {
+                            Text = "needle appears in persisted history.",
+                            Timestamp = Now
+                        }
+                    ]
+                };
+            },
+            () => Now);
+
+        var interactiveResults = await service.SearchAsync("needle", GlobalSearchExecutionMode.Interactive);
+
+        Assert.NotEmpty(interactiveResults);
+        Assert.InRange(providerCalls, 1, 16);
+    }
+
+    [Fact]
     public async Task SearchAsync_FastModeUsesCachedHistoryAfterFullPass()
     {
         var chat = new Chat

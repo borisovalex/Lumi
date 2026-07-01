@@ -122,11 +122,11 @@ public partial class AgentsViewModel : ObservableObject
     [
         ("web_search", "Web Search", "Web", "Search the web for information (SDK built-in, Bing-powered)."),
         ("lumi_fetch", "Fetch Webpage", "Web", "Fetch a webpage and return its text content."),
-        ("browser", "Open Browser", "Browser", "Open a URL in the browser with persistent cookies/sessions."),
-        ("browser_look", "Browser Look", "Browser", "Get the current page state with interactive elements."),
-        ("browser_find", "Browser Find", "Browser", "Find and rank interactive elements by query."),
-        ("browser_do", "Browser Interact", "Browser", "Click, type, press keys, select, scroll in the browser."),
-        ("browser_js", "Browser JavaScript", "Browser", "Run JavaScript in the browser page context."),
+        (ToolDisplayHelper.BrowserOpenToolName, "Open Browser", "Browser", "Open a URL in the browser with persistent cookies/sessions."),
+        (ToolDisplayHelper.BrowserLookToolName, "Browser Look", "Browser", "Get the current page state with interactive elements."),
+        (ToolDisplayHelper.BrowserFindToolName, "Browser Find", "Browser", "Find and rank interactive elements by query."),
+        (ToolDisplayHelper.BrowserDoToolName, "Browser Interact", "Browser", "Click, type, press keys, select, scroll in the browser."),
+        (ToolDisplayHelper.BrowserJsToolName, "Browser JavaScript", "Browser", "Run JavaScript in the browser page context."),
         ("ui_list_windows", "List Windows", "Desktop", "List all visible windows on the desktop."),
         ("ui_inspect", "Inspect Window", "Desktop", "Inspect the UI element tree of a window."),
         ("ui_find", "Find UI Element", "Desktop", "Find UI elements matching a search query."),
@@ -144,6 +144,8 @@ public partial class AgentsViewModel : ObservableObject
         ("manage_mcps", "Manage MCPs", "Utility", "List, create, update, or delete Lumi MCP servers on explicit request."),
         ("manage_jobs", "Manage Jobs", "Utility", "Create, pause, resume, or delete Lumi background jobs on explicit request."),
         ("manage_memories", "Manage Memories", "Utility", "List, create, update, or delete Lumi memories on explicit request."),
+        ("search_chats", "Search Chats", "Utility", "Search the user's past chats by topic, keyword, person, or time."),
+        ("read_chat", "Read Chat", "Utility", "Open and read the transcript of a past chat by id, title, or phrase."),
         ("code_review", "Code Review", "Coding", "Expert code review for bugs, security, performance, and best practices."),
         ("generate_tests", "Generate Tests", "Coding", "Generate comprehensive unit tests for source code."),
         ("explain_code", "Explain Code", "Coding", "Deep code explanation with call flow and pattern identification."),
@@ -155,10 +157,11 @@ public partial class AgentsViewModel : ObservableObject
         AvailableTools.Clear();
         // Empty ToolNames means "all tools" — show all as selected
         var toolNames = agent?.ToolNames ?? [];
-        var hasRestrictions = toolNames.Count > 0;
+        var runtimeToolNames = ToolDisplayHelper.ToRuntimeToolNames(toolNames);
+        var hasRestrictions = runtimeToolNames.Count > 0;
         foreach (var (name, displayName, group, description) in KnownTools)
         {
-            var isAssigned = !hasRestrictions || toolNames.Contains(name);
+            var isAssigned = !hasRestrictions || runtimeToolNames.Contains(name);
             AvailableTools.Add(new ToolToggle(name, displayName, group, description, isAssigned));
         }
     }

@@ -7,7 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.Input;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
@@ -39,6 +39,21 @@ public partial class ChatViewModel
         var existingContent = NormalizeAssistantContent(existingStreamingContent);
         return string.IsNullOrWhiteSpace(existingContent) ? null : existingContent;
     }
+
+    internal static bool FinalizeTerminalAssistantMessage(Chat chat, ChatMessage streamingMessage)
+    {
+        streamingMessage.IsStreaming = false;
+        if (string.IsNullOrWhiteSpace(streamingMessage.Content))
+            return false;
+
+        if (!chat.Messages.Any(message => message.Id == streamingMessage.Id))
+            chat.Messages.Add(streamingMessage);
+
+        return true;
+    }
+
+    internal static void FinalizeTerminalReasoningMessage(ChatMessage reasoningMessage)
+        => reasoningMessage.IsStreaming = false;
 
     private static string? NormalizeAssistantContent(string? content)
         => content?.TrimStart('\n', '\r');
@@ -80,6 +95,17 @@ public partial class ChatViewModel
         return added ? target : null;
     }
 
+    /// <summary>
+    /// Whether sub-agent output suppression is currently active for a chat. Driven SOLELY by
+    /// genuine nested sub-agent execution (<c>subagent.started</c>/<c>subagent.completed</c>,
+    /// tracked by <see cref="ChatRuntimeState.ActiveSubagentExecutionDepth"/>). The
+    /// <c>subagent.selected</c>/<c>subagent.deselected</c> events must NOT feed into this — the
+    /// CLI emits them only for the top-level configured agent (config.Agent), so gating on them
+    /// dropped the entire main turn whenever a Lumi agent was selected.
+    /// </summary>
+    internal static bool SubagentOutputIsActive(ChatRuntimeState runtime)
+        => Volatile.Read(ref runtime.ActiveSubagentExecutionDepth) > 0;
+
     /// <summary>Subscribes to events on a CopilotSession. Each subscription captures its own
     /// streaming state via closures and always updates the Chat model. UI updates are gated
     /// on _activeSession so only the displayed chat's events touch the UI.</summary>
@@ -100,14 +126,14 @@ public partial class ChatViewModel
             ? _dataStore.Data.Agents.FirstOrDefault(agent => agent.Id == chat.AgentId.Value)?.Name ?? Loc.Author_Lumi
             : Loc.Author_Lumi;
         var runtime = GetOrCreateRuntimeState(chat.Id);
+        var projectContextCatalog = GetProjectContextCatalog(chat, workDir);
         var toolParentById = new Dictionary<string, string?>(StringComparer.Ordinal);
         var terminalRootByToolCallId = new Dictionary<string, string>(StringComparer.Ordinal);
         var externalToolCallIdByRequestId = new Dictionary<string, string>(StringComparer.Ordinal);
         var completedToolStatusesByCallId = new Dictionary<string, string>(StringComparer.Ordinal);
+        var completedToolOutputsByCallId = new Dictionary<string, string>(StringComparer.Ordinal);
         StreamingTextAccumulator? assistantStream = null;
         StreamingTextAccumulator? reasoningStream = null;
-        var activeSubagentSelectionDepth = 0;
-        var activeSubagentExecutionDepth = 0;
         var subagentStateGate = new object();
         var activeSubagentToolCallIds = new List<string>();
         var subagentAssistantStreams = new Dictionary<string, StreamingTextAccumulator>(StringComparer.Ordinal);
@@ -133,7 +159,14 @@ public partial class ChatViewModel
             pendingFetchedSources.Clear();
 
             if (updatedMessage is not null && IsDisplayedSession())
-                RebuildTranscript();
+            {
+                // Update the sources section in place. A full RebuildTranscript() here would
+                // re-parse the entire mounted tail's markdown (heavy for long answers), which is
+                // the stutter felt when a web-search chat finishes writing. Fall back to a rebuild
+                // only if the live assistant item can't be found.
+                if (!_transcriptBuilder.RefreshAssistantSources(updatedMessage))
+                    RebuildTranscript();
+            }
         }
 
         bool IsDisplayedSession() => CurrentChat?.Id == chat.Id && _activeSession == session;
@@ -221,8 +254,7 @@ public partial class ChatViewModel
 
 
         bool IsSubagentOutputActive()
-            => Volatile.Read(ref activeSubagentSelectionDepth) > 0
-               || Volatile.Read(ref activeSubagentExecutionDepth) > 0;
+            => SubagentOutputIsActive(runtime);
 
         static string? GetSubagentToolCallIdFromParent(string? parentToolCallId)
             => string.IsNullOrWhiteSpace(parentToolCallId) ? null : parentToolCallId;
@@ -258,25 +290,28 @@ public partial class ChatViewModel
             }
         }
 
-        void UnregisterActiveSubagent(string? toolCallId)
+        bool UnregisterActiveSubagent(string? toolCallId)
         {
             if (string.IsNullOrWhiteSpace(toolCallId))
-                return;
+                return false;
 
             lock (subagentStateGate)
             {
+                var removed = false;
                 for (var i = activeSubagentToolCallIds.Count - 1; i >= 0; i--)
                 {
                     if (!string.Equals(activeSubagentToolCallIds[i], toolCallId, StringComparison.Ordinal))
                         continue;
 
                     activeSubagentToolCallIds.RemoveAt(i);
+                    removed = true;
                     break;
                 }
 
                 mostRecentSubagentToolCallId = activeSubagentToolCallIds.Count > 0
                     ? activeSubagentToolCallIds[^1]
                     : toolCallId;
+                return removed;
             }
         }
 
@@ -423,8 +458,7 @@ public partial class ChatViewModel
 
         void ResetSubagentOutputState()
         {
-            Volatile.Write(ref activeSubagentSelectionDepth, 0);
-            Volatile.Write(ref activeSubagentExecutionDepth, 0);
+            Volatile.Write(ref runtime.ActiveSubagentExecutionDepth, 0);
             List<StreamingTextAccumulator> streamsToDispose = [];
             lock (subagentStateGate)
             {
@@ -521,6 +555,40 @@ public partial class ChatViewModel
             }
         }
 
+        void FinalizeCompletedTurnStreams(bool shouldUpdateDisplayedChatUi)
+        {
+            FlushAssistantDelta();
+            if (streamingMsg is not null)
+            {
+                _inProgressMessages.Remove(chat.Id);
+                if (FinalizeTerminalAssistantMessage(chat, streamingMsg))
+                {
+                    if (shouldUpdateDisplayedChatUi)
+                        streamingVm?.NotifyStreamingEnded();
+                }
+                else if (shouldUpdateDisplayedChatUi && streamingVm is not null)
+                {
+                    Messages.Remove(streamingVm);
+                }
+
+                streamingMsg = null;
+                streamingVm = null;
+            }
+            assistantStream.Clear();
+
+            FlushReasoningDelta();
+            if (reasoningMsg is not null)
+            {
+                FinalizeTerminalReasoningMessage(reasoningMsg);
+                if (shouldUpdateDisplayedChatUi)
+                    reasoningVm?.NotifyStreamingEnded();
+
+                reasoningMsg = null;
+                reasoningVm = null;
+            }
+            reasoningStream.Clear();
+        }
+
         assistantStream = new StreamingTextAccumulator(
             4096,
             TimeSpan.FromMilliseconds(StreamingUiUpdateThrottleMs),
@@ -530,7 +598,7 @@ public partial class ChatViewModel
             TimeSpan.FromMilliseconds(StreamingUiUpdateThrottleMs),
             FlushReasoningDelta);
 
-        var sessionSubscription = session.On(evt =>
+        var sessionSubscription = session.On<SessionEvent>(evt =>
         {
             try
             {
@@ -540,22 +608,18 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                         turnModelId = ResolveSelectedModelForChat(chat);
-                        runtime.IsBusy = true;
-                        runtime.IsStreaming = true;
-                        runtime.StatusText = Loc.Status_Thinking;
+                        MarkRuntimeActive(runtime, Loc.Status_Thinking);
                         if (IsDisplayedSession())
-                        {
-                            IsBusy = runtime.IsBusy;
-                            IsStreaming = runtime.IsStreaming;
-                            StatusText = runtime.StatusText;
-                        }
+                            ApplyDisplayedRuntimeState(runtime);
                     });
                     break;
 
                 case AssistantMessageDeltaEvent delta:
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent stream routing.
                     var activeSubagentToolCallIdForAssistantDelta =
                         GetSubagentToolCallIdFromParent(delta.Data.ParentToolCallId)
                         ?? GetCurrentSubagentOutputToolCallId();
+#pragma warning restore CS0618
                     if (!string.IsNullOrWhiteSpace(activeSubagentToolCallIdForAssistantDelta))
                     {
                         GetOrCreateSubagentStream(
@@ -572,9 +636,11 @@ public partial class ChatViewModel
                     break;
 
                 case AssistantMessageEvent msg:
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent stream routing.
                     var activeSubagentToolCallIdForAssistantMessage =
                         GetSubagentToolCallIdFromParent(msg.Data.ParentToolCallId)
                         ?? GetCurrentSubagentOutputToolCallId();
+#pragma warning restore CS0618
                     if (!string.IsNullOrWhiteSpace(activeSubagentToolCallIdForAssistantMessage))
                     {
                         var subagentAssistantStream = GetSubagentStream(
@@ -759,6 +825,7 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                     var startToolCallId = toolStart.Data.ToolCallId;
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent tool grouping.
                     toolParentById[startToolCallId] = toolStart.Data.ParentToolCallId;
                     if (toolStart.Data.ToolName == "powershell")
                     {
@@ -772,9 +839,17 @@ public partial class ChatViewModel
                     }
 
                     var displayName = ToolDisplayHelper.FormatToolStatusName(toolStart.Data.ToolName, toolStart.Data.Arguments?.ToString());
-                    runtime.StatusText = ToolDisplayHelper.FormatProgressLabel(displayName);
+                    MarkRuntimeActive(
+                        runtime,
+                        ToolDisplayHelper.FormatProgressLabel(displayName),
+                        isStreaming: runtime.IsStreaming);
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == startToolCallId);
                     var toolStatus = completedToolStatusesByCallId.GetValueOrDefault(startToolCallId) ?? "InProgress";
+                    var completedToolOutput = toolStatus == "Failed"
+                        && completedToolOutputsByCallId.TryGetValue(startToolCallId, out var cachedCompletedToolOutput)
+                            ? cachedCompletedToolOutput
+                            : null;
+                    var shouldSaveCachedFailureOutput = toolStatus == "Failed" && !string.IsNullOrWhiteSpace(completedToolOutput);
                     if (toolMsg is null)
                     {
                         toolMsg = new ChatMessage
@@ -784,6 +859,7 @@ public partial class ChatViewModel
                             ParentToolCallId = toolStart.Data.ParentToolCallId,
                             ToolName = toolStart.Data.ToolName,
                             ToolStatus = toolStatus,
+                            ToolOutput = completedToolOutput,
                             Content = toolStart.Data.Arguments?.ToString() ?? "",
                             Author = displayName
                         };
@@ -792,11 +868,18 @@ public partial class ChatViewModel
                     else
                     {
                         toolMsg.ParentToolCallId = toolStart.Data.ParentToolCallId;
+#pragma warning restore CS0618
                         toolMsg.ToolName = toolStart.Data.ToolName;
                         toolMsg.ToolStatus = toolStatus;
+                        if (toolStatus == "Failed")
+                            toolMsg.ToolOutput = completedToolOutput;
+
                         toolMsg.Content = toolStart.Data.Arguments?.ToString() ?? "";
                         toolMsg.Author = displayName;
                     }
+
+                    if (shouldSaveCachedFailureOutput)
+                        QueueSaveChat(chat, saveIndex: false);
 
                     if (IsDisplayedSession())
                     {
@@ -812,7 +895,7 @@ public partial class ChatViewModel
                             vm.NotifyToolStatusChanged();
                         }
 
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     }
                     });
                     break;
@@ -867,14 +950,26 @@ public partial class ChatViewModel
                         SchedulePostToolReconciliation(chat.Id);
                     var completedToolStatus = toolEnd.Data.Success == true ? "Completed" : "Failed";
                     completedToolStatusesByCallId[toolEnd.Data.ToolCallId] = completedToolStatus;
+                    var completedToolOutput = toolEnd.Data.Success == true
+                        ? null
+                        : ToolDisplayHelper.ExtractFailedToolOutput(toolEnd.Data.Error, toolEnd.Data.Result);
+                    if (!string.IsNullOrWhiteSpace(completedToolOutput))
+                        completedToolOutputsByCallId[toolEnd.Data.ToolCallId] = completedToolOutput;
+                    else
+                        completedToolOutputsByCallId.Remove(toolEnd.Data.ToolCallId);
                     Dispatcher.UIThread.Post(() =>
                     {
+#pragma warning disable CS0618 // ParentToolCallId is deprecated in GitHub.Copilot.SDK 1.0.1 with no replacement; still required for sub-agent tool grouping.
                     toolParentById[toolEnd.Data.ToolCallId] = toolEnd.Data.ParentToolCallId;
+#pragma warning restore CS0618
 
                     var success = toolEnd.Data.Success == true;
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == toolEnd.Data.ToolCallId);
                     if (toolMsg is not null)
                     {
+                        if (!success)
+                            toolMsg.ToolOutput = completedToolOutput;
+
                         toolMsg.ToolStatus = success ? "Completed" : "Failed";
                         if (IsDisplayedSession())
                         {
@@ -883,9 +978,27 @@ public partial class ChatViewModel
                         }
 
                         var toolName = toolMsg.ToolName;
+                        if (!success)
+                        {
+                            if (!string.IsNullOrWhiteSpace(completedToolOutput))
+                            {
+                                QueueSaveChat(chat, saveIndex: false);
+                            }
+                        }
 
                         if (success)
                         {
+                            // Keep the coding strip's git change count live as the agent
+                            // edits files, independent of the IsBusy turn lifecycle. This
+                            // tool-completion signal is reliable; SessionWorkspaceFileChangedEvent
+                            // is not always emitted. powershell is included because the agent
+                            // frequently mutates the repo (git, builds, file moves) through it.
+                            if (IsDisplayedSession()
+                                && (ToolDisplayHelper.IsFileCreationTool(toolName) || toolName == "powershell"))
+                            {
+                                QueueLiveGitRefresh();
+                            }
+
                             // fetch_skill tracking is handled by TranscriptBuilder.ProcessToolMessage()
 
                             if (ToolDisplayHelper.IsWebFetchTool(toolName)
@@ -913,7 +1026,7 @@ public partial class ChatViewModel
                             }
                         }
 
-                        if (ToolDisplayHelper.IsTerminalStreamingTool(toolName) && IsDisplayedSession())
+                        if (success && ToolDisplayHelper.IsTerminalStreamingTool(toolName) && IsDisplayedSession())
                         {
                             var rootToolCallId = ToolDisplayHelper.ResolveRootTerminalToolCallId(
                                 toolEnd.Data.ToolCallId, toolParentById, terminalRootByToolCallId);
@@ -939,10 +1052,18 @@ public partial class ChatViewModel
                     {
                     var arguments = externalToolRequest.Data.Arguments?.ToString();
                     var displayName = ToolDisplayHelper.FormatToolStatusName(externalToolRequest.Data.ToolName, arguments);
-                    runtime.StatusText = ToolDisplayHelper.FormatProgressLabel(displayName);
+                    MarkRuntimeActive(
+                        runtime,
+                        ToolDisplayHelper.FormatProgressLabel(displayName),
+                        isStreaming: runtime.IsStreaming);
 
                     var toolMsg = chat.Messages.LastOrDefault(m => m.ToolCallId == externalToolRequest.Data.ToolCallId);
                     var toolStatus = completedToolStatusesByCallId.GetValueOrDefault(externalToolRequest.Data.ToolCallId) ?? "InProgress";
+                    var completedToolOutput = toolStatus == "Failed"
+                        && completedToolOutputsByCallId.TryGetValue(externalToolRequest.Data.ToolCallId, out var cachedCompletedToolOutput)
+                            ? cachedCompletedToolOutput
+                            : null;
+                    var shouldSaveCachedFailureOutput = toolStatus == "Failed" && !string.IsNullOrWhiteSpace(completedToolOutput);
                     if (toolMsg is null)
                     {
                         toolMsg = new ChatMessage
@@ -951,6 +1072,7 @@ public partial class ChatViewModel
                             ToolCallId = externalToolRequest.Data.ToolCallId,
                             ToolName = externalToolRequest.Data.ToolName,
                             ToolStatus = toolStatus,
+                            ToolOutput = completedToolOutput,
                             Content = arguments ?? "",
                             Author = displayName
                         };
@@ -960,9 +1082,15 @@ public partial class ChatViewModel
                     {
                         toolMsg.ToolName = externalToolRequest.Data.ToolName;
                         toolMsg.ToolStatus = toolStatus;
+                        if (toolStatus == "Failed")
+                            toolMsg.ToolOutput = completedToolOutput;
+
                         toolMsg.Content = arguments ?? "";
                         toolMsg.Author = displayName;
                     }
+
+                    if (shouldSaveCachedFailureOutput)
+                        QueueSaveChat(chat, saveIndex: false);
 
                     if (IsDisplayedSession())
                     {
@@ -978,7 +1106,7 @@ public partial class ChatViewModel
                             vm.NotifyToolStatusChanged();
                         }
 
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     }
                     });
                     break;
@@ -1010,9 +1138,9 @@ public partial class ChatViewModel
                 case CommandQueuedEvent commandQueued:
                     Dispatcher.UIThread.Post(() =>
                     {
-                    runtime.StatusText = $"Queued command: {commandQueued.Data.Command}";
+                    MarkRuntimeActive(runtime, $"Queued command: {commandQueued.Data.Command}", isStreaming: runtime.IsStreaming);
                     if (IsDisplayedSession())
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     });
                     break;
 
@@ -1020,22 +1148,28 @@ public partial class ChatViewModel
                     ClearManualStopRequested(chat.Id);
                     assistantStream.CancelPending();
                     reasoningStream.CancelPending();
-                    ResetSubagentOutputState();
+                    if (!IsSubagentOutputActive())
+                        ResetSubagentOutputState();
                     Dispatcher.UIThread.Post(() =>
                     {
-                    runtime.IsBusy = false;
-                    runtime.IsStreaming = false;
-                    runtime.StatusText = "";
-                    if (IsDisplayedSession())
-                    {
-                        _transcriptBuilder.HideTypingIndicator();
-                        _transcriptBuilder.CloseCurrentToolGroup();
-                        _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
-                        IsBusy = runtime.IsBusy;
-                        IsStreaming = runtime.IsStreaming;
-                        StatusText = runtime.StatusText;
-                    }
-                    QueueSaveChat(chat, saveIndex: true, touchIndex: true);
+                        var shouldUpdateDisplayedChatUi = IsDisplayedSession();
+                        FinalizeCompletedTurnStreams(shouldUpdateDisplayedChatUi);
+                        DropCompletedTurnState(chat.Id, dropCancellation: false);
+                        MarkRuntimeWaitingForSessionIdle(runtime);
+                        if (runtime.IsBusy)
+                            SchedulePostToolReconciliation(chat.Id, treatCompletedTurnAsIdle: true);
+                        if (shouldUpdateDisplayedChatUi)
+                        {
+                            if (!runtime.IsBusy)
+                            {
+                                _transcriptBuilder.HideTypingIndicator();
+                                _transcriptBuilder.CloseCurrentToolGroup();
+                                _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
+                            }
+
+                            ApplyDisplayedRuntimeState(runtime);
+                        }
+                        QueueSaveChat(chat, saveIndex: true, touchIndex: true);
                     });
                     break;
 
@@ -1044,59 +1178,74 @@ public partial class ChatViewModel
                     // after session.idle when the background queue drains. Treat it as
                     // "pending" only while the current turn is still active locally.
                     if (ShouldMarkBackgroundWorkPending(runtime))
+                    {
                         runtime.HasPendingBackgroundWork = true;
+                        Dispatcher.UIThread.Post(() =>
+                        {
+                            MarkRuntimeActive(runtime, isStreaming: false, hasPendingBackgroundWork: true);
+                            if (IsDisplayedSession())
+                                ApplyDisplayedRuntimeState(runtime);
+                        });
+                    }
                     break;
 
                 case SessionIdleEvent:
                     ClearManualStopRequested(chat.Id);
                     ClearPendingTurnTracking(chat.Id);
+                    DropCompletedTurnState(chat.Id, dropCancellation: true);
+                    assistantStream.CancelPending();
+                    reasoningStream.CancelPending();
 
-                    // Show model label once at the very end of the assistant turn
-                    // (not per-message during agentic loops).
                     Dispatcher.UIThread.Post(() =>
                     {
+                        var shouldUpdateDisplayedChatUi = IsDisplayedSession();
+                        FinalizeCompletedTurnStreams(shouldUpdateDisplayedChatUi);
                         AttachPendingSourcesToFinalAssistantMessage();
 
-                        if (IsDisplayedSession())
+                        // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
+                        // Clearing IsBusy updates Chat.IsRunning, so keep it on the UI thread.
+                        MarkRuntimeTerminal(runtime);
+
+                        // Mark chat as unread if user is on a different chat
+                        if (CurrentChat?.Id != chat.Id)
+                            chat.HasUnreadMessages = true;
+
+                        if (_dataStore.Data.Settings.NotificationsEnabled)
                         {
+                            var chatTitle = chat.Title;
+                            var body = string.IsNullOrWhiteSpace(chatTitle)
+                                ? Loc.Notification_ResponseReady
+                                : $"{chatTitle} — {Loc.Notification_ResponseReady}";
+                            NotificationService.ShowIfInactive(agentName, body, chat.Id);
+                        }
+
+                        // Flush file changes only when session is truly idle (not between agentic turns).
+                        if (shouldUpdateDisplayedChatUi)
+                        {
+                            // Show model label once at the very end of the assistant turn
+                            // (not per-message during agentic loops).
                             _transcriptBuilder.AppendModelLabel(turnModelId);
+                            ApplyDisplayedRuntimeState(runtime);
+                            _transcriptBuilder.CloseCurrentToolGroup();
+                            _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
+                            _transcriptBuilder.FlushPendingFileEdits();
+                            // FlushPendingFileEdits appends this turn's file-change summary *after*
+                            // the IsBusy=false rebuild already ran, so rebuild once more — otherwise
+                            // the Workspace Changes/Files tabs miss this turn's edits until the next one.
+                            RebuildWorkspacePanel();
                             ScrollToEndRequested?.Invoke();
                         }
-                    });
 
-                    // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
-                    MarkRuntimeTerminal(runtime);
+                        // Memory checkpoint + suggestions only when session is truly idle.
+                        // Running these on every AssistantTurnEndEvent creates a storm of
+                        // background sessions that can starve the CLI process and stall
+                        // all active sessions.
+                        QueueChatCompletionFollowUps(chat);
 
-                    Dispatcher.UIThread.Post(() =>
-                    {
-                    // Mark chat as unread if user is on a different chat
-                    if (CurrentChat?.Id != chat.Id)
-                        chat.HasUnreadMessages = true;
-
-                    if (_dataStore.Data.Settings.NotificationsEnabled)
-                    {
-                        var chatTitle = chat.Title;
-                        var body = string.IsNullOrWhiteSpace(chatTitle)
-                            ? Loc.Notification_ResponseReady
-                            : $"{chatTitle} — {Loc.Notification_ResponseReady}";
-                        NotificationService.ShowIfInactive(agentName, body, chat.Id);
-                    }
-
-                    // Flush file changes only when session is truly idle (not between agentic turns).
-                    if (IsDisplayedSession())
-                    {
-                        _transcriptBuilder.FlushPendingFileEdits();
-                        ScrollToEndRequested?.Invoke();
-                    }
-
-                    // Memory checkpoint + suggestions only when session is truly idle.
-                    // Running these on every AssistantTurnEndEvent creates a storm of
-                    // background sessions that can starve the CLI process and stall
-                    // all active sessions.
-                    QueueChatCompletionFollowUps(chat);
-
-                    if (CurrentChat?.Id != chat.Id)
-                        QueueSaveChat(chat, saveIndex: false, releaseIfInactive: true);
+                        if (CurrentChat?.Id != chat.Id)
+                            QueueSaveChat(chat, saveIndex: false, releaseIfInactive: true);
+                        else
+                            QueueSaveChat(chat, saveIndex: false);
                     });
                     break;
 
@@ -1147,6 +1296,18 @@ public partial class ChatViewModel
                         }
                         reasoningStream.Clear();
 
+                        // A PROVABLY transient backend-internal failure (twirp/usersd, or a 5xx
+                        // "unavailable") is not a real logout: the credential is still valid and a
+                        // plain resend recovers. Surface it as a one-click retry affordance instead
+                        // of a terminal error. A bare/ambiguous 401/403 is NOT matched, so a genuine
+                        // logout falls through to the terminal error path below and routes to re-auth.
+                        if (CopilotService.IsTransientServerAuthError(
+                                err.Data.StatusCode, err.Data.ErrorType, err.Data.Message))
+                        {
+                            ApplyUnexpectedAbortState(chat, Loc.Status_TransientAuthRetry, shouldUpdateDisplayedChatUi);
+                            return;
+                        }
+
                         MarkRuntimeTerminal(runtime, string.Format(Loc.Status_Error, err.Data.Message));
                         if (shouldUpdateDisplayedChatUi)
                         {
@@ -1179,9 +1340,9 @@ public partial class ChatViewModel
                 case SessionCompactionStartEvent:
                     Dispatcher.UIThread.Post(() =>
                     {
-                    runtime.StatusText = Loc.Status_Compacting;
+                    MarkRuntimeActive(runtime, Loc.Status_Compacting, isStreaming: false);
                     if (IsDisplayedSession())
-                        StatusText = runtime.StatusText;
+                        ApplyDisplayedRuntimeState(runtime);
                     });
                     break;
 
@@ -1367,34 +1528,34 @@ public partial class ChatViewModel
                     {
                     if (!string.IsNullOrWhiteSpace(intent.Data.Intent))
                     {
-                        runtime.StatusText = intent.Data.Intent;
+                        MarkRuntimeActive(runtime, intent.Data.Intent, isStreaming: runtime.IsStreaming);
                         if (IsDisplayedSession())
-                            StatusText = runtime.StatusText;
+                            ApplyDisplayedRuntimeState(runtime);
                     }
                     });
                     break;
 
                 case SubagentSelectedEvent:
-                    Interlocked.Increment(ref activeSubagentSelectionDepth);
-                    break;
-
                 case SubagentDeselectedEvent:
-                    if (Volatile.Read(ref activeSubagentSelectionDepth) > 0)
-                        Interlocked.Decrement(ref activeSubagentSelectionDepth);
-                    if (!IsSubagentOutputActive())
-                    {
-                        lock (subagentStateGate)
-                            mostRecentSubagentToolCallId = null;
-                    }
+                    // Intentionally ignored for output routing. The CLI emits
+                    // subagent.selected/deselected ONLY for the top-level configured agent
+                    // (config.Agent) — once per session, with no tool call id and no matching
+                    // subagent.started/completed. They describe the MAIN agent persona, not a
+                    // nested sub-agent, so they must never gate output suppression: doing so
+                    // dropped the entire turn whenever a Lumi agent was selected, and again
+                    // after removing the agent (the resumed session still re-emits selected for
+                    // its original agent). Genuine nested sub-agents are bracketed by
+                    // subagent.started/subagent.completed (with a tool call id) and are handled
+                    // via ActiveSubagentExecutionDepth + tool-call-id routing.
                     break;
 
                 case SubagentStartedEvent subStart:
-                    Interlocked.Increment(ref activeSubagentExecutionDepth);
+                    Interlocked.Increment(ref runtime.ActiveSubagentExecutionDepth);
                     RegisterActiveSubagent(subStart.Data.ToolCallId);
                     Dispatcher.UIThread.Post(() =>
                     {
                     var displayName = subStart.Data.AgentDisplayName ?? subStart.Data.AgentName ?? "Agent";
-                    runtime.StatusText = $"⚡ {displayName}";
+                    MarkRuntimeActive(runtime, $"⚡ {displayName}", isStreaming: false);
                     var subagentPayload = BuildSubagentPayloadJson(
                         description: string.Empty,
                         agentName: subStart.Data.AgentName,
@@ -1431,7 +1592,7 @@ public partial class ChatViewModel
                         {
                             var vm = Messages.LastOrDefault(m => m.Message.ToolCallId == subStart.Data.ToolCallId);
                             vm?.NotifyContentChanged();
-                            StatusText = runtime.StatusText;
+                            ApplyDisplayedRuntimeState(runtime);
                         }
                     }
                     else
@@ -1450,7 +1611,7 @@ public partial class ChatViewModel
                         if (IsDisplayedSession())
                         {
                             Messages.Add(new ChatMessageViewModel(toolMsg));
-                            StatusText = runtime.StatusText;
+                            ApplyDisplayedRuntimeState(runtime);
                             ScrollToEndRequested?.Invoke();
                         }
                     }
@@ -1458,9 +1619,12 @@ public partial class ChatViewModel
                     break;
 
                 case SubagentCompletedEvent subEnd:
-                    if (Volatile.Read(ref activeSubagentExecutionDepth) > 0)
-                        Interlocked.Decrement(ref activeSubagentExecutionDepth);
-                    UnregisterActiveSubagent(subEnd.Data.ToolCallId);
+                    // Decrement once per still-registered sub-agent so duplicate or
+                    // out-of-order completion/failure events for the same tool call cannot
+                    // under-count the depth (which would clear busy while siblings run).
+                    if (UnregisterActiveSubagent(subEnd.Data.ToolCallId)
+                        && Volatile.Read(ref runtime.ActiveSubagentExecutionDepth) > 0)
+                        Interlocked.Decrement(ref runtime.ActiveSubagentExecutionDepth);
                     CompleteSubagentStreams(subEnd.Data.ToolCallId);
                     Dispatcher.UIThread.Post(() =>
                     {
@@ -1477,9 +1641,9 @@ public partial class ChatViewModel
                     break;
 
                 case SubagentFailedEvent subFail:
-                    if (Volatile.Read(ref activeSubagentExecutionDepth) > 0)
-                        Interlocked.Decrement(ref activeSubagentExecutionDepth);
-                    UnregisterActiveSubagent(subFail.Data.ToolCallId);
+                    if (UnregisterActiveSubagent(subFail.Data.ToolCallId)
+                        && Volatile.Read(ref runtime.ActiveSubagentExecutionDepth) > 0)
+                        Interlocked.Decrement(ref runtime.ActiveSubagentExecutionDepth);
                     CompleteSubagentStreams(subFail.Data.ToolCallId);
                     Dispatcher.UIThread.Post(() =>
                     {
@@ -1507,11 +1671,20 @@ public partial class ChatViewModel
                         runtime.TotalOutputTokens += (long)(d.OutputTokens ?? 0);
                         // Each API call sends the full conversation context, so the latest
                         // InputTokens is the best proxy for current context window usage.
+                        var usageModel = string.IsNullOrWhiteSpace(d.Model)
+                            ? ResolveSelectedModelForChat(chat)
+                            : d.Model;
+                        var (fallbackModelId, fallbackTier) = ResolveCatalogFallbackContextWindowSelection(
+                            chat,
+                            runtime,
+                            usageModel);
+                        var knownTokenLimit = ResolveKnownContextTokenLimit(fallbackModelId, fallbackTier);
                         ApplyContextUsage(
                             chat,
                             runtime,
                             turnInput > 0 ? turnInput : null,
-                            ResolveKnownContextTokenLimit(d.Model) is > 0 and var modelTokenLimit ? modelTokenLimit : null,
+                            knownTokenLimit > 0 ? knownTokenLimit : null,
+                            ContextTokenLimitSource.Catalog,
                             IsDisplayedSession());
                         // Persist token counts to the Chat model so they survive restarts.
                         chat.TotalInputTokens = runtime.TotalInputTokens;
@@ -1529,12 +1702,22 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                         var currentTokens = NormalizeTokenCount(sessionUsage.Data.CurrentTokens);
-                        var tokenLimit = NormalizeTokenCount(sessionUsage.Data.TokenLimit);
+                        var eventTokenLimit = NormalizeTokenCount(sessionUsage.Data.TokenLimit);
+                        var requestedModel = ResolveSelectedModelForChat(chat);
+                        var (fallbackModelId, fallbackTier) = ResolveCatalogFallbackContextWindowSelection(
+                            chat,
+                            runtime,
+                            requestedModel);
+                        var knownTokenLimit = ResolveKnownContextTokenLimit(fallbackModelId, fallbackTier);
+                        var (tokenLimit, tokenLimitSource) = ResolveContextTokenLimitFromSessionUsage(
+                            eventTokenLimit,
+                            knownTokenLimit);
                         ApplyContextUsage(
                             chat,
                             runtime,
                             currentTokens > 0 ? currentTokens : null,
                             tokenLimit > 0 ? tokenLimit : null,
+                            tokenLimitSource,
                             IsDisplayedSession());
                     });
                     break;
@@ -1544,7 +1727,7 @@ public partial class ChatViewModel
                     {
                     if (!string.IsNullOrWhiteSpace(skillInvoked.Data.Name))
                     {
-                        var skill = FindSkillReferenceByName(skillInvoked.Data.Name, workDir);
+                        var skill = FindSkillReferenceByName(skillInvoked.Data.Name, projectContextCatalog);
                         pendingFetchedSkillRefs.Add(new SkillReference
                         {
                             Name = skill?.Name ?? skillInvoked.Data.Name,
@@ -1561,22 +1744,16 @@ public partial class ChatViewModel
                     var effectiveModel = !string.IsNullOrWhiteSpace(start.Data.SelectedModel)
                         ? start.Data.SelectedModel
                         : ResolveSelectedModelForChat(chat);
-                    if (!string.IsNullOrWhiteSpace(effectiveModel))
-                    {
-                        if (IsDisplayedSession() && !AvailableModels.Contains(effectiveModel))
-                            AvailableModels.Add(effectiveModel);
-                        chat.LastModelUsed = effectiveModel;
-                        ApplyKnownContextTokenLimit(chat, runtime, effectiveModel, IsDisplayedSession());
-                    }
+                    if (IsDisplayedSession() && !string.IsNullOrWhiteSpace(effectiveModel) && !AvailableModels.Contains(effectiveModel))
+                        AvailableModels.Add(effectiveModel);
 
-                    chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
-                        start.Data.ReasoningEffort,
+                    ApplySessionModelState(
+                        chat,
+                        runtime,
                         effectiveModel,
-                        _modelReasoningEfforts,
-                        _modelDefaultEfforts);
-
-                    if (IsDisplayedSession() && !string.IsNullOrWhiteSpace(effectiveModel))
-                        ApplyModelSelection(effectiveModel, chat.LastReasoningEffortUsed);
+                        start.Data.ReasoningEffort,
+                        start.Data.ContextTier,
+                        IsDisplayedSession());
 
                     QueueModelSelectionSave(chat);
                     });
@@ -1599,22 +1776,16 @@ public partial class ChatViewModel
                     var effectiveModel = !string.IsNullOrWhiteSpace(resume.Data.SelectedModel)
                         ? resume.Data.SelectedModel
                         : ResolveSelectedModelForChat(chat);
-                    if (!string.IsNullOrWhiteSpace(effectiveModel))
-                    {
-                        if (IsDisplayedSession() && !AvailableModels.Contains(effectiveModel))
-                            AvailableModels.Add(effectiveModel);
-                        chat.LastModelUsed = effectiveModel;
-                        ApplyKnownContextTokenLimit(chat, runtime, effectiveModel, IsDisplayedSession());
-                    }
+                    if (IsDisplayedSession() && !string.IsNullOrWhiteSpace(effectiveModel) && !AvailableModels.Contains(effectiveModel))
+                        AvailableModels.Add(effectiveModel);
 
-                    chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
-                        resume.Data.ReasoningEffort,
+                    ApplySessionModelState(
+                        chat,
+                        runtime,
                         effectiveModel,
-                        _modelReasoningEfforts,
-                        _modelDefaultEfforts);
-
-                    if (IsDisplayedSession() && !string.IsNullOrWhiteSpace(effectiveModel))
-                        ApplyModelSelection(effectiveModel, chat.LastReasoningEffortUsed);
+                        resume.Data.ReasoningEffort,
+                        resume.Data.ContextTier,
+                        IsDisplayedSession());
 
                     runtime.StatusText = "";
                     if (IsDisplayedSession())
@@ -1631,15 +1802,13 @@ public partial class ChatViewModel
                     {
                         if (IsDisplayedSession() && !AvailableModels.Contains(modelChange.Data.NewModel))
                             AvailableModels.Add(modelChange.Data.NewModel);
-                        chat.LastModelUsed = modelChange.Data.NewModel;
-                        ApplyKnownContextTokenLimit(chat, runtime, modelChange.Data.NewModel, IsDisplayedSession());
-                        chat.LastReasoningEffortUsed = ModelSelectionHelper.NormalizeEffort(
-                            chat.LastReasoningEffortUsed ?? ResolvePersistedReasoningEffortForChat(chat, modelChange.Data.NewModel),
+                        ApplySessionModelState(
+                            chat,
+                            runtime,
                             modelChange.Data.NewModel,
-                            _modelReasoningEfforts,
-                            _modelDefaultEfforts);
-                        if (IsDisplayedSession())
-                            ApplyModelSelection(modelChange.Data.NewModel, chat.LastReasoningEffortUsed);
+                            modelChange.Data.ReasoningEffort,
+                            modelChange.Data.ContextTier,
+                            IsDisplayedSession());
                         // Update in-flight streaming message with the actual model used
                         if (streamingMsg is not null)
                             streamingMsg.Model = modelChange.Data.NewModel;
@@ -1680,6 +1849,9 @@ public partial class ChatViewModel
                         {
                             Messages.Add(new ChatMessageViewModel(toolMsg));
                             ScrollToEndRequested?.Invoke();
+                            // Keep the coding strip's change count live as the agent edits
+                            // files, independent of the IsBusy turn lifecycle.
+                            QueueLiveGitRefresh();
                         }
                     });
                     break;
@@ -1688,28 +1860,41 @@ public partial class ChatViewModel
                     // Mode API removed — Lumi always uses the server default (interactive).
                     break;
 
+                case SessionMcpServerStatusChangedEvent mcpStatusChanged:
+                    // Live MCP lifecycle: keep the composer chip in sync as servers connect, drop, or
+                    // need auth mid-conversation, and drive interactive OAuth when a remote server
+                    // requests it. Fire-and-forget; the handler marshals its own UI updates.
+                    _ = HandleMcpServerStatusAsync(
+                        session,
+                        chat.Id,
+                        mcpStatusChanged.Data.ServerName,
+                        mcpStatusChanged.Data.Status,
+                        mcpStatusChanged.Data.Error,
+                        CancellationToken.None);
+                    break;
+
                 case SessionPlanChangedEvent planChanged:
                     Dispatcher.UIThread.Post(() =>
                     {
-                    if (!IsDisplayedSession()) return;
-                    switch (planChanged.Data.Operation)
-                    {
-                        case PlanChangedOperation.Create:
-                        case PlanChangedOperation.Update:
+                        if (!IsDisplayedSession()) return;
+
+                        var operation = planChanged.Data.Operation;
+                        if (operation == PlanChangedOperation.Create || operation == PlanChangedOperation.Update)
+                        {
                             HasPlan = true;
                             _ = RefreshPlan();
                             StagePlanCard(
-                                planChanged.Data.Operation == PlanChangedOperation.Create
+                                operation == PlanChangedOperation.Create
                                     ? "Created a plan"
                                     : "Updated the plan");
                             PlanShowRequested?.Invoke();
-                            break;
-                        case PlanChangedOperation.Delete:
+                        }
+                        else if (operation == PlanChangedOperation.Delete)
+                        {
                             HasPlan = false;
                             PlanContent = null;
                             PlanHideRequested?.Invoke();
-                            break;
-                    }
+                        }
                     });
                     break;
 
@@ -1769,14 +1954,57 @@ public partial class ChatViewModel
         runtime.IsBusy = false;
         runtime.IsStreaming = false;
         runtime.HasPendingBackgroundWork = false;
+        runtime.ActiveSubagentExecutionDepth = 0;
         runtime.StatusText = statusText ?? string.Empty;
     }
 
-    private static bool ShouldMarkBackgroundWorkPending(ChatRuntimeState runtime)
+    private static void MarkRuntimeActive(
+        ChatRuntimeState runtime,
+        string? statusText = null,
+        bool isStreaming = true,
+        bool hasPendingBackgroundWork = false)
+    {
+        runtime.StatusText = string.IsNullOrWhiteSpace(statusText)
+            ? string.IsNullOrWhiteSpace(runtime.StatusText) ? Loc.Status_Thinking : runtime.StatusText
+            : statusText;
+        runtime.IsStreaming = isStreaming;
+        if (hasPendingBackgroundWork)
+            runtime.HasPendingBackgroundWork = true;
+        runtime.IsBusy = true;
+    }
+
+    private void ApplyDisplayedRuntimeState(ChatRuntimeState runtime)
+    {
+        StatusText = runtime.StatusText;
+        IsStreaming = runtime.IsStreaming;
+        IsBusy = runtime.IsBusy;
+    }
+
+    private static void MarkRuntimeWaitingForSessionIdle(ChatRuntimeState runtime)
+    {
+        runtime.IsStreaming = false;
+        if (ShouldKeepRuntimeBusyUntilSessionIdle(runtime))
+        {
+            MarkRuntimeActive(
+                runtime,
+                string.IsNullOrWhiteSpace(runtime.StatusText) ? Loc.Status_Thinking : runtime.StatusText,
+                isStreaming: false,
+                hasPendingBackgroundWork: runtime.HasPendingBackgroundWork);
+            return;
+        }
+
+        MarkRuntimeTerminal(runtime);
+    }
+
+    private static bool ShouldKeepRuntimeBusyUntilSessionIdle(ChatRuntimeState runtime)
         => runtime.PendingSessionUserMessageCount > 0
            || runtime.ActiveToolCount > 0
-           || runtime.IsBusy
-           || runtime.IsStreaming;
+           || runtime.ActiveSubagentExecutionDepth > 0
+           || runtime.HasPendingBackgroundWork;
+
+    private static bool ShouldMarkBackgroundWorkPending(ChatRuntimeState runtime)
+        => runtime.PendingSessionUserMessageCount > 0
+           || runtime.ActiveToolCount > 0;
 
     private string ResolveWorkspaceFileChangedPath(Chat chat, string path)
     {
@@ -1788,19 +2016,7 @@ public partial class ChatViewModel
     }
 
     private string GetEffectiveWorkingDirectoryForChat(Chat chat)
-    {
-        if (chat.WorktreePath is { Length: > 0 } worktreePath && Directory.Exists(worktreePath))
-            return worktreePath;
-
-        if (chat.ProjectId.HasValue)
-        {
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == chat.ProjectId.Value);
-            if (project is { WorkingDirectory: { Length: > 0 } workingDirectory } && Directory.Exists(workingDirectory))
-                return workingDirectory;
-        }
-
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    }
+        => ResolveEffectiveWorkingDirectory(chat.ProjectId, chat.WorktreePath);
 
     private static string BuildWorkspaceFileChangedPayloadJson(
         string filePath,
@@ -1829,7 +2045,6 @@ public partial class ChatViewModel
         _runtimeStates.Remove(chatId);
         RemoveSuggestionTracking(chatId);
         DisposeBrowserService(chatId);
-        _dataStore.RemoveChatLoadLock(chatId);
     }
 
     private void DetachSessionAfterRemoteShutdown(Chat chat, bool wasActive)
@@ -1891,6 +2106,14 @@ public partial class ChatViewModel
         // Clear session cache (objects reference the dead client)
         _sessionCache.Clear();
         _activeSession = null;
+
+        // Those sessions can never reconnect, so drop their per-session OAuth chip/login state too
+        // (keyed by sessionId, this map would otherwise orphan entries on every reconnect).
+        lock (_mcpOAuthLoginLock)
+        {
+            _mcpOAuthLoginAttempts.Clear();
+            _mcpOAuthResolvedMessages.Clear();
+        }
 
         // Cancel any in-flight requests
         foreach (var cts in _ctsSources.Values)

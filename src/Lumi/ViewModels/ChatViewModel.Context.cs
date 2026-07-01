@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Models;
 using Lumi.Services;
 using StrataTheme.Controls;
@@ -87,8 +87,8 @@ public partial class ChatViewModel
 
         SyncComposerProjectSelectionFromState();
         RefreshProjectBadge();
-        RefreshComposerCatalogs(); // Re-scan workspace and user Copilot agents/skills for the new project
-        _ = RefreshCodingProjectState();
+        RefreshComposerCatalogs(); // Re-scan project-context and user Copilot agents/skills for the new project
+        QueueRefreshCodingProjectState();
     }
 
     private Guid? _pendingProjectId;
@@ -109,6 +109,7 @@ public partial class ChatViewModel
             _activeProjectFilterId = value;
             SyncComposerProjectSelectionFromState();
             RefreshProjectBadge();
+            QueueRefreshCodingProjectState();
         }
     }
 
@@ -137,8 +138,8 @@ public partial class ChatViewModel
 
         SyncComposerProjectSelectionFromState();
         RefreshProjectBadge();
-        RefreshComposerCatalogs(); // Re-scan to remove workspace and user Copilot agents/skills
-        _ = RefreshCodingProjectState();
+        RefreshComposerCatalogs(); // Re-scan to remove project-context and user Copilot agents/skills
+        QueueRefreshCodingProjectState();
     }
     public void AddSkill(Skill skill)
     {
@@ -151,7 +152,7 @@ public partial class ChatViewModel
         SyncActiveSkillsToChat();
     }
 
-    /// <summary>File-based Copilot skill names currently active for this chat.</summary>
+    /// <summary>Legacy file-based Copilot skill names from older chat metadata. New selections are not added.</summary>
     private readonly List<string> _activeExternalSkillNames = new();
 
     /// <summary>Registers a skill ID without adding a chip (composer already added it).</summary>
@@ -167,18 +168,6 @@ public partial class ChatViewModel
                 _pendingSkillInjections.Add(skill.Id);
             SyncActiveSkillsToChat();
         }
-        else
-        {
-            var externalSkill = FindExternalSkillByName(name);
-            if (externalSkill is null)
-                return;
-
-            if (_activeExternalSkillNames.Any(existing => existing.Equals(externalSkill.Name, StringComparison.OrdinalIgnoreCase)))
-                return;
-
-            _activeExternalSkillNames.Add(externalSkill.Name);
-            SyncActiveSkillsToChat();
-        }
     }
 
     private void SyncActiveSkillsToChat()
@@ -186,7 +175,7 @@ public partial class ChatViewModel
         if (CurrentChat is not null)
         {
             CurrentChat.ActiveSkillIds = new List<Guid>(ActiveSkillIds);
-            CurrentChat.ActiveExternalSkillNames = new List<string>(_activeExternalSkillNames);
+            CurrentChat.ActiveExternalSkillNames = [];
             QueueSaveChat(CurrentChat, saveIndex: true);
         }
     }
@@ -215,7 +204,7 @@ public partial class ChatViewModel
     public void AddMcpServer(string name)
     {
         if (ActiveMcpServerNames.Contains(name)) return;
-        // Accept both Lumi-configured and workspace MCPs (workspace MCPs aren't in the data store)
+        // Accept both Lumi-configured and project-context MCPs (project-context MCPs aren't in the data store)
         var isKnown = _dataStore.Data.McpServers.Any(s => s.Name == name)
                       || AvailableMcpChips.OfType<StrataTheme.Controls.StrataComposerChip>().Any(c => c.Name == name);
         if (!isKnown) return;
@@ -228,7 +217,7 @@ public partial class ChatViewModel
     public void RegisterMcpByName(string name)
     {
         if (ActiveMcpServerNames.Contains(name)) return;
-        // Accept both Lumi-configured and workspace MCPs (workspace MCPs aren't in the data store)
+        // Accept both Lumi-configured and project-context MCPs (project-context MCPs aren't in the data store)
         var isKnown = _dataStore.Data.McpServers.Any(s => s.Name == name)
                       || AvailableMcpChips.OfType<StrataTheme.Controls.StrataComposerChip>().Any(c => c.Name == name);
         if (!isKnown) return;
@@ -250,12 +239,9 @@ public partial class ChatViewModel
         if (CurrentChat is not null)
         {
             CurrentChat.ActiveMcpServerNames = new List<string>(ActiveMcpServerNames);
+            CurrentChat.HasExplicitMcpServerSelection = true;
+            // MCP changes are applied at the next SDK create/resume boundary, not by rebuilding a live chat session.
             QueueSaveChat(CurrentChat, saveIndex: true);
-
-            // MCP configuration is session-scoped in the Copilot SDK.
-            // Any add/remove must invalidate the current backend session so
-            // the next send recreates/resumes with the updated MCP server set.
-            InvalidateCurrentSession();
         }
     }
 
@@ -317,7 +303,7 @@ public partial class ChatViewModel
             .Select(p => new StrataTheme.Controls.StrataComposerChip(
                 p.Name,
                 "📁",
-                SecondaryText: BuildChipSearchText(p.WorkingDirectory, p.Instructions)))
+                SecondaryText: BuildProjectInlineCompletionSecondaryText(p)))
             .ToList();
     }
 
@@ -367,24 +353,29 @@ public partial class ChatViewModel
     }
 
     public SkillReference? FindSkillReferenceByName(string name)
-        => FindSkillReferenceByName(name, workDir: null);
-
-    public SkillReference? FindSkillReferenceByName(string name, string? workDir)
     {
         var skill = FindSkillByName(name);
-        if (skill is not null)
-        {
-            return new SkillReference
-            {
-                Name = skill.Name,
-                Glyph = skill.IconGlyph,
-                Description = skill.Description
-            };
-        }
+        if (skill is null)
+            return null;
 
-        var externalSkill = workDir is { Length: > 0 }
-            ? FindExternalSkillByName(name, workDir)
-            : FindExternalSkillByName(name);
+        return new SkillReference
+        {
+            Name = skill.Name,
+            Glyph = skill.IconGlyph,
+            Description = skill.Description
+        };
+    }
+
+    public SkillReference? FindSkillReferenceByName(string name, string? workDir)
+        => FindSkillReferenceByName(name);
+
+    private SkillReference? FindSkillReferenceByName(string name, ProjectContextCatalogSnapshot projectContextCatalog)
+    {
+        var skill = FindSkillReferenceByName(name);
+        if (skill is not null)
+            return skill;
+
+        var externalSkill = projectContextCatalog.FindSkill(name);
         if (externalSkill is null)
             return null;
 
@@ -453,39 +444,48 @@ public partial class ChatViewModel
     /// </summary>
     private string GetEffectiveWorkingDirectory()
     {
-        // If worktree mode is active, use the worktree path
-        if (IsWorktreeMode && WorktreePath is { Length: > 0 } wt && Directory.Exists(wt))
-            return wt;
-
         var pid = CurrentChat?.ProjectId ?? _pendingProjectId ?? ActiveProjectFilterId;
-        if (pid.HasValue)
-        {
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == pid.Value);
-            if (project is { WorkingDirectory: { Length: > 0 } dir } && Directory.Exists(dir))
-                return dir;
-        }
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var worktreePath = IsWorktreeMode ? WorktreePath : null;
+        return ResolveEffectiveWorkingDirectory(pid, worktreePath);
     }
 
     private string GetEffectiveWorkingDirectory(Chat chat)
+        => ResolveEffectiveWorkingDirectory(chat.ProjectId, chat.WorktreePath);
+
+    /// <summary>
+    /// Shared resolution for the directory a chat actually runs in. When a worktree is active the
+    /// stored path is the worktree <em>root</em>; this maps the project's subpath into the worktree
+    /// so <c>.github</c> instructions, skills/agents, MCP config, and the SDK working directory all
+    /// resolve from the same folder they would in local mode (critical when the project working
+    /// directory is a subfolder of the git root, e.g. a monorepo app).
+    /// </summary>
+    private string ResolveEffectiveWorkingDirectory(Guid? projectId, string? worktreePath)
     {
-        if (chat.WorktreePath is { Length: > 0 } wt && Directory.Exists(wt))
-            return wt;
+        var project = projectId.HasValue
+            ? _dataStore.Data.Projects.FirstOrDefault(p => p.Id == projectId.Value)
+            : null;
+        var projectDir = project is { WorkingDirectory: { Length: > 0 } dir } && Directory.Exists(dir)
+            ? dir
+            : null;
 
-        if (chat.ProjectId.HasValue)
-        {
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == chat.ProjectId.Value);
-            if (project is { WorkingDirectory: { Length: > 0 } dir } && Directory.Exists(dir))
-                return dir;
-        }
+        if (worktreePath is { Length: > 0 } wt && Directory.Exists(wt))
+            return GitService.ResolveWorktreeWorkingDirectory(wt, projectDir);
 
-        return Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return projectDir ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     }
 
-    private List<UserMessageAttachment>? TakePendingAttachments()
+    private Project? GetCurrentProject()
+    {
+        var pid = CurrentChat?.ProjectId ?? _pendingProjectId ?? ActiveProjectFilterId;
+        return pid.HasValue
+            ? _dataStore.Data.Projects.FirstOrDefault(p => p.Id == pid.Value)
+            : null;
+    }
+
+    private List<Attachment>? TakePendingAttachments()
     {
         if (PendingAttachments.Count == 0) return null;
-        var items = PendingAttachments.Select(fp => (UserMessageAttachment)new UserMessageAttachmentFile
+        var items = PendingAttachments.Select(fp => (Attachment)new AttachmentFile
         {
             Path = fp,
             DisplayName = Path.GetFileName(fp)
@@ -501,7 +501,7 @@ public partial class ChatViewModel
     /// been created yet (lazy creation). This fixes those paths before sending.
     /// </summary>
     internal static void RebaseAttachmentPaths(
-        List<UserMessageAttachment> attachments,
+        List<Attachment> attachments,
         ChatMessage userMsg,
         string projectDir,
         string worktreePath)
@@ -518,7 +518,7 @@ public partial class ChatViewModel
 
         for (var i = 0; i < attachments.Count; i++)
         {
-            if (attachments[i] is not UserMessageAttachmentFile file)
+            if (attachments[i] is not AttachmentFile file)
                 continue;
 
             var path = file.Path;

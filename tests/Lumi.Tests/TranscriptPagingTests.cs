@@ -131,14 +131,22 @@ public sealed class TranscriptPagingTests
 
         var firstVisibleBefore = controller.MountedTurns[0].StableId;
         TranscriptWindowMutation lastMutation = TranscriptWindowMutation.None;
+        var prependCount = 0;
+        var sawBatchedPrepend = false;
         for (var i = 0; i < 4; i++)
         {
             lastMutation = controller.UpdateViewport(
                 new TranscriptViewportState(0, 200, 1400 + (i * 120), false, 260),
                 $"multi-prepend-{i}");
-            Assert.Equal(TranscriptWindowMutationKind.Prepend, lastMutation.Kind);
+            if (lastMutation.Kind != TranscriptWindowMutationKind.Prepend)
+                break;
+
+            prependCount++;
+            sawBatchedPrepend |= lastMutation.AddedPageCount > 1;
         }
 
+        Assert.True(prependCount > 0);
+        Assert.True(sawBatchedPrepend);
         Assert.NotEqual(firstVisibleBefore, controller.MountedTurns[0].StableId);
         Assert.Equal(new[]
         {
@@ -314,7 +322,8 @@ public sealed class TranscriptPagingTests
             var mutation = controller.UpdateViewport(
                 new TranscriptViewportState(0, 200, 1800 + (i * 120), false, 260),
                 $"reader-window-{i}");
-            Assert.Equal(TranscriptWindowMutationKind.Prepend, mutation.Kind);
+            if (mutation.Kind != TranscriptWindowMutationKind.Prepend)
+                break;
         }
 
         Assert.Equal("turn:0000", controller.MountedTurns[0].StableId);
@@ -454,6 +463,70 @@ public sealed class TranscriptPagingTests
     }
 
     [Fact]
+    public void EnsureLatestMountedIfAdjacentTailGap_RestoresCompletedAssistantWithoutPinning()
+    {
+        var controller = new TranscriptWindowController(new TranscriptPagingOptions
+        {
+            MaxPageWeight = 4,
+            MaxTurnsPerPage = 1,
+            MinInitialPages = 1,
+            MaxMountedPages = 3,
+        });
+        var source = CreateTurns(7, measuredHeightFactory: _ => 120);
+
+        controller.BindTranscript(source, "assistant-tail-gap");
+        controller.ResetToLatest(200, "assistant-tail-gap");
+        controller.UpdatePinnedState(false, 260, "assistant-tail-gap");
+
+        Assert.Equal("turn:0006", controller.MountedTurns[^1].StableId);
+
+        source.Add(CreateTurn(7, measuredHeight: 120));
+
+        Assert.DoesNotContain(controller.MountedTurns, turn => turn.StableId == "turn:0007");
+
+        var mutation = controller.EnsureLatestMountedIfAdjacentTailGap("assistant-completed");
+
+        Assert.Equal(TranscriptWindowMutationKind.TailRestore, mutation.Kind);
+        Assert.False(controller.CaptureSnapshot().IsPinnedToBottom);
+        Assert.True(controller.CaptureSnapshot().MountedPageCount <= 3);
+        Assert.Equal("turn:0007", controller.MountedTurns[^1].StableId);
+        Assert.Contains(controller.MountedTurns, turn => turn.StableId == "turn:0006");
+    }
+
+    [Fact]
+    public void EnsureLatestMountedIfAdjacentTailGap_DoesNotJumpFarReaderWindow()
+    {
+        var controller = new TranscriptWindowController(new TranscriptPagingOptions
+        {
+            MaxPageWeight = 4,
+            MaxTurnsPerPage = 1,
+            MinInitialPages = 1,
+            MaxMountedPages = 3,
+            PrependTriggerPixels = 160,
+        });
+        var source = CreateTurns(12, measuredHeightFactory: _ => 120);
+
+        controller.BindTranscript(source, "far-reader");
+        controller.ResetToLatest(200, "far-reader");
+        controller.UpdatePinnedState(false, 260, "far-reader");
+
+        for (var i = 0; i < 4; i++)
+        {
+            controller.UpdateViewport(
+                new TranscriptViewportState(0, 200, 1400 + (i * 120), false, 260),
+                $"far-reader-{i}");
+        }
+
+        var mountedBefore = controller.MountedTurns.Select(static turn => turn.StableId).ToArray();
+        source.Add(CreateTurn(12, measuredHeight: 120));
+
+        var mutation = controller.EnsureLatestMountedIfAdjacentTailGap("assistant-completed");
+
+        Assert.Equal(TranscriptWindowMutationKind.None, mutation.Kind);
+        Assert.Equal(mountedBefore, controller.MountedTurns.Select(static turn => turn.StableId).ToArray());
+    }
+
+    [Fact]
     public void EnsureLatestMounted_NoOpWhenAlreadyAtTail()
     {
         var controller = new TranscriptWindowController(new TranscriptPagingOptions
@@ -471,6 +544,49 @@ public sealed class TranscriptPagingTests
         var changed = controller.EnsureLatestMounted("already-tail");
         Assert.False(changed);
         Assert.Equal(mountedCountBefore, controller.MountedTurns.Count);
+    }
+
+    [Fact]
+    public void CompletedTurnAppendedWhileTransientlyUnpinned_IsRecoveredByEnsureLatestMounted()
+    {
+        // Guards the controller-level mounting primitive that the "response invisible until I switch
+        // chats" fix relies on (the view gate that *calls* this primitive lives in ChatView and is
+        // exercised manually — it can't be driven deterministically in the headless harness without a
+        // shell/controller desync artifact). The bug: while the user follows the tail, a streamed turn
+        // can grow past its placeholder height and momentarily report IsPinnedToBottom == false before
+        // the shell re-pins; if the final assistant turn is appended during that window,
+        // OnSourceTurnsCollectionChanged skips mounting it (shouldTrackLatestTail requires
+        // IsPinnedToBottom). This asserts the recovery primitive — EnsureLatestMounted, which the view
+        // now invokes on completion while following the tail — brings such a stranded tail turn back
+        // into the mounted window. If this regresses, the fix cannot surface the response.
+        var controller = new TranscriptWindowController(new TranscriptPagingOptions
+        {
+            MaxPageWeight = 4,
+            MaxTurnsPerPage = 1,
+            MinInitialPages = 1,
+            MaxMountedPages = 3,
+        });
+        var source = CreateTurns(5, measuredHeightFactory: _ => 120);
+
+        controller.BindTranscript(source, "transient-unpinned");
+        controller.ResetToLatest(200, "transient-unpinned");
+
+        // Distance-based unpin while the user is still following the tail (transient layout growth).
+        controller.UpdatePinnedState(false, 240, "transient-unpinned");
+
+        // The final assistant turn lands during the transient-unpinned window.
+        source.Add(CreateTurn(5, measuredHeight: 120));
+
+        // Bug: the new turn is not auto-mounted by the streaming-time collection-changed path.
+        Assert.DoesNotContain(controller.MountedTurns, turn => turn.StableId == "turn:0005");
+
+        // Fix: the view force-mounts the latest tail (EnsureLatestMounted) while following the tail,
+        // regardless of the transient pin state, so the response becomes visible without a chat switch.
+        var changed = controller.EnsureLatestMounted("assistant-completed");
+
+        Assert.True(changed);
+        Assert.Equal("turn:0005", controller.MountedTurns[^1].StableId);
+        Assert.True(controller.CaptureSnapshot().MountedPageCount <= 3);
     }
 
     [Fact]

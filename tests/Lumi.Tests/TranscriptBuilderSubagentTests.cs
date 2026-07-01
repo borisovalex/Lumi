@@ -13,7 +13,7 @@ namespace Lumi.Tests;
 public sealed class TranscriptBuilderSubagentTests
 {
     [Fact]
-    public void Rebuild_GroupsParallelSubagentsIntoSeparateCards()
+    public void Rebuild_GroupsParallelSubagentsIntoOneGroup()
     {
         var builder = CreateBuilder();
         var messages = new[]
@@ -27,22 +27,69 @@ public sealed class TranscriptBuilderSubagentTests
 
         var turns = builder.Rebuild(messages);
 
-        // Subagents are now standalone turn items, not inside a tool group.
+        // The two parallel sub-agents collapse into one scannable group instead of stacking.
         var turn = Assert.Single(turns);
-        Assert.Equal(2, turn.Items.Count);
+        var group = Assert.IsType<SubagentGroupItem>(Assert.Single(turn.Items));
+        Assert.Equal(2, group.Count);
+        Assert.True(group.IsGrouped);
+        Assert.True(group.IsActive); // agent-2 is still running
+        Assert.False(string.IsNullOrWhiteSpace(group.HeaderLabel));
+        Assert.False(string.IsNullOrWhiteSpace(group.Meta));
 
-        var first = Assert.IsType<SubagentToolCallItem>(turn.Items[0]);
+        var first = group.Subagents[0];
         Assert.Equal("Tracing auth", first.Title);
         Assert.Equal("Explore", first.DisplayName);
-        Assert.Single(first.Activities);
+        Assert.Same(group, first.OwningGroup);
+        Assert.True(first.IsGrouped);
+        Assert.False(first.IsExpanded); // grouped members render collapsed
         Assert.IsType<ToolCallItem>(Assert.Single(first.Activities));
 
-        var second = Assert.IsType<SubagentToolCallItem>(turn.Items[1]);
+        var second = group.Subagents[1];
         Assert.Equal("Review UI layout", second.Title);
         Assert.Equal("Code review", second.DisplayName);
         Assert.Equal("Background", second.ModeLabel);
-        Assert.Single(second.Activities);
+        Assert.Same(group, second.OwningGroup);
+        Assert.False(second.IsExpanded);
         Assert.IsType<TerminalPreviewItem>(Assert.Single(second.Activities));
+    }
+
+    [Fact]
+    public void Rebuild_LoneSubagentStaysStandaloneCard()
+    {
+        var builder = CreateBuilder();
+        var messages = new[]
+        {
+            CreateToolVm("agent-1", "task", "Completed", "{\"description\":\"Explore auth flow\",\"agent_type\":\"explore\",\"mode\":\"sync\"}"),
+            CreateToolVm("child-1", "view", "Completed", "{\"path\":\"E:\\\\repo\\\\README.md\"}", parentToolCallId: "agent-1"),
+        };
+
+        var turns = builder.Rebuild(messages);
+
+        var turn = Assert.Single(turns);
+        var lone = Assert.IsType<SubagentToolCallItem>(Assert.Single(turn.Items));
+        Assert.Null(lone.OwningGroup);
+        Assert.False(lone.IsGrouped);
+        Assert.Equal("Explore", lone.DisplayName);
+    }
+
+    [Fact]
+    public void Rebuild_ThreeParallelSubagents_AggregatesAllIntoGroup()
+    {
+        var builder = CreateBuilder();
+        var messages = new[]
+        {
+            CreateToolVm("agent-1", "task", "Completed", "{\"description\":\"A\",\"agent_type\":\"research\",\"mode\":\"sync\"}"),
+            CreateToolVm("agent-2", "task", "Completed", "{\"description\":\"B\",\"agent_type\":\"research\",\"mode\":\"sync\"}"),
+            CreateToolVm("agent-3", "task", "Failed", "{\"description\":\"C\",\"agent_type\":\"explore\",\"mode\":\"sync\"}"),
+        };
+
+        var turns = builder.Rebuild(messages);
+
+        var turn = Assert.Single(turns);
+        var group = Assert.IsType<SubagentGroupItem>(Assert.Single(turn.Items));
+        Assert.Equal(3, group.Count);
+        Assert.False(group.IsActive); // none running
+        Assert.All(group.Subagents, s => Assert.Same(group, s.OwningGroup));
     }
 
     [Fact]

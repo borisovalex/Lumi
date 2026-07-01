@@ -26,6 +26,11 @@ internal sealed class HeadlessTestSession : IDisposable
         return _inner.Dispatch(action, cancellationToken);
     }
 
+    // NOTE: Avalonia's HeadlessUnitTestSession.Dispatch(Func<Task>) awaits the dispatched body to
+    // completion but does NOT surface exceptions it faults with, so an assertion failure inside an
+    // `async () => { ... }` body is silently swallowed and the test still passes. Tests that need to
+    // assert on UI-thread state should capture the results inside the body and assert OUTSIDE this
+    // call (see StrataCollapsibleReparentClickTests). See the suite-wide note in the task summary.
     public Task Dispatch(Func<Task> action, CancellationToken cancellationToken)
     {
         return _inner.Dispatch(action, cancellationToken);
@@ -39,7 +44,7 @@ internal sealed class HeadlessTestSession : IDisposable
         }
         catch (NullReferenceException)
         {
-            // Avalonia.Headless 12.0.1 can throw during PerTest teardown after
+            // Avalonia.Headless can throw during PerTest teardown after
             // the test body has completed. Keep assertions meaningful while
             // avoiding random suite failures from the external harness cleanup.
         }

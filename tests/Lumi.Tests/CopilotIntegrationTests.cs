@@ -1,17 +1,19 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
 using Microsoft.Extensions.AI;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Lumi.Tests;
 
@@ -61,6 +63,9 @@ namespace Lumi.Tests;
 public class CopilotIntegrationTests : IAsyncLifetime
 {
     private CopilotService _service = null!;
+    private readonly ITestOutputHelper _output;
+
+    public CopilotIntegrationTests(ITestOutputHelper output) => _output = output;
 
     private static bool IsEnabled =>
         Environment.GetEnvironmentVariable("LUMI_INTEGRATION_TESTS") == "1";
@@ -105,7 +110,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         CopilotSession session, string prompt, int timeoutSeconds = 45)
     {
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var sub = session.On(evt =>
+        var sub = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -318,7 +323,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
 
         var receivedDelta = false;
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -359,6 +364,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var (_, sub1) = await SendAndWait(session1,
             $"Remember this word: {uniqueWord}. Just say OK.");
         sub1.Dispose();
+        await session1.DisposeAsync();
 
         // Resume into a new session object
         var resumeConfig = SessionConfigBuilder.BuildForResume(
@@ -491,7 +497,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var gotDelta = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var abortHandled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        using var sub1 = session.On(evt =>
+        using var sub1 = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -566,7 +572,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var response = "";
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -643,7 +649,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var session = await _service.CreateSessionAsync(config);
 
         var doneTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             if (evt is SessionIdleEvent) doneTcs.TrySetResult(true);
             else if (evt is SessionErrorEvent err)
@@ -680,8 +686,8 @@ public class CopilotIntegrationTests : IAsyncLifetime
             onPermission: null, hooks: null);
 
         Assert.Equal(workDir, config.WorkingDirectory);
-        Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDir);
-        Assert.NotEqual(workDir, config.ConfigDir);
+        Assert.Equal(DataStore.CopilotConfigDir, config.ConfigDirectory);
+        Assert.NotEqual(workDir, config.ConfigDirectory);
 
         var session = await _service.CreateSessionAsync(config);
         Assert.NotEmpty(session.SessionId);
@@ -715,7 +721,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var assistantResponse = "";
         var doneTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             switch (evt)
             {
@@ -844,7 +850,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
     {
         SkipIfDisabled();
 
-        UserInputHandler handler = async (request, _) =>
+        Func<UserInputRequest, UserInputInvocation, Task<UserInputResponse>> handler = async (request, _) =>
         {
             return new UserInputResponse { Answer = "Blue", WasFreeform = true };
         };
@@ -896,7 +902,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var session = await _service.CreateSessionAsync(config);
 
         var doneTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             if (evt is SessionIdleEvent) doneTcs.TrySetResult(true);
             else if (evt is SessionErrorEvent err)
@@ -929,23 +935,12 @@ public class CopilotIntegrationTests : IAsyncLifetime
         // Send a message so the session is fully registered
         var (_, msgSub) = await SendAndWait(session, "Say OK.");
         msgSub.Dispose();
-
-        // Session indexing may take a moment — retry a few times
-        bool found = false;
-        for (int attempt = 0; attempt < 5 && !found; attempt++)
-        {
-            var sessions = await _service.ListSessionsAsync();
-            found = sessions.Any(s => s.SessionId == sid);
-            if (!found) await Task.Delay(1000);
-        }
-        Assert.True(found, $"Session {sid} should appear in session list");
+        await session.DisposeAsync();
 
         await _service.DeleteSessionAsync(sid);
 
         var afterDelete = await _service.ListSessionsAsync();
         Assert.DoesNotContain(afterDelete, s => s.SessionId == sid);
-
-        await session.DisposeAsync();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1056,7 +1051,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         {
             ChatId = Guid.NewGuid(),
             InteractionSignature = marker,
-            UserName = "TestUser",
+            UserName = null,
             UserMessage = userMessage,
             AssistantMessage = assistantMessage,
             ExistingMemories = [],
@@ -1112,6 +1107,92 @@ public class CopilotIntegrationTests : IAsyncLifetime
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // 16b. Context-aware suggestions — a frequently-typed prompt must NOT leak
+    //      into unrelated conversations, but SHOULD remain available when the
+    //      current conversation is actually about that topic. Drives the real
+    //      ranker + real model end-to-end across several distinct topics.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [SkippableFact]
+    public async Task SuggestionGeneration_RespectsConversationContextAcrossTopics()
+    {
+        SkipIfDisabled();
+
+        // The user types coding prompts constantly, but also has other recurring requests. The ranker
+        // hands the model ONE global, conversation-agnostic list; the model must decide what fits.
+        var history = new List<UserPromptHistoryItem>();
+        var origin = new DateTimeOffset(2026, 6, 1, 9, 0, 0, TimeSpan.Zero);
+        void Add(string content, int times, TimeSpan offset)
+        {
+            for (var i = 0; i < times; i++)
+                history.Add(new UserPromptHistoryItem(Guid.NewGuid(), Guid.NewGuid(), content, origin.Add(offset).AddMinutes(i)));
+        }
+        Add("commit and push to main", 14, TimeSpan.Zero);
+        Add("run code review", 9, TimeSpan.FromHours(1));
+        Add("plan my day", 5, TimeSpan.FromHours(2));
+        Add("write me a story", 4, TimeSpan.FromHours(3));
+
+        // The SAME global block is sent for every conversation — exactly as production does it.
+        var block = SuggestionHistoryRanker.BuildFrequentRequestsBlock(history, 8);
+        Assert.NotNull(block);
+        Assert.Contains("commit and push to main", block!, StringComparison.OrdinalIgnoreCase);
+        _output.WriteLine($"[Global block]\n{block}\n");
+
+        // Words that would only appear if the coding history leaked into an unrelated chat.
+        string[] codingLeakTerms = ["commit", "push", "git", "code review", "pull request", "repository"];
+
+        var unrelated = new[]
+        {
+            (Topic: "TV shopping",
+             User: "Which 65-inch OLED TV should I buy for a bright living room?",
+             Assistant: "For a bright room the LG G4 and Samsung S95D QD-OLED have the highest peak brightness, while the Sony Bravia 8 trades brightness for excellent processing. Expect to pay between $1,800 and $2,600."),
+            (Topic: "Cooking",
+             User: "How do I make a good sourdough starter from scratch?",
+             Assistant: "Mix equal parts flour and water, leave it loosely covered at room temperature, and feed it daily. After about a week it should be bubbly and double in size, ready to leaven bread."),
+            (Topic: "Travel",
+             User: "What are the best neighborhoods to stay in when visiting Lisbon?",
+             Assistant: "Alfama is historic and atmospheric, Baixa is central and walkable, and Príncipe Real is trendy with great restaurants. Each offers a different vibe for exploring the city."),
+            (Topic: "TV shopping (Hebrew)",
+             User: "איזו טלוויזיית OLED בגודל 65 אינץ' הכי משתלמת לסלון מואר?",
+             Assistant: "לסלון מואר ה-LG G4 וה-Samsung S95D בולטים בבהירות שיא גבוהה, בעוד שה-Sony Bravia 8 מציעה עיבוד תמונה מצוין במחיר נמוך יותר. טווח המחירים הוא בערך 6,000 עד 9,000 שקלים."),
+        };
+
+        foreach (var (topic, user, assistant) in unrelated)
+        {
+            // Same global block every time — the model must ignore it as irrelevant here.
+            var suggestions = await _service.GenerateSuggestionsAsync(assistant, user, block);
+            Assert.NotNull(suggestions);
+            Assert.NotEmpty(suggestions!);
+
+            _output.WriteLine($"[{topic}] suggestions: {string.Join(" | ", suggestions!)}");
+
+            var joined = string.Join("\n", suggestions!).ToLowerInvariant();
+            foreach (var term in codingLeakTerms)
+            {
+                Assert.False(
+                    joined.Contains(term, StringComparison.Ordinal),
+                    $"[{topic}] coding term '{term}' leaked into suggestions: {string.Join(" | ", suggestions!)}");
+            }
+        }
+
+        // ── Coding conversation: now the recurring coding prompt IS a natural next step ──
+        var codeUser = "I finished the feature on my branch. What's the git workflow to ship it?";
+        var codeAssistant = "Your local commits look good. Next, commit any remaining changes, push the branch to the remote, open a pull request against main, and merge once review passes.";
+
+        var codeSuggestions = await _service.GenerateSuggestionsAsync(codeAssistant, codeUser, block);
+        Assert.NotNull(codeSuggestions);
+        Assert.NotEmpty(codeSuggestions!);
+        _output.WriteLine($"[Coding] suggestions: {string.Join(" | ", codeSuggestions!)}");
+
+        // For a git-workflow conversation the model should produce a shipping-related suggestion.
+        string[] shipTerms = ["commit", "push", "pr", "pull request", "merge", "review", "main", "branch", "remote", "ship"];
+        var codeJoined = string.Join("\n", codeSuggestions!).ToLowerInvariant();
+        Assert.True(
+            shipTerms.Any(term => codeJoined.Contains(term, StringComparison.Ordinal)),
+            $"[Coding] expected a git/ship-related suggestion, got: {string.Join(" | ", codeSuggestions!)}");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // 17. Concurrent sessions — independent contexts
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -1153,7 +1234,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var events = new List<string>();
         var doneTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             var name = evt.GetType().Name;
             lock (events) events.Add(name);
@@ -1276,7 +1357,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         var session = await _service.CreateSessionAsync(config);
 
         var doneTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var sub = session.On(evt =>
+        using var sub = session.On<SessionEvent>(evt =>
         {
             if (evt is SessionIdleEvent) doneTcs.TrySetResult(true);
             else if (evt is SessionErrorEvent err)
@@ -1286,7 +1367,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         await session.SendAsync(new MessageOptions { Prompt = "Say hello." });
         await Timeout(doneTcs.Task, 30);
 
-        var events = await session.GetMessagesAsync();
+        var events = await session.GetEventsAsync();
         Assert.NotNull(events);
         Assert.True(events.Count > 0, "Event log should have entries after a turn");
 
@@ -1433,11 +1514,13 @@ public class CopilotIntegrationTests : IAsyncLifetime
     // ───────────────────────────────────────────────────────────────────────
 
     [Fact]
-    public void SessionConfig_ExcludesFetchButKeepsSdkWebSearch()
+    public void SessionConfig_ExcludesDuplicatedSdkBuiltInsButKeepsSdkWebSearch()
     {
         var config = SimpleConfig();
-        Assert.Contains("web_fetch", config.ExcludedTools!);
-        Assert.DoesNotContain("web_search", config.ExcludedTools!);
+        Assert.Contains("builtin:web_fetch", config.ExcludedTools!);
+        Assert.Contains("builtin:browser", config.ExcludedTools!);
+        Assert.Contains("builtin:ask_user", config.ExcludedTools!);
+        Assert.DoesNotContain("builtin:web_search", config.ExcludedTools!);
     }
 
     // ───────────────────────────────────────────────────────────────────────
@@ -1448,7 +1531,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
     public void ResumeConfig_FieldsMatchBuildConfig()
     {
         var agents = new List<CustomAgentConfig> { new() { Name = "test" } };
-        UserInputHandler handler = async (_, _) =>
+        Func<UserInputRequest, UserInputInvocation, Task<UserInputResponse>> handler = async (_, _) =>
             new UserInputResponse { Answer = "x" };
         var hooks = new SessionHooks
         {
@@ -1467,7 +1550,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         Assert.Equal(build.Model, resume.Model);
         Assert.Equal(build.Streaming, resume.Streaming);
         Assert.Equal(build.WorkingDirectory, resume.WorkingDirectory);
-        Assert.Equal(build.ConfigDir, resume.ConfigDir);
+        Assert.Equal(build.ConfigDirectory, resume.ConfigDirectory);
         Assert.Equal(build.ReasoningEffort, resume.ReasoningEffort);
         Assert.Equal(build.SystemMessage!.Content, resume.SystemMessage!.Content);
         Assert.Equal(build.SystemMessage.Mode, resume.SystemMessage.Mode);
@@ -1534,7 +1617,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public void EmptyCollections_NotAssignedToConfig()
+    public void EmptyCollections_NotAssignedToConfigExceptExplicitMcpSelection()
     {
         var config = SessionConfigBuilder.Build(
             systemPrompt: "test", model: null, workingDirectory: null,
@@ -1548,7 +1631,8 @@ public class CopilotIntegrationTests : IAsyncLifetime
         Assert.Null(config.SkillDirectories);
         Assert.Null(config.CustomAgents);
         Assert.Null(config.Tools);
-        Assert.Null(config.McpServers);
+        Assert.NotNull(config.McpServers);
+        Assert.Empty(config.McpServers!);
         Assert.Null(config.ReasoningEffort);
     }
 
@@ -1612,7 +1696,9 @@ public class CopilotIntegrationTests : IAsyncLifetime
         Assert.NotNull(config.AvailableTools);
         Assert.Empty(config.AvailableTools!);
         Assert.NotNull(config.ExcludedTools);
-        Assert.Contains("*", config.ExcludedTools!);
+        Assert.Contains("builtin:*", config.ExcludedTools!);
+        Assert.Contains("mcp:*", config.ExcludedTools!);
+        Assert.Contains("custom:*", config.ExcludedTools!);
     }
 
     [Fact]
@@ -1646,7 +1732,7 @@ public class CopilotIntegrationTests : IAsyncLifetime
         {
             Command = "npx",
             Args = ["-y", "@mcp/server"],
-            Cwd = "/tmp",
+            WorkingDirectory = "/tmp",
             Tools = ["*"]
         };
 

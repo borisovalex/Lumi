@@ -1,6 +1,7 @@
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
+using Microsoft.Extensions.AI;
 using System.Reflection;
 using Xunit;
 
@@ -96,6 +97,37 @@ public sealed class ChatViewModelAgentRoutingTests
     }
 
     [Fact]
+    public void SubagentOutputIsActive_FalseWhenNoNestedSubagentExecuting()
+    {
+        // Regression: selecting a Lumi agent makes the CLI emit subagent.selected for the
+        // top-level configured agent (no nested execution). Output suppression must be driven
+        // ONLY by genuine nested sub-agent execution, so with ActiveSubagentExecutionDepth == 0
+        // the main turn must NOT be suppressed — otherwise the whole reply is dropped.
+        var runtime = new ChatRuntimeState
+        {
+            Chat = new Chat { Title = "top-level agent" },
+            ActiveSubagentExecutionDepth = 0
+        };
+
+        Assert.False(ChatViewModel.SubagentOutputIsActive(runtime));
+    }
+
+    [Fact]
+    public void SubagentOutputIsActive_TrueWhileNestedSubagentExecuting()
+    {
+        // Genuine nested sub-agents are bracketed by subagent.started/completed which drive
+        // ActiveSubagentExecutionDepth; their output must still be routed away from the main
+        // transcript.
+        var runtime = new ChatRuntimeState
+        {
+            Chat = new Chat { Title = "nested subagent" },
+            ActiveSubagentExecutionDepth = 1
+        };
+
+        Assert.True(ChatViewModel.SubagentOutputIsActive(runtime));
+    }
+
+    [Fact]
     public void ResolveSelectedModelForChat_DoesNotUseVisibleChatSelectionForHiddenChat()
     {
         var targetChat = new Chat { Id = Guid.NewGuid(), Title = "Job chat" };
@@ -145,65 +177,7 @@ public sealed class ChatViewModelAgentRoutingTests
     }
 
     [Fact]
-    public void BuildSkillReferences_UsesTargetWorkDirForHiddenChatExternalSkills()
-    {
-        var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-skill-route-test-{Guid.NewGuid():N}");
-        var targetWorkDir = Path.Combine(tempRoot, "target");
-        var visibleWorkDir = Path.Combine(tempRoot, "visible");
-
-        try
-        {
-            Directory.CreateDirectory(Path.Combine(targetWorkDir, ".github", "skills"));
-            Directory.CreateDirectory(Path.Combine(visibleWorkDir, ".github", "skills"));
-            File.WriteAllText(
-                Path.Combine(targetWorkDir, ".github", "skills", "target-skill.md"),
-                """
-                ---
-                name: Target Skill
-                description: Skill from the target project
-                ---
-
-                Use the target project's context.
-                """);
-            File.WriteAllText(
-                Path.Combine(visibleWorkDir, ".github", "skills", "visible-skill.md"),
-                """
-                ---
-                name: Visible Skill
-                description: Skill from the visible project
-                ---
-
-                Use the visible project's context.
-                """);
-
-            var visibleProject = new Project { Id = Guid.NewGuid(), Name = "Visible", WorkingDirectory = visibleWorkDir };
-            var visibleChat = CreateChatWithMessage("Visible chat");
-            visibleChat.ProjectId = visibleProject.Id;
-            using var harness = CreateHarness(new AppData
-            {
-                Projects = [visibleProject],
-                Chats = [visibleChat]
-            });
-            harness.ViewModel.CurrentChat = visibleChat;
-
-            var references = InvokeBuildSkillReferences(
-                harness.ViewModel,
-                externalSkillNames: ["Target Skill"],
-                workDir: targetWorkDir);
-
-            var skill = Assert.Single(references);
-            Assert.Equal("Target Skill", skill.Name);
-            Assert.Equal("Skill from the target project", skill.Description);
-        }
-        finally
-        {
-            if (Directory.Exists(tempRoot))
-                Directory.Delete(tempRoot, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void FindSkillReferenceByName_UsesExplicitWorkDirForExternalSkills()
+    public void FindSkillReferenceByName_DoesNotResolveExternalSkills()
     {
         var tempRoot = Path.Combine(Path.GetTempPath(), $"lumi-fetch-skill-route-test-{Guid.NewGuid():N}");
         var targetWorkDir = Path.Combine(tempRoot, "target");
@@ -244,17 +218,31 @@ public sealed class ChatViewModelAgentRoutingTests
             });
             harness.ViewModel.CurrentChat = visibleChat;
 
-            var reference = harness.ViewModel.FindSkillReferenceByName("Shared Skill", targetWorkDir);
-
-            Assert.NotNull(reference);
-            Assert.Equal("Shared Skill", reference!.Name);
-            Assert.Equal("Target project version", reference.Description);
+            Assert.Null(harness.ViewModel.FindSkillReferenceByName("Shared Skill", targetWorkDir));
         }
         finally
         {
             if (Directory.Exists(tempRoot))
                 Directory.Delete(tempRoot, recursive: true);
         }
+    }
+
+    [Fact]
+    public void BuildCustomTools_UsesLumiBrowserNamespace()
+    {
+        using var harness = CreateHarness(new AppData());
+
+        var toolNames = InvokeBuildCustomTools(harness.ViewModel)
+            .Select(tool => tool.Name)
+            .ToArray();
+
+        Assert.Contains(ToolDisplayHelper.BrowserOpenToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserLookToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserFindToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserDoToolName, toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserJsToolName, toolNames);
+        Assert.DoesNotContain("browser", toolNames);
+        Assert.DoesNotContain(toolNames, static name => name.StartsWith("browser_", StringComparison.Ordinal));
     }
 
     private static TestHarness CreateHarness(AppData data)
@@ -269,26 +257,29 @@ public sealed class ChatViewModelAgentRoutingTests
         {
             Id = Guid.NewGuid(),
             Title = title,
-            Messages = [new ChatMessage { Role = "user", Content = "hello" }]
+            Messages = [new Lumi.Models.ChatMessage { Role = "user", Content = "hello" }]
         };
     }
 
-    private static List<SkillReference> InvokeBuildSkillReferences(
-        ChatViewModel viewModel,
-        IReadOnlyCollection<string> externalSkillNames,
-        string workDir)
+    private static List<AIFunction> InvokeBuildCustomTools(ChatViewModel viewModel)
     {
         var method = typeof(ChatViewModel).GetMethod(
-            "BuildSkillReferences",
+            "BuildCustomTools",
             BindingFlags.Instance | BindingFlags.NonPublic,
             binder: null,
-            types: [typeof(IReadOnlyCollection<Guid>), typeof(IReadOnlyCollection<string>), typeof(string)],
+            types:
+            [
+                typeof(Guid),
+                typeof(LumiAgent),
+                typeof(ProjectContextCatalogSnapshot)
+            ],
             modifiers: null);
 
         Assert.NotNull(method);
-        return Assert.IsType<List<SkillReference>>(method!.Invoke(
+        var catalog = new ProjectContextCatalogSnapshot([], [], []);
+        return Assert.IsType<List<AIFunction>>(method!.Invoke(
             viewModel,
-            [Array.Empty<Guid>(), externalSkillNames, workDir]));
+            [Guid.NewGuid(), null, catalog]));
     }
 
     private sealed record TestHarness(ChatViewModel ViewModel) : IDisposable

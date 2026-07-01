@@ -22,6 +22,7 @@ internal sealed class TranscriptPagingOptions
     public int MinInitialPages { get; init; } = 2;
     public int MaxMountedPages { get; init; } = 6;
     public int TrimToMountedPages { get; init; } = 4;
+    public int PrependBatchPageCount { get; init; } = 3;
     public double InitialViewportFillMultiplier { get; init; } = 1.6d;
     public double MountedViewportFillMultiplier { get; init; } = 2.1d;
     public double PrependTriggerPixels { get; init; } = 220d;
@@ -66,6 +67,9 @@ internal static class TranscriptPageWeightEstimator
                 2 + subagent.Activities.Count
                   + EstimateAdditionalTextWeight(subagent.TranscriptText)
                   + EstimateAdditionalTextWeight(subagent.ReasoningText)),
+            SubagentGroupItem subagentGroup => Math.Max(
+                4,
+                2 + subagentGroup.Subagents.Sum(EstimateItemWeight)),
             ToolGroupItem toolGroup => Math.Max(4, 2 + toolGroup.ToolCalls.Count),
             QuestionItem => 3,
             PlanCardItem => 3,
@@ -144,6 +148,7 @@ internal enum TranscriptWindowMutationKind
     EnsureCoverage,
     Prepend,
     TrimHead,
+    TailRestore,
 }
 
 internal readonly record struct TranscriptViewportState(
@@ -270,6 +275,7 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
         _pages.Clear();
         _firstMountedPageIndex = -1;
         _lastMountedPageIndex = -1;
+        ReleaseAllMountedHosts();
         MountedTurns.Clear();
         UpdateDiagnostics("clear", reason);
     }
@@ -284,6 +290,7 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
         {
             _firstMountedPageIndex = -1;
             _lastMountedPageIndex = -1;
+            ReleaseAllMountedHosts();
             MountedTurns.Clear();
             stopwatch.Stop();
             _initialLoadMilliseconds = stopwatch.Elapsed.TotalMilliseconds;
@@ -372,15 +379,31 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
 
         if (state.OffsetY <= _options.PrependTriggerPixels && _firstMountedPageIndex > 0)
         {
-            _firstMountedPageIndex--;
-            _prependCount++;
-            _pageLoadCount++;
-            var page = _pages[_firstMountedPageIndex];
-            var estimatedDelta = GetEffectivePageHeight(page) + TranscriptLayoutMetrics.TurnSpacing;
+            // Load a small chunk of older pages per near-top scroll. This gives the reader more
+            // history above the anchor and avoids a render/layout cycle for every single page.
+            // Keep at least the previously-first mounted page so anchor restoration can still land.
+            var maxBatch = Math.Min(
+                Math.Max(1, _options.PrependBatchPageCount),
+                Math.Max(1, MountedPageCount - 1));
+            var addedPages = 0;
+            var estimatedDelta = 0d;
+            while (_firstMountedPageIndex > 0 && addedPages < maxBatch)
+            {
+                _firstMountedPageIndex--;
+                var page = _pages[_firstMountedPageIndex];
+                estimatedDelta += GetEffectivePageHeight(page) + TranscriptLayoutMetrics.TurnSpacing;
+                addedPages++;
+            }
+
+            if (addedPages == 0)
+                return TranscriptWindowMutation.None;
+
+            _prependCount += addedPages;
+            _pageLoadCount += addedPages;
             var removedTailPages = TrimMountedTailOverflow();
             ReconcileMountedTurns(BuildDesiredMountedTurns());
             UpdateDiagnostics("prepend", reason);
-            return new TranscriptWindowMutation(TranscriptWindowMutationKind.Prepend, reason, 1, removedTailPages, estimatedDelta, true);
+            return new TranscriptWindowMutation(TranscriptWindowMutationKind.Prepend, reason, addedPages, removedTailPages, estimatedDelta, true);
         }
 
         if (MountedPageCount > _options.MaxMountedPages)
@@ -450,6 +473,37 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
         return true;
     }
 
+    public TranscriptWindowMutation EnsureLatestMountedIfAdjacentTailGap(string reason)
+    {
+        if (_pages.Count == 0 || MountedPageCount == 0)
+            return TranscriptWindowMutation.None;
+
+        var latestPageIndex = _pages.Count - 1;
+        if (_lastMountedPageIndex >= latestPageIndex)
+            return TranscriptWindowMutation.None;
+
+        if (_lastMountedPageIndex + 1 != latestPageIndex)
+            return TranscriptWindowMutation.None;
+
+        _lastMountedPageIndex = latestPageIndex;
+        _pageLoadCount++;
+        var removedPages = TrimMountedHeadOverflow();
+        ClampMountedRange();
+
+        var latestPage = _pages[latestPageIndex];
+        var estimatedDelta = GetEffectivePageHeight(latestPage) + TranscriptLayoutMetrics.TurnSpacing;
+        ReconcileMountedTurns(BuildDesiredMountedTurns());
+        UpdateDiagnostics("tail-restore", reason);
+
+        return new TranscriptWindowMutation(
+            TranscriptWindowMutationKind.TailRestore,
+            reason,
+            1,
+            removedPages,
+            estimatedDelta,
+            true);
+    }
+
     /// <summary>
     /// Mounts the page containing the specified turn so it becomes part of MountedTurns.
     /// Returns true if the mounted range changed.
@@ -516,6 +570,7 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
         if (_sourceTurns is not null)
             _sourceTurns.CollectionChanged -= OnSourceTurnsCollectionChanged;
 
+        ReleaseAllMountedHosts();
         _disposed = true;
     }
 
@@ -543,6 +598,7 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
         {
             _firstMountedPageIndex = -1;
             _lastMountedPageIndex = -1;
+            ReleaseAllMountedHosts();
             MountedTurns.Clear();
             UpdateDiagnostics("source-change", e.Action.ToString());
             return;
@@ -667,23 +723,66 @@ internal sealed class TranscriptWindowController : ObservableObject, IDisposable
 
     private void ReconcileMountedTurns(IReadOnlyList<TranscriptTurn> desiredTurns)
     {
-        var prefix = 0;
-        while (prefix < MountedTurns.Count && prefix < desiredTurns.Count && ReferenceEquals(MountedTurns[prefix], desiredTurns[prefix]))
-            prefix++;
+        // Reconcile by identity so a turn that stays mounted keeps its realized host — and therefore
+        // its already parsed markdown and highlighted code blocks — instead of being torn down and
+        // rebuilt from scratch.
+        //
+        // A prefix/suffix diff looks cheap but releases every turn in the "changed middle", even
+        // turns that remain desired and only shifted position. When an assistant message finishes,
+        // the typing turn is removed AND (while pinned to the tail) the head page can trim in the
+        // same source-collection change. That breaks the prefix (head shifted) and the suffix (old
+        // tail is the typing turn, new tail is the assistant turn) simultaneously, so the diff
+        // collapses to "replace the whole mounted range": it releases the just-finished assistant
+        // turn's host and re-realizes it, re-parsing the markdown and synchronously re-highlighting
+        // its code blocks on the UI thread — the multi-second finish-writing freeze. Releasing only
+        // turns that truly left the window keeps that work off the finalize path.
+        var desiredSet = new HashSet<TranscriptTurn>(desiredTurns, ReferenceEqualityComparer.Instance);
 
-        var currentSuffix = MountedTurns.Count - 1;
-        var desiredSuffix = desiredTurns.Count - 1;
-        while (currentSuffix >= prefix && desiredSuffix >= prefix && ReferenceEquals(MountedTurns[currentSuffix], desiredTurns[desiredSuffix]))
+        for (var i = MountedTurns.Count - 1; i >= 0; i--)
         {
-            currentSuffix--;
-            desiredSuffix--;
+            var turn = MountedTurns[i];
+            if (desiredSet.Contains(turn))
+                continue;
+
+            MountedTurns.RemoveAt(i);
+            // The turn left the mounted window: tear down its retained realized host so its
+            // controls/parsed markdown are released (bounds retention to mounted turns).
+            turn.ReleaseRealizedHost();
         }
 
-        for (var i = currentSuffix; i >= prefix; i--)
-            MountedTurns.RemoveAt(i);
+        // Bring MountedTurns to match desiredTurns by identity, reusing each surviving entry (and its
+        // realized host) in place. In every production path the survivors are already an in-order
+        // subsequence of desiredTurns (transcript turns keep chronological/source order and are never
+        // reordered), so this just inserts the missing turns. The move branch keeps the reconcile
+        // correct even if a desired turn is present but out of order — without it, a bare Insert would
+        // duplicate that turn — so the method never depends on callers preserving ordering.
+        for (var i = 0; i < desiredTurns.Count; i++)
+        {
+            var desired = desiredTurns[i];
+            if (i < MountedTurns.Count && ReferenceEquals(MountedTurns[i], desired))
+                continue;
 
-        for (var i = prefix; i <= desiredSuffix; i++)
-            MountedTurns.Insert(i, desiredTurns[i]);
+            var existingIndex = -1;
+            for (var j = i + 1; j < MountedTurns.Count; j++)
+            {
+                if (ReferenceEquals(MountedTurns[j], desired))
+                {
+                    existingIndex = j;
+                    break;
+                }
+            }
+
+            if (existingIndex >= 0)
+                MountedTurns.Move(existingIndex, i);
+            else
+                MountedTurns.Insert(i, desired);
+        }
+    }
+
+    private void ReleaseAllMountedHosts()
+    {
+        for (var i = 0; i < MountedTurns.Count; i++)
+            MountedTurns[i].ReleaseRealizedHost();
     }
 
     private double GetMountedHeight()

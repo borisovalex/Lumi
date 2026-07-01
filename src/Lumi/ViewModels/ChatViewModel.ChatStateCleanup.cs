@@ -1,6 +1,10 @@
 using System;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
+using Avalonia.Threading;
+using GitHub.Copilot;
 using Lumi.Models;
 
 namespace Lumi.ViewModels;
@@ -31,17 +35,20 @@ public partial class ChatViewModel
         foreach (var chatId in _sessionCache.Keys
                      .Concat(_ctsSources.Keys)
                      .Concat(_runtimeStates.Keys)
+                     .Concat(_chatBrowserServices.Keys)
                      .Distinct()
                      .ToList())
         {
             ReleaseSessionResources(chatId, cancelActiveRequest: true, deleteServerSession: false);
             RemoveSuggestionTracking(chatId);
             DisposeBrowserService(chatId);
-            _dataStore.RemoveChatLoadLock(chatId);
         }
 
         _runtimeStates.Clear();
+        _pendingQuestions.Clear();
+        _queuedBusySendPrompts.Clear();
         _inProgressMessages.Clear();
+        _voiceService.Dispose();
         _modelSelectionSaveCts?.Cancel();
         _modelSelectionSaveCts?.Dispose();
         _modelSelectionSaveCts = null;
@@ -51,12 +58,53 @@ public partial class ChatViewModel
         _fileSearchCts?.Cancel();
         _fileSearchCts?.Dispose();
         _fileSearchCts = null;
+        _gitRefreshThrottleCts?.Cancel();
+        _gitRefreshThrottleCts?.Dispose();
+        _gitRefreshThrottleCts = null;
     }
 
     private bool IsChatRuntimeActive(Guid chatId)
         => _runtimeStates.TryGetValue(chatId, out var runtime)
-           && (runtime.IsBusy || runtime.IsStreaming || runtime.HasPendingBackgroundWork
-               || runtime.PendingSessionUserMessageCount > 0);
+           && runtime.HasActiveWork;
+
+    internal bool OwnsLiveChat(Guid chatId)
+    {
+        if (IsChatRuntimeActive(chatId)
+            || _ctsSources.ContainsKey(chatId)
+            || _inProgressMessages.ContainsKey(chatId))
+            return true;
+
+        var chat = _dataStore.Data.Chats.FirstOrDefault(candidate => candidate.Id == chatId);
+        return chat?.Messages.Any(message =>
+            message.ToolName == "ask_question"
+            && message.ToolStatus == "InProgress"
+            && message.QuestionId is { Length: > 0 } questionId
+            && _pendingQuestions.ContainsKey(questionId)) == true;
+    }
+
+    // A browser session outlives its chat's runtime state (it persists across chat switches), so a
+    // surface can still hold one for a chat it no longer "owns". Deletion paths use this to ensure
+    // the browser is torn down rather than leaking until app shutdown.
+    internal bool HasBrowserService(Guid chatId) => _chatBrowserServices.ContainsKey(chatId);
+
+    internal bool OwnsAnyLiveChat()
+    {
+        foreach (var chatId in _runtimeStates.Keys
+                     .Concat(_ctsSources.Keys)
+                     .Concat(_inProgressMessages.Keys)
+                     .Distinct())
+        {
+            if (OwnsLiveChat(chatId))
+                return true;
+        }
+
+        return _dataStore.Data.Chats.Any(chat =>
+            chat.Messages.Any(message =>
+                message.ToolName == "ask_question"
+                && message.ToolStatus == "InProgress"
+                && message.QuestionId is { Length: > 0 } questionId
+                && _pendingQuestions.ContainsKey(questionId)));
+    }
 
     private void QueueBusySendPrompt(Guid chatId, string prompt)
     {
@@ -126,6 +174,18 @@ public partial class ChatViewModel
         return false;
     }
 
+    private void DropCompletedTurnState(Guid chatId, bool dropCancellation)
+    {
+        _inProgressMessages.Remove(chatId);
+
+        if (!dropCancellation)
+            return;
+
+        // SessionIdle is emitted after background work is drained. Drop our
+        // reference without cancelling/disposal, matching ReleasePreviousTurnCancellation.
+        _ctsSources.Remove(chatId);
+    }
+
     private void DisposeSessionSubscription(Guid chatId)
     {
         if (_sessionSubs.TryGetValue(chatId, out var sub))
@@ -133,6 +193,8 @@ public partial class ChatViewModel
             sub.Dispose();
             _sessionSubs.Remove(chatId);
         }
+        _activeMcpConfigs.TryRemove(chatId, out _);
+        ForgetMcpOAuthState(chatId);
     }
 
     private void RemoveSuggestionTracking(Guid chatId)
@@ -143,10 +205,9 @@ public partial class ChatViewModel
 
     private void DisposeBrowserService(Guid chatId)
     {
-        if (_chatBrowserServices.TryGetValue(chatId, out var browserSvc))
+        if (_chatBrowserServices.TryRemove(chatId, out var browserSvc))
         {
             _ = browserSvc.DisposeAsync();
-            _chatBrowserServices.Remove(chatId);
         }
     }
 
@@ -232,16 +293,66 @@ public partial class ChatViewModel
 
         if (_sessionCache.TryGetValue(chatId, out var session))
         {
-            if (deleteServerSession)
-                _ = _copilotService.DeleteSessionAsync(session.SessionId);
-
+            var releaseTask = DisposeReleasedSessionAsync(session, deleteServerSession);
+            _sessionReleaseTasks[chatId] = releaseTask;
+            _ = releaseTask.ContinueWith(
+                _ => Dispatcher.UIThread.Post(() =>
+                {
+                    if (_sessionReleaseTasks.TryGetValue(chatId, out var trackedTask)
+                        && ReferenceEquals(trackedTask, releaseTask))
+                    {
+                        _sessionReleaseTasks.Remove(chatId);
+                    }
+                }),
+                TaskScheduler.Default);
             _sessionCache.Remove(chatId);
         }
 
         _inProgressMessages.Remove(chatId);
     }
 
-    private void ReleaseInactiveChatState(Chat chat, bool canEvictMessages)
+    private async Task DisposeReleasedSessionAsync(CopilotSession session, bool deleteServerSession)
+    {
+        try
+        {
+            if (deleteServerSession)
+                await _copilotService.DisposeAndDeleteSessionAsync(session).ConfigureAwait(false);
+            else
+                await session.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Lumi] Failed to release Copilot session {session.SessionId}: {ex.Message}");
+        }
+    }
+
+    private async Task AwaitPendingSessionReleaseAsync(Guid chatId, CancellationToken ct)
+    {
+        if (!_sessionReleaseTasks.TryGetValue(chatId, out var releaseTask))
+            return;
+
+        try
+        {
+            await releaseTask.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Lumi] Failed while waiting for released session for chat {chatId}: {ex.Message}");
+        }
+
+        if (releaseTask.IsCompleted
+            && _sessionReleaseTasks.TryGetValue(chatId, out var trackedTask)
+            && ReferenceEquals(trackedTask, releaseTask))
+        {
+            _sessionReleaseTasks.Remove(chatId);
+        }
+    }
+
+    private void ReleaseInactiveChatState(Chat chat)
     {
         if (CurrentChat?.Id == chat.Id || IsChatRuntimeActive(chat.Id))
             return;
@@ -249,12 +360,11 @@ public partial class ChatViewModel
         CancelPendingQuestions(chat);
         ReleaseSessionResources(chat.Id, cancelActiveRequest: false, deleteServerSession: false);
         RemoveSuggestionTracking(chat.Id);
-        DisposeBrowserService(chat.Id);
+        // Intentionally keep the chat's BrowserService alive. A browser session belongs to the
+        // chat, not its transient runtime state, so switching away and back restores the page
+        // instead of losing the browser (and its toggle button). The service is disposed when the
+        // chat is deleted (CleanupSession) or the app shuts down (Dispose).
         _runtimeStates.Remove(chat.Id);
-        _dataStore.RemoveChatLoadLock(chat.Id);
-
-        if (canEvictMessages && chat.Messages.Count > 0)
-            chat.Messages.Clear();
     }
 
     /// <summary>
@@ -268,9 +378,7 @@ public partial class ChatViewModel
         var currentChatId = CurrentChat?.Id;
         var staleIds = _runtimeStates
             .Where(kvp => kvp.Key != currentChatId
-                          && !kvp.Value.IsBusy
-                          && !kvp.Value.IsStreaming
-                          && !kvp.Value.HasPendingBackgroundWork)
+                          && !kvp.Value.HasActiveWork)
             .Select(static kvp => kvp.Key)
             .ToList();
 
@@ -278,7 +386,7 @@ public partial class ChatViewModel
         {
             var chat = _dataStore.Data.Chats.FirstOrDefault(c => c.Id == chatId);
             if (chat is not null)
-                ReleaseInactiveChatState(chat, canEvictMessages: true);
+                ReleaseInactiveChatState(chat);
             else
             {
                 // Chat was deleted but runtime state lingered — clean up directly
@@ -286,8 +394,8 @@ public partial class ChatViewModel
                 RemoveSuggestionTracking(chatId);
                 DisposeBrowserService(chatId);
                 _runtimeStates.Remove(chatId);
-                _dataStore.RemoveChatLoadLock(chatId);
             }
         }
     }
+
 }

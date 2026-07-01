@@ -16,6 +16,24 @@ namespace Lumi.Services;
 public static partial class ToolDisplayHelper
 {
     public const string WorkspaceFileChangedToolName = "workspace_file_changed";
+    public const string BrowserOpenToolName = "lumi_browser_open";
+    public const string BrowserLookToolName = "lumi_browser_look";
+    public const string BrowserFindToolName = "lumi_browser_find";
+    public const string BrowserDoToolName = "lumi_browser_do";
+    public const string BrowserJsToolName = "lumi_browser_js";
+
+    public static string ToRuntimeToolName(string toolName) => toolName switch
+    {
+        "browser" => BrowserOpenToolName,
+        "browser_look" => BrowserLookToolName,
+        "browser_find" => BrowserFindToolName,
+        "browser_do" => BrowserDoToolName,
+        "browser_js" => BrowserJsToolName,
+        _ => toolName
+    };
+
+    public static IReadOnlyList<string> ToRuntimeToolNames(IEnumerable<string> toolNames)
+        => [.. toolNames.Select(ToRuntimeToolName).Distinct(StringComparer.Ordinal)];
 
     public static string GetToolGlyph(string toolName) => toolName switch
     {
@@ -23,7 +41,8 @@ public static partial class ToolDisplayHelper
         "create" or "write_file" or "create_file" or "edit" or "edit_file" or "str_replace" or "insert"
             or "replace_string_in_file" or "multi_replace_string_in_file" or "str_replace_editor" or "apply_patch" => "📝",
         "view" or "read_file" or "read" => "📄",
-        "browser" or "browser_navigate" or "browser_do" or "browser_look" or "browser_js" => "🌐",
+        "browser" or "browser_navigate" or "browser_do" or "browser_look" or "browser_find" or "browser_js"
+            or BrowserOpenToolName or BrowserLookToolName or BrowserFindToolName or BrowserDoToolName or BrowserJsToolName => "🌐",
         "web_search" or "search" => "🔎",
         "web_fetch" or "lumi_fetch" => "📚",
         "ui_inspect" or "ui_find" or "ui_click" or "ui_type" or "ui_read" => "🖥",
@@ -34,6 +53,7 @@ public static partial class ToolDisplayHelper
         "manage_lumis" => "✦",
         "manage_mcps" => "🔌",
         "manage_memories" => "🧠",
+        "search_chats" or "read_chat" => "💬",
         "code_review" => "🔍",
         "generate_tests" => "🧪",
         "explain_code" => "📖",
@@ -60,6 +80,7 @@ public static partial class ToolDisplayHelper
         => toolName is "view" or "read_file" or "read"
             or "grep" or "glob"
             or "recall_memory"
+            or "search_chats" or "read_chat"
             or "report_intent"
             or "announce_file" or "fetch_skill"
             or "ui_list_windows" or "ui_read"
@@ -122,12 +143,19 @@ public static partial class ToolDisplayHelper
             case "delete_file" or "delete" or "rm":
                 return (Loc.Tool_DeletingFile, ExtractShortFileName(argsJson));
             case "browser":
+            case BrowserOpenToolName:
                 return (Loc.Tool_OpeningPage, ExtractJsonField(argsJson, "url"));
             case "browser_look":
+            case BrowserLookToolName:
                 return (Loc.Tool_BrowserSnapshot, null);
+            case "browser_find":
+            case BrowserFindToolName:
+                return (Loc.Tool_FindingElement, ExtractJsonField(argsJson, "query"));
             case "browser_do":
+            case BrowserDoToolName:
                 return (Loc.Tool_Action, ExtractJsonField(argsJson, "action"));
             case "browser_js":
+            case BrowserJsToolName:
                 return (Loc.Tool_BrowserEvaluate, null);
             case "save_memory":
                 return (Loc.Tool_Remembering, ExtractJsonField(argsJson, "key"));
@@ -156,6 +184,13 @@ public static partial class ToolDisplayHelper
                 return ("Managing MCP servers", ExtractJsonField(argsJson, "action"));
             case "manage_memories":
                 return ("Managing memories", ExtractJsonField(argsJson, "action"));
+            case "search_chats":
+            {
+                var query = ExtractJsonField(argsJson, "query");
+                return ("Searching chats", string.IsNullOrWhiteSpace(query) ? "recent chats" : query);
+            }
+            case "read_chat":
+                return ("Reading chat", ExtractJsonField(argsJson, "chat"));
             case "ask_question":
                 return (Loc.Tool_AskingQuestion, null);
             case "ui_inspect":

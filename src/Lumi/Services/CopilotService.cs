@@ -3,13 +3,14 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Models;
 using Microsoft.Extensions.AI;
 
@@ -22,14 +23,29 @@ public enum CopilotSignInResult
     Failed,
 }
 
+public enum ConnectionState
+{
+    Disconnected,
+    Connected,
+    Error,
+}
+
+public readonly record struct ModelContextWindowLimits(long Default, long? LongContext);
+
+public sealed record ModelContextWindowCatalog(
+    IReadOnlySet<string> LongContextModelIds,
+    IReadOnlyDictionary<string, ModelContextWindowLimits> Limits);
+
 public class CopilotService : IAsyncDisposable
 {
     private CopilotClient? _client;
     /// <summary>Exposes the underlying CopilotClient for advanced usage (e.g. test harness).</summary>
     public CopilotClient? Client => _client;
     private List<ModelInfo>? _models;
+    private ModelContextWindowCatalog? _contextWindowCatalog;
     private string? _fastestModelId;
     private long _connectionGeneration;
+    private ConnectionState _state = ConnectionState.Disconnected;
     private readonly SemaphoreSlim _connectGate = new(1, 1);
     private Action? _cleanupProcessHandlers;
     private IDisposable? _lifecycleSub;
@@ -48,23 +64,33 @@ public class CopilotService : IAsyncDisposable
     /// Subscribers receive the deleted session ID so they can detach cleanly.</summary>
     public event Action<string>? SessionDeletedRemotely;
 
-    public bool IsConnected => _client?.State == ConnectionState.Connected;
+    public bool IsConnected => _client is not null && State == ConnectionState.Connected;
 
     /// <summary>The current connection state of the underlying CopilotClient.
     /// Useful for UI indicators and fallback disconnect detection.</summary>
-    public ConnectionState State => _client?.State ?? ConnectionState.Disconnected;
+    public ConnectionState State => _client is null ? ConnectionState.Disconnected : _state;
 
     /// <summary>Monotonically increasing generation counter. Changes every time a
     /// new CopilotClient is created, allowing consumers to detect stale sessions.</summary>
     public long ConnectionGeneration => Interlocked.Read(ref _connectionGeneration);
 
     public async Task ConnectAsync(CancellationToken ct = default)
-        => await ConnectCoreAsync(forceReconnect: false, ct);
+        => await ConnectCoreAsync(forceReconnect: false, allowCoalesce: true, ct);
 
     public async Task ForceReconnectAsync(CancellationToken ct = default)
-        => await ConnectCoreAsync(forceReconnect: true, ct);
+        => await ConnectCoreAsync(forceReconnect: true, allowCoalesce: true, ct);
 
-    private async Task ConnectCoreAsync(bool forceReconnect, CancellationToken ct)
+    /// <summary>
+    /// Reconnects after the stored credential changed (sign-in / sign-out), guaranteeing a brand
+    /// new client created strictly AFTER the credential write. Unlike <see cref="ForceReconnectAsync"/>
+    /// this never coalesces with an in-flight reconnect: a reconnect that began before the credential
+    /// changed may have read the PREVIOUS credential, and accepting it would strand the app on stale
+    /// auth state — e.g. a fresh login still appearing logged out, or a logout still appearing signed in.
+    /// </summary>
+    public async Task ReconnectForCredentialChangeAsync(CancellationToken ct = default)
+        => await ConnectCoreAsync(forceReconnect: true, allowCoalesce: false, ct);
+
+    private async Task ConnectCoreAsync(bool forceReconnect, bool allowCoalesce, CancellationToken ct)
     {
         CopilotClient? oldClient = null;
         CopilotSession? oldSuggestionSession = null;
@@ -76,22 +102,24 @@ public class CopilotService : IAsyncDisposable
         await _connectGate.WaitAsync(ct);
         try
         {
-            if (!forceReconnect && _client?.State == ConnectionState.Connected)
+            if (!forceReconnect && IsConnected)
                 return;
 
-            // Another caller already reconnected while we were waiting on the gate.
-            // The client is fresh and healthy — no need to create yet another one.
-            if (forceReconnect
+            // Another caller already reconnected while we were waiting on the gate. The client is
+            // fresh and healthy — no need to create yet another one. This coalescing is SKIPPED for
+            // credential-change reconnects (allowCoalesce == false): the winning reconnect may have
+            // read the PREVIOUS credential and must not be accepted as our post-change client.
+            if (forceReconnect && allowCoalesce
                 && Interlocked.Read(ref _connectionGeneration) != generationBeforeWait
-                && _client?.State == ConnectionState.Connected)
+                && IsConnected)
                 return;
 
             oldClient = _client;
             var cliPath = FindCliPath();
             var clientOptions = new CopilotClientOptions
             {
-                CliPath = cliPath ?? "copilot",
-                LogLevel = "error",
+                Connection = RuntimeConnection.ForStdio(cliPath ?? "copilot"),
+                LogLevel = CopilotLogLevel.Error,
             };
 
             ConfigureAuthentication(clientOptions);
@@ -100,7 +128,9 @@ public class CopilotService : IAsyncDisposable
             await newClient.StartAsync(ct);
 
             _client = newClient;
+            _state = ConnectionState.Connected;
             _models = null;
+            _contextWindowCatalog = null;
             _fastestModelId = null;
             await _suggestionGate.WaitAsync(ct).ConfigureAwait(false);
             try
@@ -124,7 +154,7 @@ public class CopilotService : IAsyncDisposable
             SubscribeToCliProcessExit(newClient);
 
             // Subscribe to client-level session lifecycle events (e.g. remote deletion)
-            _lifecycleSub = newClient.On(SessionLifecycleEventTypes.Deleted, evt =>
+            _lifecycleSub = newClient.OnLifecycle<SessionDeletedEvent>(evt =>
             {
                 if (!string.IsNullOrEmpty(evt.SessionId))
                     SessionDeletedRemotely?.Invoke(evt.SessionId);
@@ -147,11 +177,71 @@ public class CopilotService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Tears down the current client and CLI process, leaving the service cleanly disconnected and
+    /// still reusable (gates are not disposed). Used after a successful sign-out when the follow-up
+    /// unauthenticated reconnect fails, to guarantee no authenticated session lingers in memory.
+    /// </summary>
+    public async Task DisconnectAsync()
+    {
+        CopilotClient? oldClient;
+        CopilotSession? oldSuggestionSession;
+
+        await _connectGate.WaitAsync();
+        try
+        {
+            // Detach process/RPC watchers BEFORE dropping the client so the subsequent dispose can't
+            // trip the CLI-process-exit handler into an auto-reconnect.
+            _cleanupProcessHandlers?.Invoke();
+            _cleanupProcessHandlers = null;
+            _lifecycleSub?.Dispose();
+            _lifecycleSub = null;
+
+            oldClient = _client;
+            _client = null;
+            _state = ConnectionState.Disconnected;
+            _models = null;
+            _contextWindowCatalog = null;
+            _fastestModelId = null;
+            Interlocked.Increment(ref _connectionGeneration);
+        }
+        finally
+        {
+            _connectGate.Release();
+        }
+
+        await _suggestionGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            oldSuggestionSession = _suggestionSession;
+            _suggestionSession = null;
+        }
+        finally
+        {
+            _suggestionGate.Release();
+        }
+
+        if (oldSuggestionSession is not null)
+        {
+            // Best-effort: a failure tearing down the suggestion session must NOT prevent the
+            // authenticated client below from being disposed (that would leave a signed-in CLI
+            // process alive after a confirmed logout).
+            try { await DisposeAndDeleteSessionAsync(oldSuggestionSession).ConfigureAwait(false); }
+            catch { /* best-effort */ }
+        }
+
+        if (oldClient is not null)
+        {
+            try { await oldClient.DisposeAsync(); }
+            catch { /* best-effort */ }
+        }
+    }
+
     /// <summary>Pings the CLI process with a timeout. Returns false if
     /// the client is missing, disconnected, or unresponsive.</summary>
     public async Task<bool> IsHealthyAsync(TimeSpan? timeout = null)
     {
-        if (_client is null || _client.State != ConnectionState.Connected)
+        if (_client is null || State != ConnectionState.Connected)
             return false;
         try
         {
@@ -169,7 +259,7 @@ public class CopilotService : IAsyncDisposable
     /// objects and subscribes to their exit/disconnect events.
     /// When the CLI process dies, the service automatically reconnects and then
     /// fires <see cref="CliProcessExited"/> so consumers can update UI state.
-    /// If reflection fails (SDK internals changed), falls back to polling <see cref="ConnectionState"/>.</summary>
+    /// If reflection fails (SDK internals changed), falls back to periodic ping checks.</summary>
     private void SubscribeToCliProcessExit(CopilotClient client)
     {
         var gen = ConnectionGeneration;
@@ -177,6 +267,8 @@ public class CopilotService : IAsyncDisposable
         void FireOnce()
         {
             if (Interlocked.CompareExchange(ref fired, 1, 0) != 0) return;
+            if (gen == ConnectionGeneration)
+                _state = ConnectionState.Disconnected;
             // Auto-reconnect at the service level, then notify consumers.
             // This keeps reconnect responsibility in CopilotService instead of
             // requiring every per-session handler to independently call ForceReconnectAsync.
@@ -248,12 +340,12 @@ public class CopilotService : IAsyncDisposable
         catch
         {
             // Reflection failed — SDK internals may have changed.
-            // Fall back to polling ConnectionState as a last resort.
+            // Fall back to polling the runtime as a last resort.
             StartStatePollingFallback(client, gen, FireOnce);
         }
     }
 
-    /// <summary>Polls ConnectionState every 3 seconds as a fallback when reflection-based
+    /// <summary>Pings the runtime every 3 seconds as a fallback when reflection-based
     /// process exit detection is unavailable.</summary>
     private void StartStatePollingFallback(CopilotClient client, long gen, Action fireOnce)
     {
@@ -268,7 +360,18 @@ public class CopilotService : IAsyncDisposable
                 {
                     await Task.Delay(3000, pollCts.Token);
                     if (gen != ConnectionGeneration) return;
-                    if (client.State is ConnectionState.Disconnected or ConnectionState.Error)
+                    using var pingCts = CancellationTokenSource.CreateLinkedTokenSource(pollCts.Token);
+                    pingCts.CancelAfter(TimeSpan.FromSeconds(5));
+
+                    try
+                    {
+                        await client.PingAsync(cancellationToken: pingCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (pollCts.Token.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch
                     {
                         fireOnce();
                         return;
@@ -291,6 +394,7 @@ public class CopilotService : IAsyncDisposable
         catch
         {
             // Reconnect failed — consumers still need to know the CLI died.
+            _state = ConnectionState.Error;
         }
 
         CliProcessExited?.Invoke(exitedGeneration);
@@ -303,34 +407,139 @@ public class CopilotService : IAsyncDisposable
         return _models;
     }
 
-    /// <summary>Returns the cheapest/fastest model ID from the cached model list.
-    /// Uses billing multiplier as a proxy for speed — lower cost ≈ faster/lighter.
-    /// Falls back to models whose name suggests a lightweight tier (e.g. "mini", "flash").</summary>
+    public async Task<IReadOnlySet<string>> GetLongContextModelIdsAsync(CancellationToken ct = default)
+        => (await GetContextWindowCatalogAsync(ct).ConfigureAwait(false)).LongContextModelIds;
+
+    public async Task<ModelContextWindowCatalog> GetContextWindowCatalogAsync(CancellationToken ct = default)
+    {
+        if (_client is null) throw new InvalidOperationException("Not connected");
+        if (_contextWindowCatalog is not null)
+            return _contextWindowCatalog;
+
+        try
+        {
+#pragma warning disable GHCP001
+            var rawModels = await _client.Rpc.Models.ListAsync(null, ct).ConfigureAwait(false);
+#pragma warning restore GHCP001
+            var longContextModelIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var limits = new Dictionary<string, ModelContextWindowLimits>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var model in rawModels.Models)
+            {
+                if (string.IsNullOrWhiteSpace(model.Id))
+                    continue;
+
+                var tokenPrices = model.Billing?.TokenPrices;
+                var defaultContextMax = NormalizeContextMax(tokenPrices?.ContextMax);
+                var longContextMax = NormalizeContextMax(tokenPrices?.LongContext?.ContextMax);
+                if (longContextMax > 0)
+                    longContextModelIds.Add(model.Id);
+
+                if (defaultContextMax > 0 || longContextMax > 0)
+                {
+                    limits[model.Id] = new ModelContextWindowLimits(
+                        defaultContextMax > 0 ? defaultContextMax : 0,
+                        longContextMax > 0 ? longContextMax : null);
+                }
+            }
+
+            _contextWindowCatalog = new ModelContextWindowCatalog(longContextModelIds, limits);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Failed to load context window model catalog: {ex}");
+            _contextWindowCatalog = new ModelContextWindowCatalog(
+                new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                new Dictionary<string, ModelContextWindowLimits>(StringComparer.OrdinalIgnoreCase));
+        }
+
+        return _contextWindowCatalog;
+    }
+
+    private static long NormalizeContextMax(double? tokens)
+    {
+        if (tokens is null || double.IsNaN(tokens.Value) || double.IsInfinity(tokens.Value) || tokens.Value <= 0)
+            return 0;
+
+        return (long)Math.Round(tokens.Value);
+    }
+
+    /// <summary>Known fast, low-latency models preferred for lightweight background work
+    /// (chat titles and follow-up suggestions), in priority order. The first one the
+    /// signed-in account can actually access wins; if none are available we fall back to a
+    /// cost-based heuristic. gpt-5.4-mini leads because it is fast and produces good
+    /// lightweight output.</summary>
+    internal static readonly string[] PreferredFastModelIds =
+    {
+        "gpt-5.4-mini",
+        "gpt-5-mini",
+        "gemini-3.5-flash",
+        "claude-haiku-4.5",
+    };
+
+    /// <summary>Returns the model ID to use for fast/lightweight sessions (titles, suggestions).
+    /// Prefers a known fast model (<see cref="PreferredFastModelIds"/>) when the account has
+    /// access; otherwise uses the lowest billing multiplier as a proxy for speed, then a
+    /// lightweight-sounding name (e.g. "mini", "flash"), then the first available model.</summary>
     public async Task<string?> GetFastestModelIdAsync(CancellationToken ct = default)
     {
         if (_fastestModelId is not null) return _fastestModelId;
         try
         {
             var models = await GetModelsAsync(ct);
-
-            // Primary: lowest billing multiplier
-            _fastestModelId = models
-                .Where(m => m.Billing is not null)
-                .OrderBy(m => m.Billing!.Multiplier)
-                .FirstOrDefault()?.Id;
-
-            // Fallback: pick a model whose name hints at a lightweight tier
-            _fastestModelId ??= models
-                .FirstOrDefault(m =>
-                    m.Id.Contains("mini", StringComparison.OrdinalIgnoreCase) ||
-                    m.Id.Contains("flash", StringComparison.OrdinalIgnoreCase) ||
-                    m.Id.Contains("haiku", StringComparison.OrdinalIgnoreCase))?.Id;
-
-            // Last resort: just use the first available model
-            _fastestModelId ??= models.FirstOrDefault()?.Id;
+            var candidates = models
+                .Where(m => !string.IsNullOrWhiteSpace(m.Id))
+                .Select(m => (m.Id, Multiplier: m.Billing is null ? (double?)null : Convert.ToDouble(m.Billing.Multiplier)))
+                .ToList();
+            _fastestModelId = SelectFastestModelId(candidates, PreferredFastModelIds);
         }
         catch { /* best effort — fall back to default model */ }
         return _fastestModelId;
+    }
+
+    /// <summary>Pure selection logic for <see cref="GetFastestModelIdAsync"/>, separated so it
+    /// can be unit-tested without a live connection. <paramref name="models"/> is the available
+    /// model list (id + optional billing multiplier); <paramref name="preferredIds"/> is the
+    /// priority allowlist of known-fast models.</summary>
+    internal static string? SelectFastestModelId(
+        IReadOnlyList<(string Id, double? Multiplier)> models,
+        IReadOnlyList<string> preferredIds)
+    {
+        if (models is null || models.Count == 0)
+            return null;
+
+        // Preferred: first known-fast model the account can access, in priority order.
+        foreach (var preferred in preferredIds)
+        {
+            var match = models.FirstOrDefault(m =>
+                string.Equals(m.Id, preferred, StringComparison.OrdinalIgnoreCase));
+            if (match.Id is not null)
+                return match.Id;
+        }
+
+        // Lowest billing multiplier — cheapest ≈ lightest/fastest.
+        var cheapest = models
+            .Where(m => m.Multiplier is not null)
+            .OrderBy(m => m.Multiplier!.Value)
+            .Select(m => m.Id)
+            .FirstOrDefault();
+        if (cheapest is not null)
+            return cheapest;
+
+        // Name hints at a lightweight tier.
+        var lightweight = models.FirstOrDefault(m =>
+            m.Id.Contains("mini", StringComparison.OrdinalIgnoreCase) ||
+            m.Id.Contains("flash", StringComparison.OrdinalIgnoreCase) ||
+            m.Id.Contains("haiku", StringComparison.OrdinalIgnoreCase)).Id;
+        if (lightweight is not null)
+            return lightweight;
+
+        // Last resort: first available model.
+        return models[0].Id;
     }
 
     /// <summary>Creates a new Copilot session with the given configuration.</summary>
@@ -387,6 +596,43 @@ public class CopilotService : IAsyncDisposable
         return await _client.ResumeSessionAsync(sessionId, config, ct);
     }
 
+    /// <summary>
+    /// Initiates the interactive OAuth login flow for a remote MCP server and opens the returned
+    /// authorization URL in the system browser.
+    /// </summary>
+    /// <remarks>
+    /// The SDK only drives interactive MCP OAuth when a consumer asks for it — without this call the
+    /// runtime installs a browserless fallback that can merely reuse an already-cached token. The
+    /// returned URL is empty when a cached token already authenticated the server (no browser needed);
+    /// when non-empty, the runtime starts the loopback callback listener before returning and finishes
+    /// the flow in the background, signalling completion via the session's
+    /// <c>mcp_server_status_changed</c> event.
+    /// </remarks>
+    /// <returns>The authorization URL that was opened, or an empty string when no browser step was required.</returns>
+    public async Task<string> StartMcpOAuthLoginAsync(
+        CopilotSession session,
+        string serverName,
+        bool forceReauth = false,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        if (string.IsNullOrWhiteSpace(serverName))
+            return string.Empty;
+
+        var result = await session.Rpc.Mcp.Oauth.LoginAsync(
+            serverName,
+            forceReauth,
+            clientName: "Lumi",
+            callbackSuccessMessage: $"Signed in to \"{serverName}\". You can return to Lumi — the MCP server will reconnect automatically.",
+            ct).ConfigureAwait(false);
+
+        var url = result?.AuthorizationUrl;
+        if (!string.IsNullOrWhiteSpace(url))
+            OpenBrowser(url);
+
+        return url ?? string.Empty;
+    }
+
     /// <summary>Lists all known sessions, optionally filtered.</summary>
     public async Task<List<SessionMetadata>> ListSessionsAsync(
         SessionListFilter? filter = null, CancellationToken ct = default)
@@ -440,7 +686,7 @@ public class CopilotService : IAsyncDisposable
     // ── Account API ──
 
     /// <summary>Gets the current account quota information.</summary>
-    public async Task<GitHub.Copilot.SDK.Rpc.AccountGetQuotaResult?> GetAccountQuotaAsync(CancellationToken ct = default)
+    public async Task<GitHub.Copilot.Rpc.AccountGetQuotaResult?> GetAccountQuotaAsync(CancellationToken ct = default)
     {
         if (_client is null) return null;
         return await _client.Rpc.Account.GetQuotaAsync(cancellationToken: ct);
@@ -449,7 +695,7 @@ public class CopilotService : IAsyncDisposable
     // ── Tools API ──
 
     /// <summary>Lists all available tools for the current model.</summary>
-    public async Task<List<GitHub.Copilot.SDK.Rpc.Tool>> ListToolsAsync(string? model = null, CancellationToken ct = default)
+    public async Task<List<GitHub.Copilot.Rpc.Tool>> ListToolsAsync(string? model = null, CancellationToken ct = default)
     {
         if (_client is null) return [];
         var result = await _client.Rpc.Tools.ListAsync(model, ct);
@@ -483,7 +729,8 @@ public class CopilotService : IAsyncDisposable
             if (legacyProcess is null) return CopilotSignInResult.Failed;
             await legacyProcess.WaitForExitAsync(ct);
             if (legacyProcess.ExitCode != 0) return CopilotSignInResult.Failed;
-            await ConnectAsync(ct);
+            // Build a fresh client that loads the just-written credential (see ReconnectAfterSignInAsync).
+            await ReconnectAfterSignInAsync(ct);
             return CopilotSignInResult.Success;
         }
 
@@ -557,8 +804,35 @@ public class CopilotService : IAsyncDisposable
         if (process.ExitCode != 0)
             return CopilotSignInResult.Failed;
 
-        await ConnectAsync(ct);
+        // Build a fresh client that loads the just-written credential (see ReconnectAfterSignInAsync).
+        await ReconnectAfterSignInAsync(ct);
         return CopilotSignInResult.Success;
+    }
+
+    /// <summary>
+    /// Reconnects after a successful sign-in so the new client loads the freshly written credential.
+    /// Uses a non-coalescing reconnect so an older in-flight reconnect that read the pre-login
+    /// credential cannot satisfy it (which would leave a fresh login still looking logged out).
+    /// Sign-in already succeeded once the credential is on disk, so a transient failure to spin up
+    /// the new client is intentionally swallowed rather than reported as a sign-in failure — the
+    /// previous no-op <c>ConnectAsync</c> never threw here. Cancellation still propagates, and the
+    /// caller's auth-status refresh reconciles the real connection state (it never fabricates a
+    /// logged-in state).
+    /// </summary>
+    private async Task ReconnectAfterSignInAsync(CancellationToken ct)
+    {
+        try
+        {
+            await ReconnectForCredentialChangeAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Credential is valid; connection state is reconciled by the follow-up refresh.
+        }
     }
 
     private static void ParseDeviceCodeLine(string line, ref string? deviceCode, ref string? verificationUrl)
@@ -616,9 +890,23 @@ public class CopilotService : IAsyncDisposable
         if (process is null) return false;
 
         await process.WaitForExitAsync(ct);
+        if (process.ExitCode != 0)
+            return false;
 
-        // Reconnect so the client picks up the new (unauthenticated) state
-        await ForceReconnectAsync(ct);
+        // Logout succeeded: the stored credential is gone, so the user IS signed out regardless of
+        // what happens next. Tear down the authenticated client immediately so a signed-in session
+        // can never linger, then rebuild on the fresh unauthenticated state as a best-effort step. A
+        // failed (or cancelled) reconnect must NOT report logout as failed — that would leave the UI
+        // showing "signed in" over a wiped credential (the unsafe direction).
+        await DisconnectAsync();
+        try
+        {
+            await ReconnectForCredentialChangeAsync(ct);
+        }
+        catch
+        {
+            // Best-effort: already disconnected above, so any reconnect failure is safe to ignore.
+        }
         return true;
     }
 
@@ -658,6 +946,69 @@ public class CopilotService : IAsyncDisposable
         }
 
         options.UseLoggedInUser = true;
+    }
+
+    /// <summary>
+    /// Detects <em>provably</em> transient, server-side failures that are safe to retry with the
+    /// <em>same</em> credential. GitHub's backend occasionally wraps an internal RPC failure in a
+    /// <c>401</c> (e.g. <c>twirp error internal: ... failed to do request</c> against the
+    /// <c>usersd</c> user-service) on long-running sessions; the stored token is still valid and a
+    /// plain resend (what a manual "continue" does) succeeds once the backend recovers.
+    /// <para>
+    /// This is an ALLOW-LIST by design: it returns <c>true</c> ONLY when the text carries an
+    /// unambiguous backend-internal / transient marker. Everything else — a bare
+    /// <c>401 unauthorized</c>, a bare <c>403 forbidden</c>, an empty body, an expired/revoked/SSO
+    /// message, or <c>AuthenticateToken authentication failed</c> on its own — returns <c>false</c>
+    /// so a genuine logout SURFACES and routes the user to re-authenticate instead of being masked
+    /// behind a silent retry loop. On the login path this asymmetric default is the only safe one:
+    /// a misclassified transient error costs the user one manual retry, whereas a misclassified
+    /// logout strands them.
+    /// </para>
+    /// </summary>
+    internal static bool IsTransientServerAuthError(string? errorText)
+    {
+        if (string.IsNullOrWhiteSpace(errorText))
+            return false;
+
+        var text = errorText.ToLowerInvariant();
+
+        // Unambiguous GitHub backend-internal RPC failures (observed verbatim in CLI logs as a 401
+        // wrapping a twirp/usersd error) plus plain 5xx-style transient phrases. Auth status words
+        // (401/403/unauthorized/forbidden) are deliberately NOT markers on their own, because a
+        // genuine logout looks identical and must be allowed to surface.
+        return text.Contains("twirp error internal")
+            || text.Contains("failed to do request")
+            || text.Contains("usersd")
+            || text.Contains("service unavailable")
+            || text.Contains("temporarily unavailable")
+            || text.Contains("gateway timeout");
+    }
+
+    /// <summary>
+    /// Structured variant for SDK <c>session.error</c> events, which expose the upstream HTTP
+    /// <paramref name="statusCode"/> and error <paramref name="errorType"/> ("authentication",
+    /// "authorization", "quota", "rate_limit", "context_limit", "query") alongside the message.
+    /// <para>
+    /// Like the string overload this is an ALLOW-LIST: a 401/403 status or an
+    /// "authentication"/"authorization" category is NOT transient on its own — only a provable
+    /// backend-internal marker in the message is. This guarantees a genuine logout (bare 401/403,
+    /// empty body, expired/revoked/SSO) surfaces so the user can sign in again. Quota / rate-limit /
+    /// context errors (which can legitimately contain phrases like "try again later") have dedicated
+    /// handling and are never routed through the auth-retry path.
+    /// </para>
+    /// </summary>
+    internal static bool IsTransientServerAuthError(int? statusCode, string? errorType, string? message)
+    {
+        var type = errorType?.ToLowerInvariant();
+
+        // Quota / rate-limit / context errors have dedicated handling (e.g. auto model switch) and
+        // can carry transient-sounding wording; never treat them as an auth blip.
+        if (type is "quota" or "rate_limit" or "context_limit")
+            return false;
+
+        // The status code / category alone is never enough to call an auth failure "transient" —
+        // require a provable backend-internal marker in the message.
+        return IsTransientServerAuthError(message);
     }
 
     internal static string? TryGetGitHubTokenForMcp()
@@ -855,7 +1206,7 @@ public class CopilotService : IAsyncDisposable
             {
                 var result = await session.SendAndWaitAsync(
                     new MessageOptions { Prompt = "title:" },
-                    TimeSpan.FromSeconds(15), innerCt).ConfigureAwait(false);
+                    TimeSpan.FromSeconds(40), innerCt).ConfigureAwait(false);
                 return result?.Data?.Content;
             },
             ct).ConfigureAwait(false);
@@ -863,11 +1214,29 @@ public class CopilotService : IAsyncDisposable
         return rawTitle?.Trim().Trim('"', '\'', '.', '!');
     }
 
-    private static string Truncate(string text, int maxLength) =>
-        text.Length <= maxLength ? text : text[..maxLength];
+    private static string Truncate(string text, int maxLength)
+    {
+        if (text.Length <= maxLength)
+            return text;
+
+        var end = maxLength;
+        // Avoid cutting through a surrogate pair, which would leave a lone surrogate
+        // (malformed UTF-16) that can slow down or corrupt the title request.
+        if (char.IsHighSurrogate(text[end - 1]))
+            end--;
+        return text[..end];
+    }
 
     private const string SuggestionSystemPrompt =
-        "You generate follow-up suggestions for a chat assistant. Use the latest conversation plus the user's historical request patterns across chats. Prefer recurring historical requests when they are plausible next actions. Produce exactly 3 short messages the user might want to send next. Each suggestion must be concise (under 60 characters) and actionable. Output ONLY a JSON array of 3 strings, nothing else. Example: [\"Run code review\", \"Push to main\", \"What are the alternatives?\"]";
+        "You generate follow-up suggestions for a chat assistant. Propose exactly 3 short messages the user would naturally send next, grounded in the CURRENT conversation. " +
+        "QUALITY RULES (most important): " +
+        "1. Ground every suggestion in the specifics of THIS conversation — reference the actual topics, names, entities, files, or details discussed. Avoid vague filler like \"What should I do next?\", \"Run the app\", \"Show a summary\", \"Check for errors\", or \"Tell me more\". " +
+        "2. Advance the conversation — never re-ask something the assistant already answered; build on it instead. " +
+        "3. Follow the user's actual intent and task, not just the broad theme (e.g. in a lesson about learning kanji, suggest a sharper way to study kanji — not an unrelated ramen recipe that merely shares the 'Japanese' theme). " +
+        "4. Make the 3 meaningfully different from each other (e.g. go deeper, take the next concrete action, explore a related angle) — not three rephrasings of one idea. " +
+        "5. Each must be concise (under 60 characters), specific, and something the user would actually click. " +
+        "FREQUENT-REQUESTS LIST: you may also receive a list of the user's frequently-typed requests. Treat it as low-priority reference, NOT a menu: include one only if it is a genuinely natural next step for THIS conversation. Usually none fit — then ignore the list entirely. Never suggest something merely because it is frequent, and ignore any list item that looks like a test, debug, setup, or system command, or is unrelated to the current topic. " +
+        "Output ONLY a JSON array of exactly 3 strings, nothing else. Example: [\"Compare the LG G4 and Sony A95L\", \"Which handles glare better?\", \"Show cheaper alternatives under $1500\"]";
 
     private async Task<CopilotSession> GetOrCreateSuggestionSessionAsync(CancellationToken ct)
     {
@@ -914,7 +1283,7 @@ public class CopilotService : IAsyncDisposable
         if (!string.IsNullOrWhiteSpace(userHistorySummary))
         {
             contextBuilder.AppendLine();
-            contextBuilder.AppendLine("Historical user requests across all chats:");
+            contextBuilder.AppendLine("The user's frequently-typed requests from other chats (reference only — include one ONLY if it is a natural next step for THIS conversation; otherwise ignore this list entirely):");
             contextBuilder.AppendLine(Truncate(userHistorySummary.Trim(), 1400));
         }
 
@@ -1005,9 +1374,77 @@ public class CopilotService : IAsyncDisposable
 
     public async Task DeleteSessionAsync(string sessionId, CancellationToken ct = default)
     {
-        if (_client is null) return;
-        try { await _client.DeleteSessionAsync(sessionId, ct); }
-        catch { /* Best-effort cleanup */ }
+        if (string.IsNullOrWhiteSpace(sessionId))
+            throw new ArgumentException("Session id is required.", nameof(sessionId));
+
+        ExceptionDispatchInfo? remoteDeleteError = null;
+
+        if (_client is not null)
+        {
+            try
+            {
+                await _client.DeleteSessionAsync(sessionId, ct).ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex) when (IsAlreadyDeletedSessionError(ex))
+            {
+                // SDK 1.0 non-persistent helper sessions can have no server-side session file.
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                remoteDeleteError = ExceptionDispatchInfo.Capture(ex);
+            }
+        }
+
+        DeleteLocalSessionStateDirectory(sessionId);
+        remoteDeleteError?.Throw();
+    }
+
+    private static bool IsAlreadyDeletedSessionError(InvalidOperationException ex)
+        => ex.Message.Contains("Session file not found", StringComparison.OrdinalIgnoreCase);
+
+    private static void DeleteLocalSessionStateDirectory(string sessionId)
+    {
+        var sessionDirectory = GetLocalSessionStateDirectory(sessionId);
+        try
+        {
+            Directory.Delete(sessionDirectory, recursive: true);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // Already deleted by the SDK, a concurrent cleanup, or an external process.
+        }
+        catch (IOException)
+        {
+            // Best-effort cleanup: logs may still be held briefly by the runtime.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Best-effort cleanup: preserve delete idempotency if local files are locked down.
+        }
+    }
+
+    private static string GetLocalSessionStateDirectory(string sessionId)
+    {
+        if (Path.IsPathFullyQualified(sessionId)
+            || !string.Equals(Path.GetFileName(sessionId), sessionId, StringComparison.Ordinal))
+        {
+            throw new ArgumentException("Session id must be a single path segment.", nameof(sessionId));
+        }
+
+        var baseDirectory = Path.GetFullPath(Path.Combine(DataStore.CopilotConfigDir, "session-state"));
+        var sessionDirectory = Path.GetFullPath(Path.Combine(baseDirectory, sessionId));
+        var comparison = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+
+        if (!sessionDirectory.StartsWith(baseDirectory + Path.DirectorySeparatorChar, comparison))
+            throw new ArgumentException("Session id resolves outside the session-state directory.", nameof(sessionId));
+
+        return sessionDirectory;
     }
 
     public async Task DisposeAndDeleteSessionAsync(CopilotSession? session)
@@ -1061,6 +1498,10 @@ public class CopilotService : IAsyncDisposable
                 // Graceful stop failed — force kill the CLI process.
                 try { await _client.ForceStopAsync(); }
                 catch { /* best-effort */ }
+            }
+            finally
+            {
+                _state = ConnectionState.Disconnected;
             }
         }
     }

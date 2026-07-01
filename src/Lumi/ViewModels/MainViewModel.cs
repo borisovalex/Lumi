@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -20,6 +21,11 @@ public class ChatGroup
     public ObservableCollection<Chat> Chats { get; set; } = [];
 }
 
+public sealed record DetachedChatWindowRequest(
+    Chat? Chat,
+    ChatWindowViewModel WindowVM,
+    Action ReleaseSurface);
+
 public partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly DataStore _dataStore;
@@ -28,7 +34,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private readonly BrowserService _settingsBrowserService;
     private readonly BackgroundJobService _backgroundJobService;
     private readonly bool _ownsBackgroundJobService;
+    private readonly ChatSurfaceRegistry _chatSurfaceRegistry;
+    private readonly ChatSessionStore _chatSessionStore;
+    private readonly bool _ownsChatSessionStore;
+    private readonly bool _ownsChatSurfaceRegistry;
     private readonly HashSet<Chat> _runningStateSubscriptions = [];
+    private readonly GlobalSearchService _globalSearchService;
+    private readonly CancellationTokenSource _searchIndexCts = new();
     private bool _isDisposed;
     private bool _isRefreshingCopilotState;
     private bool _isSyncingDefaultModelSelectionFromChat;
@@ -73,7 +85,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(IsAgentDebugMapVisible));
     }
 
-    public string AgentDebugCurrentPage => SelectedNavIndex switch
+    public string AgentDebugCurrentPage => DescribeNavPage(SelectedNavIndex);
+
+    /// <summary>
+    /// Single source of truth for the nav-index → page mapping. Consumed by the debug overlay and
+    /// by the UI responsiveness harness so the two can never silently drift apart.
+    /// </summary>
+    internal static string DescribeNavPage(int index) => index switch
     {
         0 => "0 Chat (#PageChat, #Composer, #Transcript)",
         1 => "1 Jobs (#PageJobs)",
@@ -83,14 +101,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
         5 => "5 Memories (#PageMemories)",
         6 => "6 MCP Servers (#PageMcpServers)",
         7 => "7 Settings (#PageSettings)",
-        _ => $"{SelectedNavIndex} Unknown"
+        _ => $"{index} Unknown"
     };
 
     public string AgentDebugMapText =>
         "Debug-only agent map\n" +
         "Nav: #NavChat=0, #NavJobs=1, #NavProjects=2, #NavSkills=3, #NavAgents=4, #NavMemories=5, #NavMcpServers=6, #NavSettings=7\n" +
         "Chat controls: #PageChat, #ChatShell, #Transcript, #Composer, #SearchInput\n" +
-        "CLI: --debug-agent-harness opens fixture, --test-chat-stress runs real Copilot stress check";
+        "CLI: --skip-onboarding --debug-agent-harness opens fixture, --test-chat-stress checks tools, --test-mcp-native checks SDK MCP";
 
     partial void OnSelectedNavIndexChanged(int value)
     {
@@ -106,10 +124,35 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void ToggleSidebar() => IsSidebarCollapsed = !IsSidebarCollapsed;
 
+    /// <summary>State-aware tooltip for the sidebar collapse/expand toggle.</summary>
+    public string SidebarToggleTooltip =>
+        IsSidebarCollapsed ? Loc.Sidebar_ExpandTooltip : Loc.Sidebar_CollapseTooltip;
+
+    /// <summary>
+    /// Whether the collapsed icon rail (quick nav shortcuts shown in place of the hidden sidebar)
+    /// should be visible. Only when onboarded and collapsed.
+    /// </summary>
+    public bool ShowSidebarRail => IsOnboarded && IsSidebarCollapsed;
+
+    partial void OnIsSidebarCollapsedChanged(bool value)
+    {
+        OnPropertyChanged(nameof(SidebarToggleTooltip));
+        OnPropertyChanged(nameof(ShowSidebarRail));
+        // Persistence is handled by the primary window's view (see MainWindow.PersistSidebarCollapsed)
+        // so secondary windows don't clobber the saved layout preference.
+    }
+
+    partial void OnIsOnboardedChanged(bool value) => OnPropertyChanged(nameof(ShowSidebarRail));
+
     [ObservableProperty] private Guid? _activeChatId;
 
     // Sub-ViewModels
-    public ChatViewModel ChatVM { get; }
+    private ChatViewModel _chatVM = null!;
+    public ChatViewModel ChatVM
+    {
+        get => _chatVM;
+        private set => SetProperty(ref _chatVM, value);
+    }
     public BackgroundJobsViewModel JobsVM { get; }
     public SkillsViewModel SkillsVM { get; }
     public AgentsViewModel AgentsVM { get; }
@@ -128,6 +171,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public DataStore DataStore => _dataStore;
 
     public BackgroundJobService BackgroundJobService => _backgroundJobService;
+    public ChatSurfaceRegistry ChatSurfaceRegistry => _chatSurfaceRegistry;
 
     // Grouped chat list for sidebar
     public ObservableCollection<ChatGroup> ChatGroups { get; } = [];
@@ -141,21 +185,39 @@ public partial class MainViewModel : ObservableObject, IDisposable
         UpdateService updateService,
         bool forceOnboarding = false,
         BackgroundJobService? backgroundJobService = null,
-        bool startBackgroundJobs = true
+        bool startBackgroundJobs = true,
+        ChatSurfaceRegistry? chatSurfaceRegistry = null,
+        ChatSessionStore? chatSessionStore = null,
+        GlobalSearchService? globalSearchService = null
 #if DEBUG
-        , bool openAgentDebugHarness = false
+        , bool openAgentDebugHarness = false,
+        bool skipOnboarding = false
 #endif
         )
     {
         _dataStore = dataStore;
         _copilotService = copilotService;
         _settingsBrowserService = new BrowserService();
+        _chatSurfaceRegistry = chatSurfaceRegistry ?? new ChatSurfaceRegistry();
+        _ownsChatSurfaceRegistry = chatSurfaceRegistry is null;
+        _globalSearchService = globalSearchService ?? new GlobalSearchService(
+            () => _dataStore.Data,
+            _dataStore.GetChatSearchSnapshot,
+            releaseChatSnapshot: _dataStore.EvictChatSearchSnapshot,
+            chatFileTimestampProvider: _dataStore.GetChatFileTimestamp);
+        _chatSessionStore = chatSessionStore ?? new ChatSessionStore(dataStore, copilotService, _chatSurfaceRegistry, _globalSearchService);
+        _ownsChatSessionStore = chatSessionStore is null;
 
         var settings = _dataStore.Data.Settings;
         _isDarkTheme = settings.IsDarkTheme;
         _isCompactDensity = settings.IsCompactDensity;
+        _isSidebarCollapsed = settings.SidebarCollapsed;
         _userName = settings.UserName ?? "";
+#if DEBUG
+        _isOnboarded = !forceOnboarding && (settings.IsOnboarded || skipOnboarding);
+#else
         _isOnboarded = settings.IsOnboarded && !forceOnboarding;
+#endif
 
         // Shared GitHub login ViewModel
         LoginVM = new GitHubLoginViewModel(copilotService);
@@ -178,8 +240,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
         };
         OnboardingVM.ThemeChanged += isDark => IsDarkTheme = isDark;
 
-        ChatVM = new ChatViewModel(dataStore, copilotService);
-        _backgroundJobService = backgroundJobService ?? new BackgroundJobService(dataStore, ChatVM);
+        _chatVM = AcquireDraftChatSurface(SelectedProjectFilter);
+        if (backgroundJobService is null)
+        {
+            _backgroundJobService = new BackgroundJobService(dataStore, _chatSurfaceRegistry, _chatSessionStore);
+        }
+        else
+        {
+            _backgroundJobService = backgroundJobService;
+        }
         _ownsBackgroundJobService = backgroundJobService is null;
         JobsVM = new BackgroundJobsViewModel(dataStore, _backgroundJobService);
         SkillsVM = new SkillsViewModel(dataStore);
@@ -190,25 +259,11 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SettingsVM = new SettingsViewModel(dataStore, copilotService, _settingsBrowserService, updateService);
         SettingsVM.LoginVM = LoginVM;
         SearchOverlayVM = new SearchOverlayViewModel(
-            new GlobalSearchService(() => _dataStore.Data, _dataStore.GetChatSearchSnapshot),
+            _globalSearchService,
             () => SelectedNavIndex);
 
-        // When the chat model selector changes the global default, sync it to SettingsVM.
-        ChatVM.DefaultModelSelectionChanged += (model, reasoningEffort) =>
-        {
-            if (SettingsVM.PreferredModel != model || SettingsVM.ReasoningEffort != (reasoningEffort ?? string.Empty))
-            {
-                _isSyncingDefaultModelSelectionFromChat = true;
-                try
-                {
-                    SettingsVM.SyncDefaultModelSelectionFromChat(model, reasoningEffort);
-                }
-                finally
-                {
-                    _isSyncingDefaultModelSelectionFromChat = false;
-                }
-            }
-        };
+        _dataStore.ChatContentChanged += OnDataStoreChatContentChanged;
+        _dataStore.ChatsContentReset += OnDataStoreChatsContentReset;
 
         // Sync settings changes back to MainViewModel
         SettingsVM.PropertyChanged += (_, args) =>
@@ -227,18 +282,19 @@ public partial class MainViewModel : ObservableObject, IDisposable
             else if (args.PropertyName == nameof(SettingsViewModel.IsCompactDensity))
                 IsCompactDensity = SettingsVM.IsCompactDensity;
             else if ((args.PropertyName == nameof(SettingsViewModel.PreferredModel)
-                      || args.PropertyName == nameof(SettingsViewModel.ReasoningEffort))
+                      || args.PropertyName == nameof(SettingsViewModel.ReasoningEffort)
+                      || args.PropertyName == nameof(SettingsViewModel.ContextWindowTier))
                      && !_isSyncingDefaultModelSelectionFromChat
                      && !string.IsNullOrWhiteSpace(SettingsVM.PreferredModel)
                      && (ChatVM.CurrentChat is null || ChatVM.CurrentChat.Messages.Count == 0))
                 ChatVM.RestoreDefaultModelSelection();
             else if (args.PropertyName == nameof(SettingsViewModel.SendWithEnter))
-                ChatVM.SendWithEnter = SettingsVM.SendWithEnter;
+                _chatSessionStore.ApplyToSurfaces(surface => surface.SendWithEnter = SettingsVM.SendWithEnter);
             else if (args.PropertyName is nameof(SettingsViewModel.ShowTimestamps)
                      or nameof(SettingsViewModel.ShowToolCalls)
                      or nameof(SettingsViewModel.ShowReasoning)
                      or nameof(SettingsViewModel.ExpandReasoningWhileStreaming))
-                ChatVM.RebuildTranscript();
+                _chatSessionStore.ApplyToSurfaces(surface => surface.RebuildTranscript());
             else if (args.PropertyName == nameof(SettingsViewModel.IsAuthenticated))
             {
                 if (SettingsVM.IsAuthenticated)
@@ -255,12 +311,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         SkillsVM.SkillsChanged += () =>
         {
-            ChatVM.RefreshComposerCatalogs();
+            _chatSessionStore.ApplyToSurfaces(surface => surface.RefreshComposerCatalogs());
             RefreshFeatureManagementUi();
         };
         AgentsVM.AgentsChanged += () =>
         {
-            ChatVM.RefreshComposerCatalogs();
+            _chatSessionStore.ApplyToSurfaces(surface => surface.RefreshComposerCatalogs());
             RefreshFeatureManagementUi();
         };
 
@@ -277,51 +333,37 @@ public partial class MainViewModel : ObservableObject, IDisposable
             RefreshChatList();
         };
 
-        ChatVM.ChatUpdated += () => { SubscribeChatRunningState(); RefreshChatList(); };
-        ChatVM.ChatTitleChanged += OnChatTitleChanged;
-        ChatVM.PropertyChanged += (_, args) =>
-        {
-            if (args.PropertyName == nameof(ChatViewModel.CurrentChat))
-                ActiveChatId = ChatVM.CurrentChat?.Id;
-            else if (args.PropertyName == nameof(ChatViewModel.IsBusy))
-                RefreshProjectRunningState();
-        };
+        AttachChatViewModel(ChatVM);
+
+        // Feature-management changes can originate from any chat surface (the visible chat,
+        // a chat still running after the user navigated away, a background-job chat, or a
+        // detached window). Subscribe at the store level so the main window's collections
+        // refresh no matter which surface executed the change.
+        _chatSessionStore.SurfaceFeatureManagementStateChanged += OnChatFeatureManagementStateChanged;
 
         ProjectsVM.ProjectsChanged += () =>
         {
-            ChatVM.RefreshComposerCatalogs();
+            _chatSessionStore.ApplyToSurfaces(surface =>
+            {
+                surface.InvalidateProjectSession();
+                surface.RefreshComposerCatalogs();
+            });
             RefreshFeatureManagementUi();
         };
 
         McpServersVM.McpConfigChanged += () =>
         {
-            ChatVM.InvalidateMcpSession();
-            ChatVM.PopulateDefaultMcps();
-            ChatVM.RefreshComposerCatalogs();
-            RefreshFeatureManagementUi();
-        };
-        ChatVM.FeatureManagementStateChanged += () =>
-        {
-            _backgroundJobService.Reschedule();
-            RefreshFeatureManagementUi();
-        };
-
-        ChatVM.ComposerProjectFilterRequested += projectId =>
-        {
-            if (projectId == SelectedProjectFilter)
-                return;
-
-            if (!projectId.HasValue)
+            McpProxyRuntime.Shared.RetireUserRegistrationsExcept(_dataStore.Data.McpServers
+                .Where(server => server.IsEnabled && !string.Equals(server.ServerType, "remote", StringComparison.OrdinalIgnoreCase))
+                .Select(server => server.Id));
+            _chatSessionStore.ApplyToSurfaces(surface =>
             {
-                ClearProjectFilterCommand.Execute(null);
-                return;
-            }
-
-            var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == projectId.Value);
-            if (project is not null)
-                SelectProjectFilterCommand.Execute(project);
+                surface.InvalidateMcpSession();
+                surface.PopulateDefaultMcps();
+                surface.RefreshComposerCatalogs();
+            });
+            RefreshFeatureManagementUi();
         };
-
         LoadProjects();
         SubscribeChatRunningState();
         RefreshChatList();
@@ -338,9 +380,176 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _ = InitializeAsync();
     }
 
+    private void PrepareChatSurface(ChatViewModel surface)
+    {
+        surface.SendWithEnter = _dataStore.Data.Settings.SendWithEnter;
+        surface.ActiveProjectFilterId = SelectedProjectFilter;
+        if (_chatVM is not null)
+            surface.CopyModelCatalogFrom(_chatVM);
+    }
+
+    private ChatViewModel AcquireDraftChatSurface(Guid? projectId)
+        => _chatSessionStore.AcquireDraft(projectId, PrepareChatSurface);
+
+    private Task<ChatViewModel> AcquireChatSurfaceAsync(Chat chat)
+        => _chatSessionStore.AcquireChatAsync(chat, PrepareChatSurface);
+
+    private void AttachChatViewModel(ChatViewModel chatVm)
+    {
+        chatVm.DefaultModelSelectionChanged += OnChatDefaultModelSelectionChanged;
+        chatVm.ChatUpdated += OnChatUpdated;
+        chatVm.ChatTitleChanged += OnChatTitleChanged;
+        chatVm.PropertyChanged += OnChatViewModelPropertyChanged;
+        chatVm.ComposerProjectFilterRequested += OnComposerProjectFilterRequested;
+    }
+
+    private void DetachChatViewModel(ChatViewModel chatVm)
+    {
+        chatVm.DefaultModelSelectionChanged -= OnChatDefaultModelSelectionChanged;
+        chatVm.ChatUpdated -= OnChatUpdated;
+        chatVm.ChatTitleChanged -= OnChatTitleChanged;
+        chatVm.PropertyChanged -= OnChatViewModelPropertyChanged;
+        chatVm.ComposerProjectFilterRequested -= OnComposerProjectFilterRequested;
+    }
+
+    private void ShowChatSurface(ChatViewModel surface)
+    {
+        var previous = ChatVM;
+        if (ReferenceEquals(previous, surface))
+        {
+            _chatSessionStore.Release(surface);
+            ActiveChatId = surface.CurrentChat?.Id;
+            return;
+        }
+
+        DetachChatViewModel(previous);
+        ChatVM = surface;
+        AttachChatViewModel(surface);
+        ActiveChatId = surface.CurrentChat?.Id;
+        _chatSessionStore.Release(previous);
+    }
+
+    private void OnChatDefaultModelSelectionChanged(string model, string? reasoningEffort, string? contextWindowTier)
+    {
+        if (SettingsVM.PreferredModel == model
+            && SettingsVM.ReasoningEffort == (reasoningEffort ?? string.Empty)
+            && SettingsVM.ContextWindowTier == (contextWindowTier ?? SettingsVM.ContextWindowTier))
+            return;
+
+        _isSyncingDefaultModelSelectionFromChat = true;
+        try
+        {
+            SettingsVM.SyncDefaultModelSelectionFromChat(model, reasoningEffort, contextWindowTier);
+        }
+        finally
+        {
+            _isSyncingDefaultModelSelectionFromChat = false;
+        }
+    }
+
+    public void SyncDefaultModelSelectionFromChatSurface(string model, string? reasoningEffort, string? contextWindowTier)
+        => OnChatDefaultModelSelectionChanged(model, reasoningEffort, contextWindowTier);
+
+    private void OnChatUpdated()
+    {
+        SubscribeChatRunningState();
+        RefreshChatList();
+    }
+
+    private void OnChatViewModelPropertyChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (!ReferenceEquals(sender, ChatVM))
+            return;
+
+        if (args.PropertyName == nameof(ChatViewModel.CurrentChat))
+            ActiveChatId = ChatVM.CurrentChat?.Id;
+        else if (args.PropertyName == nameof(ChatViewModel.IsBusy))
+            RefreshProjectRunningState();
+    }
+
+    private void OnChatFeatureManagementStateChanged()
+    {
+        _backgroundJobService.Reschedule();
+        RefreshFeatureManagementUi();
+    }
+
+    private void OnComposerProjectFilterRequested(Guid? projectId)
+    {
+        if (projectId == SelectedProjectFilter)
+            return;
+
+        if (!projectId.HasValue)
+        {
+            ClearProjectFilterCommand.Execute(null);
+            return;
+        }
+
+        var project = _dataStore.Data.Projects.FirstOrDefault(p => p.Id == projectId.Value);
+        if (project is not null)
+            SelectProjectFilterCommand.Execute(project);
+    }
+
     private async Task InitializeAsync()
     {
         await RefreshCopilotStateAsync(refreshAuthStatus: true);
+        _ = WarmSearchIndexAsync();
+    }
+
+    private void OnDataStoreChatContentChanged(Guid chatId)
+        => _globalSearchService.InvalidateChatContent(chatId);
+
+    private void OnDataStoreChatsContentReset()
+        => _globalSearchService.PruneChatContent();
+
+    /// <summary>
+    /// Builds the full-coverage chat content index in the background so search can find any chat by
+    /// its message content — not just the most recent few. The index is persisted between runs.
+    /// </summary>
+    private async Task WarmSearchIndexAsync()
+    {
+        try
+        {
+            await Task.Yield();
+            var indexPath = DataStore.SearchContentIndexFile;
+            var token = _searchIndexCts.Token;
+
+            // Capture the chat list on the UI thread (List<Chat> is not thread-safe), then run all
+            // disk I/O and indexing on a background thread so startup stays responsive.
+            var chats = _dataStore.Data.Chats.ToArray();
+            var liveChatIds = Array.ConvertAll(chats, static chat => chat.Id);
+
+            await Task.Run(async () =>
+            {
+                try
+                {
+                    _globalSearchService.LoadChatContentIndex(indexPath);
+                }
+                catch
+                {
+                    // A missing or corrupt index just means we rebuild from scratch.
+                }
+
+                _globalSearchService.PruneChatContent(liveChatIds);
+                await _globalSearchService.WarmChatContentAsync(chats, token).ConfigureAwait(false);
+            }, token).ConfigureAwait(false);
+
+            try
+            {
+                _globalSearchService.SaveChatContentIndex(indexPath);
+            }
+            catch
+            {
+                // Persisting the index is best-effort; failure only costs a re-warm next launch.
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Shutting down — leave whatever was warmed so far.
+        }
+        catch
+        {
+            // Never let background indexing crash the app.
+        }
     }
 
     public void Dispose()
@@ -349,11 +558,29 @@ public partial class MainViewModel : ObservableObject, IDisposable
             return;
 
         _isDisposed = true;
+        _dataStore.ChatContentChanged -= OnDataStoreChatContentChanged;
+        _dataStore.ChatsContentReset -= OnDataStoreChatsContentReset;
+        _searchIndexCts.Cancel();
+        try
+        {
+            _globalSearchService.SaveChatContentIndex(DataStore.SearchContentIndexFile);
+        }
+        catch
+        {
+            // Best-effort persistence on shutdown.
+        }
+        _searchIndexCts.Dispose();
         _backgroundJobService.JobsChanged -= OnBackgroundJobServiceJobsChanged;
-        UnsubscribeChatRunningState();
+        _chatSessionStore.SurfaceFeatureManagementStateChanged -= OnChatFeatureManagementStateChanged;
         if (_ownsBackgroundJobService)
             _backgroundJobService.Dispose();
-        ChatVM.Dispose();
+        DetachChatViewModel(ChatVM);
+        _chatSessionStore.Release(ChatVM);
+        if (_ownsChatSessionStore)
+            _chatSessionStore.Dispose();
+        UnsubscribeChatRunningState();
+        if (_ownsChatSurfaceRegistry)
+            _chatSurfaceRegistry.Dispose();
         SettingsVM.Dispose();
         _ = _settingsBrowserService.DisposeAsync();
     }
@@ -376,6 +603,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 await SettingsVM.RefreshAuthStatusAsync();
 
             var models = await _copilotService.GetModelsAsync();
+            var contextWindowCatalog = await _copilotService.GetContextWindowCatalogAsync();
+            var longContextModelIds = contextWindowCatalog.LongContextModelIds;
             var modelIds = models.Select(m => m.Id).ToList();
 
             IsConnected = true;
@@ -388,12 +617,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
             if (isCleanState)
                 selected = ChatViewModel.PickBestModel(modelIds);
 
-            ChatVM.AvailableModels.Clear();
-            foreach (var id in modelIds)
-                ChatVM.AvailableModels.Add(id);
-            ChatVM.UpdateModelCapabilities(models);
-            SettingsVM.UpdateModelCapabilities(models);
-            ChatVM.SelectedModel = selected;
+            _chatSessionStore.ApplyToSurfaces(surface =>
+            {
+                surface.AvailableModels.Clear();
+                foreach (var id in modelIds)
+                    surface.AvailableModels.Add(id);
+                surface.UpdateModelCapabilities(models, longContextModelIds, contextWindowCatalog.Limits);
+                surface.SelectedModel = selected;
+            });
+            SettingsVM.UpdateModelCapabilities(models, longContextModelIds);
 
             SettingsVM.UpdateAvailableModels(modelIds);
             if (isCleanState && selected is not null)
@@ -403,7 +635,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             _ = ChatVM.RefreshQuotaAsync();
 
             // Refresh catalogs now that connection is established (discovers workspace/user Copilot agents)
-            ChatVM.RefreshComposerCatalogs();
+            _chatSessionStore.ApplyToSurfaces(surface => surface.RefreshComposerCatalogs());
         }
         catch (Exception ex)
         {
@@ -498,6 +730,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public event Action? ProjectRunningStateChanged;
 
     public event Action<Guid, string>? ChatTitleChanged;
+    public event Action<DetachedChatWindowRequest>? OpenChatWindowRequested;
+    public event Func<Chat, bool>? DetachedChatFocusRequested;
+    public event Action<Guid?>? ChatSelectionSyncRequested;
+    public event Action<Guid>? ChatDeleted;
 
     public void RefreshChatList()
     {
@@ -555,20 +791,62 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     private void SetDraftChatProjectContext(Guid? projectId)
     {
-        if (projectId.HasValue)
-            ChatVM.SetProjectId(projectId.Value);
-        else
-            ChatVM.ClearProjectId();
+        ChatSessionStore.SetDraftProjectContext(ChatVM, projectId);
     }
 
     private async Task<bool> LoadChatAndShowAsync(Chat chat)
     {
-        await ChatVM.LoadChatAsync(chat);
-        if (ChatVM.CurrentChat?.Id != chat.Id)
-            return false;
+        if (TryFocusDetachedChat(chat))
+            return true;
+
+        var visibleSurface = ChatVM;
+        var shouldBridgeLoading = visibleSurface.CurrentChat?.Id != chat.Id;
+        if (shouldBridgeLoading)
+            visibleSurface.IsLoadingChat = true;
+
+        try
+        {
+            var surface = await AcquireChatSurfaceAsync(chat);
+            if (shouldBridgeLoading && !ReferenceEquals(visibleSurface, surface))
+                visibleSurface.IsLoadingChat = false;
+
+            ShowChatSurface(surface);
+            if (ChatVM.CurrentChat?.Id != chat.Id)
+                return false;
+        }
+        catch
+        {
+            if (shouldBridgeLoading)
+                visibleSurface.IsLoadingChat = false;
+            throw;
+        }
 
         SelectedNavIndex = 0;
         return true;
+    }
+
+    private bool TryFocusDetachedChat(Chat chat)
+    {
+        var handlers = DetachedChatFocusRequested;
+        if (handlers is null)
+            return false;
+
+        foreach (Func<Chat, bool> handler in handlers.GetInvocationList())
+        {
+            if (handler(chat))
+            {
+                SelectedNavIndex = 0;
+                ChatSelectionSyncRequested?.Invoke(ActiveChatId);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void ClearMainChatSurface()
+    {
+        ShowChatSurface(AcquireDraftChatSurface(SelectedProjectFilter));
     }
 
     public async Task<bool> OpenChatByIdAsync(Guid chatId)
@@ -596,7 +874,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         if (entry.ChatId is not Guid chatId)
         {
-            ChatVM.ClearChat();
+            ClearMainChatSurface();
             SetDraftChatProjectContext(entry.ProjectFilterId);
             SelectedNavIndex = 0;
             return true;
@@ -628,7 +906,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private void NewChat()
     {
         // If the current chat is empty (no messages), just reuse it
-        if (ChatVM.CurrentChat is not null && ChatVM.CurrentChat.Messages.Count == 0)
+        if (ChatVM.CurrentChat is not null
+            && ChatVM.CurrentChat.Messages.Count == 0
+            && !ChatVM.OwnsAnyLiveChat())
         {
             // Still update the project assignment if a filter is active
             SetDraftChatProjectContext(SelectedProjectFilter);
@@ -636,7 +916,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        ChatVM.ClearChat();
+        ClearMainChatSurface();
 
         // Auto-assign the active project filter to new chats
         SetDraftChatProjectContext(SelectedProjectFilter);
@@ -648,16 +928,6 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (Avalonia.Application.Current is App app)
             app.OpenNewWindow();
-    }
-
-    [RelayCommand]
-    private void OpenChatInNewWindow(Chat? chat)
-    {
-        if (chat is null)
-            return;
-
-        if (Avalonia.Application.Current is App app)
-            app.OpenNewWindow(chat.Id);
     }
 
     [RelayCommand]
@@ -750,7 +1020,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         var deletedActiveChat = ChatVM.CurrentChat?.Id == chat.Id;
 
-        ChatVM.CleanupSession(chat.Id);
+        if (deletedActiveChat)
+            ClearMainChatSurface();
+
+        _chatSessionStore.CleanupChat(chat.Id);
         _dataStore.Data.Chats.Remove(chat);
         _dataStore.RemoveBackgroundJobsForChat(chat.Id);
         _backgroundJobService.Reschedule();
@@ -759,9 +1032,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _dataStore.DeleteChatFile(chat.Id);
         _ = _dataStore.SaveAsync();
         RefreshChatList();
+        ChatDeleted?.Invoke(chat.Id);
 
-        if (deletedActiveChat)
-            ChatVM.ClearChat();
     }
 
     private string? GetProjectDirForChat(Chat chat)
@@ -881,6 +1153,74 @@ public partial class MainViewModel : ObservableObject, IDisposable
         {
             // A newer chat selection superseded this open request.
         }
+    }
+
+    [RelayCommand]
+    private async Task OpenChatInNewWindow(Chat? chat)
+    {
+        var targetChat = chat ?? ChatVM.CurrentChat;
+        var request = targetChat is null
+            ? CreateDetachedWindowRequest(AcquireDraftChatSurface(SelectedProjectFilter), null)
+            : await CreateDetachedChatWindowRequestAsync(targetChat);
+
+        if (request is not null)
+            RaiseOpenChatWindowRequest(request);
+
+        SelectedNavIndex = 0;
+    }
+
+    private async Task<DetachedChatWindowRequest?> CreateDetachedChatWindowRequestAsync(Chat targetChat)
+    {
+        if (TryFocusDetachedChat(targetChat))
+        {
+            if (ChatVM.CurrentChat?.Id == targetChat.Id)
+                ClearMainChatSurface();
+
+            return null;
+        }
+
+        ChatViewModel surface;
+        if (ChatVM.CurrentChat?.Id == targetChat.Id)
+        {
+            surface = ChatVM;
+            _chatSessionStore.Retain(surface);
+            ClearMainChatSurface();
+        }
+        else
+        {
+            surface = await AcquireChatSurfaceAsync(targetChat);
+        }
+
+        return CreateDetachedWindowRequest(surface, targetChat);
+    }
+
+    private DetachedChatWindowRequest CreateDetachedWindowRequest(ChatViewModel surface, Chat? chat)
+    {
+        return new DetachedChatWindowRequest(
+            chat,
+            new ChatWindowViewModel(surface),
+            () => _chatSessionStore.Release(surface));
+    }
+
+    private void RaiseOpenChatWindowRequest(DetachedChatWindowRequest request)
+    {
+        var handlers = OpenChatWindowRequested;
+        if (handlers is not null)
+        {
+            handlers.Invoke(request);
+            return;
+        }
+
+        request.WindowVM.Dispose();
+        request.ReleaseSurface();
+    }
+
+    [RelayCommand]
+    private void OpenNewChatInNewWindow()
+    {
+        RaiseOpenChatWindowRequest(
+            CreateDetachedWindowRequest(AcquireDraftChatSurface(SelectedProjectFilter), null));
+        SelectedNavIndex = 0;
     }
 
     /// <summary>Returns the project name for a given project ID, or null.</summary>

@@ -33,7 +33,9 @@ public partial class SettingsView : UserControl
     private TextBlock? _debugTransparencyValue;
     private StrataSetting? _debugFpsOverlaySetting;
     private ToggleSwitch? _debugFpsOverlayToggle;
+#if DEBUG
     private TopLevel? _topLevel;
+#endif
     private bool _isRecordingHotkey;
     private bool _hotkeyRecordingCooldown;
     private Interactive? _hotkeyEventSource;
@@ -264,6 +266,7 @@ public partial class SettingsView : UserControl
         [Loc.Setting_ShowReasoning] = vm => vm.RevertShowReasoningCommand.Execute(null),
         [Loc.Setting_AutoGenerateTitles] = vm => vm.RevertAutoGenerateTitlesCommand.Execute(null),
         [Loc.Setting_PreferredModel] = vm => vm.RevertDefaultModelSelectionCommand.Execute(null),
+        [Loc.Setting_UseMcpProxy] = vm => vm.RevertUseMcpProxyCommand.Execute(null),
         [Loc.Setting_AutoSaveMemories] = vm => vm.RevertEnableMemoryAutoSaveCommand.Execute(null),
         [Loc.Setting_AutoMaintainMemories] = vm => vm.RevertEnableMemoryAutoMaintenanceCommand.Execute(null),
         [Loc.Setting_AutoSaveChats] = vm => vm.RevertAutoSaveChatsCommand.Execute(null),

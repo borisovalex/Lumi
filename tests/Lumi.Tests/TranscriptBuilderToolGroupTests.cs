@@ -50,6 +50,28 @@ public sealed class TranscriptBuilderToolGroupTests
     }
 
     [Fact]
+    public void ProcessMessageToTranscript_FailedTerminalStatusUpdateShowsCapturedOutput()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var toolVm = CreateToolVm("tool-1", "powershell", "InProgress", "{\"command\":\"dotnet test\"}");
+        builder.ProcessMessageToTranscript(toolVm);
+
+        var group = Assert.IsType<ToolGroupItem>(Assert.Single(Assert.Single(liveTurns).Items));
+        var terminal = Assert.IsType<TerminalPreviewItem>(Assert.Single(group.ToolCalls));
+        Assert.Empty(terminal.Output);
+
+        toolVm.Message.ToolOutput = "Command failed with exit code 1.";
+        toolVm.Message.ToolStatus = "Failed";
+        toolVm.NotifyToolStatusChanged();
+
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Failed, terminal.Status);
+        Assert.Equal("Command failed with exit code 1.", terminal.Output);
+    }
+
+    [Fact]
     public void ProcessMessageToTranscript_SequentialFastTools_KeepOpenGroupMounted()
     {
         var builder = CreateBuilder();
@@ -108,7 +130,7 @@ public sealed class TranscriptBuilderToolGroupTests
     }
 
     [Fact]
-    public void CloseCurrentToolGroup_ClearsLiveStateForIncompleteGroupBeforeIdle()
+    public void CloseCurrentToolGroup_PreservesIncompleteGroupActivityBeforeIdle()
     {
         var builder = CreateBuilder();
         var liveTurns = new ObservableCollection<TranscriptTurn>();
@@ -125,9 +147,70 @@ public sealed class TranscriptBuilderToolGroupTests
         builder.CollapseCompletedBlocksInCurrentTurn();
 
         group = Assert.IsType<ToolGroupItem>(Assert.Single(Assert.Single(liveTurns).Items));
-        Assert.False(group.IsActive);
+        Assert.True(group.IsActive);
         Assert.False(group.IsExpanded);
         Assert.Null(group.StreamingSummary);
+    }
+
+    [Fact]
+    public void Rebuild_PreservesInProgressToolGroupActivity()
+    {
+        var builder = CreateBuilder();
+
+        var turns = builder.Rebuild(
+        [
+            CreateToolVm("tool-1", "view", "Completed", "{\"path\":\"E:\\\\repo\\\\README.md\"}"),
+            CreateToolVm("tool-2", "powershell", "InProgress", "{\"command\":\"dotnet test\"}"),
+        ]);
+
+        var turn = Assert.Single(turns);
+        var group = Assert.IsType<ToolGroupItem>(Assert.Single(turn.Items));
+        Assert.True(group.IsActive);
+        Assert.Equal(2, group.ToolCalls.Count);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Completed, Assert.IsType<ToolCallItem>(group.ToolCalls[0]).Status);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.InProgress, Assert.IsType<TerminalPreviewItem>(group.ToolCalls[1]).Status);
+    }
+
+    [Fact]
+    public void Rebuild_FailedGenericToolShowsPersistedErrorOutput()
+    {
+        var builder = CreateBuilder();
+
+        var failedTool = CreateToolVm(
+            "tool-1",
+            "example_mcp_lookup",
+            "Failed",
+            "{\"query\":\"Busy\"}");
+        failedTool.Message.ToolOutput = "MCP server returned an example lookup failure.";
+
+        var turns = builder.Rebuild([failedTool]);
+
+        var turn = Assert.Single(turns);
+        var singleTool = Assert.IsType<SingleToolItem>(Assert.Single(turn.Items));
+        var toolCall = Assert.IsType<ToolCallItem>(singleTool.Inner);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Failed, toolCall.Status);
+        Assert.Contains("MCP server returned an example lookup failure.", toolCall.MoreInfo);
+    }
+
+    [Fact]
+    public void Rebuild_FailedToolWithFriendlyInfoStillShowsPersistedErrorOutput()
+    {
+        var builder = CreateBuilder();
+        var failedTool = CreateToolVm(
+            "tool-1",
+            "web_fetch",
+            "Failed",
+            "{\"url\":\"https://example.com/docs\"}");
+        failedTool.Message.ToolOutput = "Request failed with status 500.";
+
+        var turns = builder.Rebuild([failedTool]);
+
+        var turn = Assert.Single(turns);
+        var singleTool = Assert.IsType<SingleToolItem>(Assert.Single(turn.Items));
+        var toolCall = Assert.IsType<ToolCallItem>(singleTool.Inner);
+        Assert.Equal(StrataTheme.Controls.StrataAiToolCallStatus.Failed, toolCall.Status);
+        Assert.Contains("example.com", toolCall.MoreInfo);
+        Assert.Contains("Request failed with status 500.", toolCall.MoreInfo);
     }
 
     [Fact]
@@ -608,6 +691,65 @@ public sealed class TranscriptBuilderToolGroupTests
         Assert.Equal("−2", summary.TotalStatsRemoved);
     }
 
+    [Fact]
+    public void ProcessMessageToTranscript_FetchSkillTool_ShowsInlineSkillChipMidTurn()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var fetchSkill = CreateToolVm("tool-1", "fetch_skill", "Completed", "{\"name\":\"Code Helper\"}");
+        builder.ProcessMessageToTranscript(fetchSkill);
+
+        var turn = Assert.Single(liveTurns);
+        var loaded = Assert.IsType<SkillLoadedItem>(Assert.Single(turn.Items));
+        Assert.Equal("Code Helper", loaded.Chip.Name);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_FetchSkillTwice_ShowsInlineChipOnce()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        builder.ProcessMessageToTranscript(CreateToolVm("tool-1", "fetch_skill", "Completed", "{\"name\":\"Code Helper\"}"));
+        builder.ProcessMessageToTranscript(CreateToolVm("tool-2", "fetch_skill", "Completed", "{\"name\":\"Code Helper\"}"));
+
+        var chips = liveTurns.SelectMany(t => t.Items).OfType<SkillLoadedItem>().ToList();
+        Assert.Single(chips);
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_AssistantSkillFromSdk_ShowsChipOnAssistantMessage()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        var assistant = CreateAssistantVm("Done.");
+        assistant.Message.ActiveSkills.Add(new SkillReference { Name = "Document Creator" });
+        builder.ProcessMessageToTranscript(assistant);
+
+        var item = liveTurns.SelectMany(t => t.Items).OfType<AssistantMessageItem>().Single();
+        Assert.True(item.HasSkills);
+        Assert.Contains(item.SkillChips, c => c.Name == "Document Creator");
+    }
+
+    [Fact]
+    public void ProcessMessageToTranscript_FetchSkillUnknownName_ShowsNoChip()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+
+        // "No Such Skill" is not in the data store and there is no external resolver,
+        // so a not-found fetch_skill must not leave behind a misleading chip.
+        builder.ProcessMessageToTranscript(CreateToolVm("tool-1", "fetch_skill", "Completed", "{\"name\":\"No Such Skill\"}"));
+
+        Assert.DoesNotContain(liveTurns.SelectMany(t => t.Items), i => i is SkillLoadedItem);
+    }
+
     private static TranscriptBuilder CreateBuilder(bool showToolCalls = true)
         => new(CreateDataStore(showToolCalls), _ => { }, (_, _) => { }, _ => { }, (_, _) => Task.CompletedTask, () => null);
 
@@ -666,6 +808,7 @@ public sealed class TranscriptBuilderToolGroupTests
 #pragma warning restore SYSLIB0050
         var data = new AppData();
         data.Settings.ShowToolCalls = showToolCalls;
+        data.Skills.Add(new Skill { Name = "Code Helper" });
         typeof(DataStore)
             .GetField("_data", BindingFlags.Instance | BindingFlags.NonPublic)!
             .SetValue(store, data);

@@ -39,8 +39,11 @@ public partial class ChatViewModel
     [ObservableProperty] private string? _agentBadgeText;
     [ObservableProperty] private string[]? _qualityLevels;
     [ObservableProperty] private string? _selectedQuality;
+    [ObservableProperty] private string[]? _contextWindowTiers;
+    [ObservableProperty] private string? _selectedContextWindowTier;
     private bool _suppressModelSelectionSideEffects;
     private bool _suppressSelectedQualitySync;
+    private bool _suppressSelectedContextWindowTierSync;
 
     // ── Plan (server may still generate plans) ──
     [ObservableProperty] private bool _hasPlan;
@@ -55,6 +58,11 @@ public partial class ChatViewModel
         CurrentChat.PlanContent = value;
         QueueSaveChat(CurrentChat, saveIndex: true);
     }
+
+    // ── Skill preview (opened from a transcript skill chip) ──
+    [ObservableProperty] private bool _isSkillOpen;
+    [ObservableProperty] private string? _skillPreviewContent;
+    [ObservableProperty] private string? _skillPreviewTitle;
 
     // ── SDK-discovered agents ──
     [ObservableProperty] private string? _selectedSdkAgentName;
@@ -76,12 +84,23 @@ public partial class ChatViewModel
     /// <summary>True when a chat exists (toggle is locked).</summary>
     public bool IsWorktreeLocked => CurrentChat is not null;
     private int _gitRefreshVersion;
+    private string? _gitStatusDirectory;
+    private CancellationTokenSource? _gitRefreshThrottleCts;
+    private DateTime _lastLiveGitRefreshUtc = DateTime.MinValue;
+    /// <summary>Minimum interval between live git status refreshes triggered by agent
+    /// file edits, so the coding strip updates promptly without thrashing during bursts.</summary>
+    private static readonly TimeSpan GitRefreshMinInterval = TimeSpan.FromMilliseconds(700);
     public ObservableCollection<GitFileChangeViewModel> GitChangedFiles { get; } = [];
     /// <summary>Existing worktrees available for selection (excludes main repo).</summary>
     public ObservableCollection<WorktreeInfo> AvailableWorktrees { get; } = [];
     public bool HasAvailableWorktrees => AvailableWorktrees.Count > 0;
     public bool HasGitChanges => GitChangedFileCount > 0;
     public bool ShowGitStatusBadge => IsRefreshingGitStatus || HasGitChanges;
+    public string GitBranchLabel => !string.IsNullOrWhiteSpace(GitBranch)
+        ? GitBranch
+        : IsRefreshingGitStatus
+            ? Loc.Git_Refreshing
+            : "Git";
     public string GitChangesLabel => GitChangedFileCount switch
     {
         _ when IsRefreshingGitStatus => Loc.Git_Refreshing,
@@ -120,19 +139,27 @@ public partial class ChatViewModel
     private Dictionary<string, List<string>> _modelReasoningEfforts = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, string> _modelDefaultEfforts = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, long> _modelContextTokenLimits = new(StringComparer.OrdinalIgnoreCase);
+    private Dictionary<string, long> _modelLongContextTokenLimits = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _modelsWithLongContext = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Updates the model capabilities cache from SDK ModelInfo list.
     /// Called by MainViewModel after fetching models from the SDK.
     /// </summary>
-    public void UpdateModelCapabilities(List<GitHub.Copilot.SDK.ModelInfo> models)
+    public void UpdateModelCapabilities(
+        List<GitHub.Copilot.ModelInfo> models,
+        IReadOnlySet<string>? longContextModelIds = null,
+        IReadOnlyDictionary<string, ModelContextWindowLimits>? contextWindowLimits = null)
     {
         ModelSelectionHelper.ApplyModelCapabilities(
             models,
             _modelReasoningEfforts,
             _modelDefaultEfforts,
             _modelContextTokenLimits);
+        ApplyContextWindowLimits(contextWindowLimits);
+        _modelsWithLongContext = CopyModelIdSet(longContextModelIds);
         UpdateQualityLevels(SelectedModel);
+        UpdateContextWindowTiers(SelectedModel);
 
         if (CurrentChat is { } chat)
         {
@@ -141,10 +168,72 @@ public partial class ChatViewModel
         }
     }
 
+    public void CopyModelCatalogFrom(ChatViewModel source)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        AvailableModels.Clear();
+        foreach (var model in source.AvailableModels)
+            AvailableModels.Add(model);
+
+        _modelReasoningEfforts = source._modelReasoningEfforts.ToDictionary(
+            static kvp => kvp.Key,
+            static kvp => kvp.Value.ToList(),
+            StringComparer.OrdinalIgnoreCase);
+        _modelDefaultEfforts = new Dictionary<string, string>(
+            source._modelDefaultEfforts,
+            StringComparer.OrdinalIgnoreCase);
+        _modelContextTokenLimits = new Dictionary<string, long>(
+            source._modelContextTokenLimits,
+            StringComparer.OrdinalIgnoreCase);
+        _modelLongContextTokenLimits = new Dictionary<string, long>(
+            source._modelLongContextTokenLimits,
+            StringComparer.OrdinalIgnoreCase);
+        _modelsWithLongContext = new HashSet<string>(
+            source._modelsWithLongContext,
+            StringComparer.OrdinalIgnoreCase);
+        UpdateQualityLevels(SelectedModel);
+        UpdateContextWindowTiers(SelectedModel);
+    }
+
     private void UpdateQualityLevels(string? modelId)
     {
         QualityLevels = ModelSelectionHelper.GetQualityLevels(modelId, _modelReasoningEfforts);
         SyncSelectedQualityFromState(modelId);
+    }
+
+    private void UpdateContextWindowTiers(string? modelId)
+    {
+        ContextWindowTiers = ModelSelectionHelper.GetContextWindowTiers(modelId, _modelsWithLongContext);
+        SyncSelectedContextWindowTierFromState(modelId);
+    }
+
+    private static HashSet<string> CopyModelIdSet(IEnumerable<string>? modelIds)
+        => modelIds?
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Select(static id => id.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    private void ApplyContextWindowLimits(IReadOnlyDictionary<string, ModelContextWindowLimits>? contextWindowLimits)
+    {
+        _modelLongContextTokenLimits.Clear();
+        if (contextWindowLimits is null)
+            return;
+
+        foreach (var (modelId, limits) in contextWindowLimits)
+        {
+            if (string.IsNullOrWhiteSpace(modelId))
+                continue;
+
+            if (limits.Default > 0)
+                _modelContextTokenLimits[modelId] = limits.Default;
+            else if (limits.LongContext is > 0)
+                _modelContextTokenLimits.Remove(modelId);
+
+            if (limits.LongContext is > 0 and var longContextLimit)
+                _modelLongContextTokenLimits[modelId] = longContextLimit;
+        }
     }
 
     private string? GetStoredReasoningEffortPreference()
@@ -189,6 +278,28 @@ public partial class ChatViewModel
         return GetStoredReasoningEffortPreference();
     }
 
+    private string? GetStoredContextWindowTierPreference()
+    {
+        if (CurrentChat is { LastContextWindowTierUsed: { Length: > 0 } chatTier })
+            return chatTier;
+
+        return string.IsNullOrWhiteSpace(_dataStore.Data.Settings.ContextWindowTier)
+            ? ModelContextWindowTiers.Default
+            : _dataStore.Data.Settings.ContextWindowTier;
+    }
+
+    internal string? GetSelectedContextWindowTier()
+    {
+        var explicitTier = ModelSelectionHelper.DisplayToContextWindowTier(SelectedContextWindowTier);
+        if (!string.IsNullOrWhiteSpace(explicitTier))
+            return ModelSelectionHelper.NormalizeContextWindowTier(explicitTier, SelectedModel, _modelsWithLongContext);
+
+        return ModelSelectionHelper.NormalizeContextWindowTier(
+            GetStoredContextWindowTierPreference(),
+            SelectedModel,
+            _modelsWithLongContext);
+    }
+
     internal string? ResolveSelectedModelForChat(Chat chat)
     {
         if (!string.IsNullOrWhiteSpace(chat.LastModelUsed))
@@ -221,6 +332,17 @@ public partial class ChatViewModel
             _modelDefaultEfforts) ?? storedEffort;
     }
 
+    internal string? ResolveSelectedContextWindowTierForChat(Chat chat, string? modelId)
+    {
+        var storedTier = CurrentChat?.Id == chat.Id
+            ? GetSelectedContextWindowTier()
+            : !string.IsNullOrWhiteSpace(chat.LastContextWindowTierUsed)
+                ? chat.LastContextWindowTierUsed
+                : _dataStore.Data.Settings.ContextWindowTier;
+
+        return ModelSelectionHelper.NormalizeContextWindowTier(storedTier, modelId, _modelsWithLongContext);
+    }
+
     private void SyncSelectedQualityFromState(string? modelId = null, string? preferredEffort = null)
     {
         if (QualityLevels is null)
@@ -238,6 +360,22 @@ public partial class ChatViewModel
         SetSelectedQualityValue(display);
     }
 
+    private void SyncSelectedContextWindowTierFromState(string? modelId = null, string? preferredTier = null)
+    {
+        if (ContextWindowTiers is null)
+        {
+            SetSelectedContextWindowTierValue(null);
+            return;
+        }
+
+        var display = ModelSelectionHelper.ResolveSelectedContextWindowTierDisplay(
+            preferredTier ?? GetStoredContextWindowTierPreference(),
+            modelId ?? SelectedModel,
+            _modelsWithLongContext);
+
+        SetSelectedContextWindowTierValue(display);
+    }
+
     private void SetSelectedQualityValue(string? value)
     {
         if (SelectedQuality == value)
@@ -248,13 +386,24 @@ public partial class ChatViewModel
         _suppressSelectedQualitySync = false;
     }
 
-    internal void ApplyModelSelection(string? modelId, string? reasoningEffort)
+    private void SetSelectedContextWindowTierValue(string? value)
+    {
+        if (SelectedContextWindowTier == value)
+            return;
+
+        _suppressSelectedContextWindowTierSync = true;
+        SelectedContextWindowTier = value;
+        _suppressSelectedContextWindowTierSync = false;
+    }
+
+    internal void ApplyModelSelection(string? modelId, string? reasoningEffort, string? contextWindowTier = null)
     {
         _suppressModelSelectionSideEffects = true;
         try
         {
             SetSelectedModelValue(modelId);
             SyncSelectedQualityFromState(modelId, reasoningEffort);
+            SyncSelectedContextWindowTierFromState(modelId, contextWindowTier);
         }
         finally
         {
@@ -278,12 +427,40 @@ public partial class ChatViewModel
                 _dataStore.Save();
             }
 
-            DefaultModelSelectionChanged?.Invoke(SelectedModel ?? string.Empty, effort);
+            DefaultModelSelectionChanged?.Invoke(SelectedModel ?? string.Empty, effort, GetSelectedContextWindowTier());
             return;
         }
 
         if (CurrentChat.LastReasoningEffortUsed != effort)
             CurrentChat.LastReasoningEffortUsed = effort;
+
+        QueueModelSelectionSave();
+        QueueMidSessionModelSelectionSync();
+    }
+
+    partial void OnSelectedContextWindowTierChanged(string? value)
+    {
+        if (_suppressSelectedContextWindowTierSync || _suppressModelSelectionSideEffects)
+            return;
+
+        var contextTier = GetSelectedContextWindowTier();
+        if (contextTier is null)
+            return;
+
+        if (CurrentChat is null || CurrentChat.Messages.Count == 0)
+        {
+            if (_dataStore.Data.Settings.ContextWindowTier != contextTier)
+            {
+                _dataStore.Data.Settings.ContextWindowTier = contextTier;
+                _dataStore.Save();
+            }
+
+            DefaultModelSelectionChanged?.Invoke(SelectedModel ?? string.Empty, GetPersistedReasoningEffortPreference(), contextTier);
+            return;
+        }
+
+        if (CurrentChat.LastContextWindowTierUsed != contextTier)
+            CurrentChat.LastContextWindowTierUsed = contextTier;
 
         QueueModelSelectionSave();
         QueueMidSessionModelSelectionSync();
@@ -303,10 +480,11 @@ public partial class ChatViewModel
         RefreshProjectBadge();
         RefreshAgentBadge();
         UpdateQualityLevels(SelectedModel);
-        _ = RefreshCodingProjectState();
+        UpdateContextWindowTiers(SelectedModel);
+        QueueRefreshCodingProjectState();
     }
 
-    public void RefreshComposerCatalogs(bool syncWorkspaceMcpSelections = true)
+    public void RefreshComposerCatalogs(bool syncProjectContextMcpSelections = true)
     {
         // Start with Lumi agents
         var agentChips = _dataStore.Data.Agents
@@ -326,43 +504,43 @@ public partial class ChatViewModel
                 SecondaryText: BuildChipSearchText(s.Description, s.Content)))
             .ToList();
 
-        // Discover workspace and user-level Copilot agents/skills
-        var workDir = GetEffectiveWorkingDirectory();
-        var externalCatalog = GetExternalCatalog(workDir);
-        DiscoverCopilotItems(externalCatalog, agentChips, skillChips);
+        // Discover project-scoped and user-level Copilot agents. Skills remain either Lumi-owned
+        // or SDK-native through SkillDirectories; Lumi does not advertise file skills itself.
+        var projectContextCatalog = GetProjectContextCatalog();
+        DiscoverCopilotAgents(projectContextCatalog, agentChips);
 
         ReplaceCollection(AvailableAgentChips, agentChips);
         ReplaceCollection(AvailableSkillChips, skillChips);
 
-        // Build MCP chips: Lumi-configured MCPs + workspace MCPs from .vscode/mcp.json
+        // Build MCP chips: Lumi-configured MCPs + project-scoped MCPs from .vscode/mcp.json
         var mcpChips = _dataStore.Data.McpServers
             .Where(s => s.IsEnabled)
             .OrderBy(s => s.Name)
             .Select(s => new StrataComposerChip(s.Name))
             .ToList();
-        var workspaceMcpNames = DiscoverWorkspaceMcps(workDir, mcpChips);
+        var projectContextMcpNames = AddProjectContextMcpChips(projectContextCatalog.McpServers, mcpChips);
         ReplaceCollection(AvailableMcpChips, mcpChips);
 
-        // Remove stale workspace MCPs from the previous project, then add current ones
-        List<StrataComposerChip> staleWorkspaceMcps;
-        var addedWorkspaceMcps = false;
+        // Remove stale project-context MCPs from the previous project, then add current ones.
+        List<StrataComposerChip> staleProjectContextMcps;
+        var addedProjectContextMcps = false;
         _suppressActiveMcpCollectionSync = true;
         try
         {
-            staleWorkspaceMcps = ActiveMcpChips.OfType<StrataComposerChip>().Where(c => c.Glyph == "🔌").ToList();
-            foreach (var stale in staleWorkspaceMcps)
+            staleProjectContextMcps = ActiveMcpChips.OfType<StrataComposerChip>().Where(c => c.Glyph == "🔌").ToList();
+            foreach (var stale in staleProjectContextMcps)
             {
                 ActiveMcpServerNames.Remove(stale.Name);
                 ActiveMcpChips.Remove(stale);
             }
 
-            foreach (var name in workspaceMcpNames)
+            foreach (var name in projectContextMcpNames)
             {
                 if (!ActiveMcpServerNames.Contains(name))
                 {
                     ActiveMcpServerNames.Add(name);
                     ActiveMcpChips.Add(new StrataComposerChip(name, "🔌"));
-                    addedWorkspaceMcps = true;
+                    addedProjectContextMcps = true;
                 }
             }
         }
@@ -371,9 +549,9 @@ public partial class ChatViewModel
             _suppressActiveMcpCollectionSync = false;
         }
 
-        // Persist workspace MCPs to the chat so they survive reload
-        if (syncWorkspaceMcpSelections
-            && (addedWorkspaceMcps || staleWorkspaceMcps.Count > 0)
+        // Persist project-context MCPs to the chat so they survive reload.
+        if (syncProjectContextMcpSelections
+            && (addedProjectContextMcps || staleProjectContextMcps.Count > 0)
             && !IsLoadingChat)
             SyncActiveMcpsToChat();
 
@@ -390,16 +568,14 @@ public partial class ChatViewModel
     }
 
     /// <summary>
-    /// Discovers file-based Copilot agents and skills from the workspace and
-    /// the user's <c>~\.copilot</c> directory.
+    /// Discovers file-based Copilot agents from the workspace and the user's
+    /// <c>~\.copilot</c> directory.
     /// </summary>
-    private static void DiscoverCopilotItems(
-        CopilotCatalogSnapshot catalog,
-        List<StrataComposerChip> agentChips,
-        List<StrataComposerChip> skillChips)
+    private static void DiscoverCopilotAgents(
+        ProjectContextCatalogSnapshot catalog,
+        List<StrataComposerChip> agentChips)
     {
         var existingAgentNames = agentChips.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var existingSkillNames = skillChips.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach (var agent in catalog.Agents)
         {
@@ -411,18 +587,6 @@ public partial class ChatViewModel
                 ExternalAgentGlyph,
                 SecondaryText: BuildChipSearchText(agent.Description, agent.Content)));
             existingAgentNames.Add(agent.Name);
-        }
-
-        foreach (var skill in catalog.Skills)
-        {
-            if (existingSkillNames.Contains(skill.Name))
-                continue;
-
-            skillChips.Add(new StrataComposerChip(
-                skill.Name,
-                ExternalSkillGlyph,
-                SecondaryText: BuildChipSearchText(skill.Description, skill.Content)));
-            existingSkillNames.Add(skill.Name);
         }
     }
 
@@ -453,34 +617,25 @@ public partial class ChatViewModel
     }
 
     /// <summary>
-    /// Discovers MCP servers from .vscode/mcp.json in the workspace directory
-    /// and adds them to the MCP chip list. Returns the names of discovered workspace MCPs.
+    /// Discovers MCP servers from .vscode/mcp.json in project context directories
+    /// and adds them to the MCP chip list. Returns the names of discovered project MCPs.
     /// </summary>
-    private static List<string> DiscoverWorkspaceMcps(string workDir, List<StrataComposerChip> mcpChips)
+    private static List<string> AddProjectContextMcpChips(
+        IReadOnlyList<ProjectContextMcpServerDefinition> contextMcpServers,
+        List<StrataComposerChip> mcpChips)
     {
         var discovered = new List<string>();
-        var mcpJsonPath = Path.Combine(workDir, ".vscode", "mcp.json");
-        if (!File.Exists(mcpJsonPath)) return discovered;
-
         var existingNames = mcpChips.Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        try
+        foreach (var server in contextMcpServers)
         {
-            var json = File.ReadAllText(mcpJsonPath);
-            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (existingNames.Contains(server.Name))
+                continue;
 
-            if (!doc.RootElement.TryGetProperty("servers", out var servers)) return discovered;
-
-            foreach (var server in servers.EnumerateObject())
-            {
-                if (!existingNames.Contains(server.Name))
-                {
-                    mcpChips.Add(new StrataComposerChip(server.Name, "🔌"));
-                    discovered.Add(server.Name);
-                }
-            }
+            mcpChips.Add(new StrataComposerChip(server.Name, "🔌"));
+            discovered.Add(server.Name);
+            existingNames.Add(server.Name);
         }
-        catch { /* best effort */ }
 
         return discovered;
     }
@@ -622,10 +777,16 @@ public partial class ChatViewModel
         OnPropertyChanged(nameof(GitChangesLabel));
     }
 
+    partial void OnGitBranchChanged(string? value)
+    {
+        OnPropertyChanged(nameof(GitBranchLabel));
+    }
+
     partial void OnIsRefreshingGitStatusChanged(bool value)
     {
         OnPropertyChanged(nameof(ShowGitStatusBadge));
         OnPropertyChanged(nameof(GitChangesLabel));
+        OnPropertyChanged(nameof(GitBranchLabel));
     }
 
     partial void OnSelectedAgentNameChanged(string? value)
@@ -756,6 +917,9 @@ public partial class ChatViewModel
     {
         if (!string.IsNullOrWhiteSpace(project.WorkingDirectory))
             return CollapseInlineCompletionText(project.WorkingDirectory, 80);
+
+        if (project.AdditionalContextDirectories.Count > 0)
+            return CollapseInlineCompletionText(ProjectContextDirectoryHelper.FormatFolderList(project.AdditionalContextDirectories), 80);
 
         return BuildChipSearchText(project.Instructions, null);
     }
@@ -1006,11 +1170,11 @@ public partial class ChatViewModel
             CurrentChat.SdkAgentName = value;
             QueueSaveChat(CurrentChat, saveIndex: true);
 
-            var externalCatalog = GetExternalCatalog();
+            var projectContextCatalog = GetProjectContextCatalog();
             var previousExternalAgent = !string.IsNullOrWhiteSpace(previousValue)
-                && FindExternalAgentByName(externalCatalog, previousValue) is not null;
+                && FindExternalAgentByName(projectContextCatalog, previousValue) is not null;
             var currentExternalAgent = !string.IsNullOrWhiteSpace(value)
-                && FindExternalAgentByName(externalCatalog, value) is not null;
+                && FindExternalAgentByName(projectContextCatalog, value) is not null;
 
             if (CurrentChat.CopilotSessionId is not null && (previousExternalAgent || currentExternalAgent))
             {
@@ -1064,7 +1228,7 @@ public partial class ChatViewModel
                 settings.QuotaRemainingPercentage = snapshot.RemainingPercentage;
                 settings.QuotaUsedRequests = snapshot.UsedRequests;
                 settings.QuotaEntitlementRequests = snapshot.EntitlementRequests;
-                settings.QuotaResetDate = reset;
+                settings.QuotaResetDate = reset?.ToString("O");
             });
         }
         catch { /* best effort */ }
@@ -1091,82 +1255,180 @@ public partial class ChatViewModel
         // Increment version so any in-flight async refresh is discarded on completion.
         var version = Interlocked.Increment(ref _gitRefreshVersion);
 
-        // Always use the original project dir for git detection (not worktree)
-        var projectDir = GetProjectWorkingDirectory();
-        var isGit = GitService.IsGitRepo(projectDir);
-        IsCodingProject = isGit;
-
-        // Worktree state comes exclusively from the current chat's persisted data.
-        // On welcome screen (no chat), always reset to local.
-        string? savedWorktreePath = null;
-        if (CurrentChat?.WorktreePath is { Length: > 0 } savedWt && Directory.Exists(savedWt))
+        try
         {
-            savedWorktreePath = savedWt;
-            WorktreePath = savedWt;
-            IsWorktreeMode = true;
-        }
-        else
-        {
-            WorktreePath = null;
-            IsWorktreeMode = false;
-        }
+            // Always use the original project dir for git detection (not worktree)
+            var projectDir = GetProjectWorkingDirectory();
+            var isGit = GitService.IsGitRepo(projectDir);
+            IsCodingProject = isGit;
 
-        // Reset stale branch/change data immediately when switching chats.
-        GitBranch = null;
-        GitChangedFileCount = 0;
-        GitChangedFiles.Clear();
-        IsRefreshingGitStatus = isGit;
+            // Worktree state comes exclusively from the current chat's persisted data.
+            // On welcome screen (no chat), always reset to local.
+            string? savedWorktreePath = null;
+            if (CurrentChat?.WorktreePath is { Length: > 0 } savedWt && Directory.Exists(savedWt))
+            {
+                savedWorktreePath = savedWt;
+                WorktreePath = savedWt;
+                IsWorktreeMode = true;
+            }
+            else
+            {
+                WorktreePath = null;
+                IsWorktreeMode = false;
+            }
 
-        if (!isGit)
-        {
-            AvailableWorktrees.Clear();
-            OnPropertyChanged(nameof(HasAvailableWorktrees));
-            return;
-        }
+            if (!isGit)
+            {
+                GitBranch = null;
+                GitChangedFileCount = 0;
+                GitChangedFiles.Clear();
+                _gitStatusDirectory = null;
+                AvailableWorktrees.Clear();
+                OnPropertyChanged(nameof(HasAvailableWorktrees));
+                return;
+            }
 
-        // Use the effective dir (worktree or project) for status
-        var workDir = savedWorktreePath ?? projectDir;
-        var branchTask = GitService.GetCurrentBranchAsync(workDir);
-        var changesTask = GitService.GetChangedFilesAsync(workDir);
-        var worktreesTask = GitService.ListWorktreeInfoAsync(projectDir);
+            // Use the effective dir (worktree or project) for status
+            var workDir = savedWorktreePath ?? projectDir;
+            var normalizedWorkDir = Path.GetFullPath(workDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!string.Equals(_gitStatusDirectory, normalizedWorkDir, StringComparison.OrdinalIgnoreCase))
+                GitBranch = null;
+            _gitStatusDirectory = normalizedWorkDir;
 
-        await Task.WhenAll(branchTask, changesTask, worktreesTask).ConfigureAwait(false);
+            // Reset stale change data immediately; keep the branch visible while refreshing
+            // the same coding context so the strip does not flicker blank.
+            GitChangedFileCount = 0;
+            GitChangedFiles.Clear();
+            IsRefreshingGitStatus = true;
 
-        var branch = await branchTask;
-        var changes = await changesTask;
-        var worktrees = await worktreesTask;
+            var branchTask = GitService.GetCurrentBranchAsync(workDir);
+            var changesTask = GitService.GetChangedFilesAsync(workDir);
+            var worktreesTask = GitService.ListWorktreeInfoAsync(projectDir);
 
-        // Exclude the main repo worktree (it's the "Local" option)
-        // Normalize paths to handle forward/backward slash differences from git output
-        static string NormalizePath(string p) =>
-            Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var normalizedProjectDir = NormalizePath(projectDir);
-        worktrees.RemoveAll(w =>
-            string.Equals(NormalizePath(w.Path), normalizedProjectDir, StringComparison.OrdinalIgnoreCase));
+            await Task.WhenAll(branchTask, changesTask, worktreesTask).ConfigureAwait(false);
 
-        // A newer refresh was started while we were awaiting — discard these stale results.
-        if (version != Volatile.Read(ref _gitRefreshVersion))
-            return;
+            var branch = await branchTask;
+            var changes = await changesTask;
+            var worktrees = await worktreesTask;
 
-        Dispatcher.UIThread.Post(() =>
-        {
-            // Double-check inside the UI dispatch in case another refresh snuck in.
+            // Exclude the main repo worktree (it's the "Local" option). git reports the main
+            // worktree as the repository root, which differs from the project working directory
+            // when that directory is a subfolder — so exclude by git root, not just project dir.
+            // Normalize paths to handle forward/backward slash differences from git output.
+            static string NormalizePath(string p) =>
+                Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var normalizedProjectDir = NormalizePath(projectDir);
+            var gitRoot = GitService.FindRepoRoot(projectDir);
+            var normalizedGitRoot = gitRoot is not null ? NormalizePath(gitRoot) : normalizedProjectDir;
+            worktrees.RemoveAll(w =>
+            {
+                var normalizedWorktree = NormalizePath(w.Path);
+                return string.Equals(normalizedWorktree, normalizedProjectDir, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(normalizedWorktree, normalizedGitRoot, StringComparison.OrdinalIgnoreCase);
+            });
+
+            // A newer refresh was started while we were awaiting — discard these stale results.
             if (version != Volatile.Read(ref _gitRefreshVersion))
                 return;
 
-            GitBranch = branch;
-            GitChangedFileCount = changes.Count;
-            GitChangedFiles.Clear();
-            foreach (var c in changes)
-                GitChangedFiles.Add(new GitFileChangeViewModel(c));
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                // Double-check inside the UI dispatch in case another refresh snuck in.
+                if (version != Volatile.Read(ref _gitRefreshVersion))
+                    return;
 
-            AvailableWorktrees.Clear();
-            foreach (var wt in worktrees)
-                AvailableWorktrees.Add(wt);
-            OnPropertyChanged(nameof(HasAvailableWorktrees));
+                GitBranch = branch;
+                GitChangedFileCount = changes.Count;
+                GitChangedFiles.Clear();
+                foreach (var c in changes)
+                    GitChangedFiles.Add(new GitFileChangeViewModel(c));
 
-            IsRefreshingGitStatus = false;
-        });
+                AvailableWorktrees.Clear();
+                foreach (var wt in worktrees)
+                    AvailableWorktrees.Add(wt);
+                OnPropertyChanged(nameof(HasAvailableWorktrees));
+            });
+        }
+        finally
+        {
+            if (version == Volatile.Read(ref _gitRefreshVersion))
+            {
+                await Dispatcher.UIThread.InvokeAsync(() =>
+                {
+                    if (version == Volatile.Read(ref _gitRefreshVersion))
+                        IsRefreshingGitStatus = false;
+                });
+            }
+        }
+    }
+
+    private void QueueRefreshCodingProjectState()
+    {
+        _ = RefreshCodingProjectStateSafelyAsync();
+    }
+
+    /// <summary>Refreshes the coding strip's git status shortly after the agent edits
+    /// workspace files, so the change count stays live while a turn is still running —
+    /// independent of the IsBusy turn lifecycle. Throttled with a leading edge plus a
+    /// trailing refresh: rapid successive edits update promptly but at most once per
+    /// <see cref="GitRefreshMinInterval"/>. Must be called on the UI thread.</summary>
+    private void QueueLiveGitRefresh()
+    {
+        if (!IsCodingProject)
+            return;
+
+        _gitRefreshThrottleCts?.Cancel();
+        _gitRefreshThrottleCts?.Dispose();
+        _gitRefreshThrottleCts = null;
+
+        var sinceLast = DateTime.UtcNow - _lastLiveGitRefreshUtc;
+        if (sinceLast >= GitRefreshMinInterval)
+        {
+            // Leading edge: nothing refreshed recently, so update immediately.
+            _lastLiveGitRefreshUtc = DateTime.UtcNow;
+            QueueRefreshCodingProjectState();
+            return;
+        }
+
+        // Within the throttle window: schedule a single trailing refresh.
+        var delay = GitRefreshMinInterval - sinceLast;
+        var cts = new CancellationTokenSource();
+        _gitRefreshThrottleCts = cts;
+        var token = cts.Token;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(delay, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            // Marshal back to the UI thread so the synchronous prefix of the refresh
+            // (which mutates bound observable state) does not run off-thread.
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (token.IsCancellationRequested)
+                    return;
+                _lastLiveGitRefreshUtc = DateTime.UtcNow;
+                QueueRefreshCodingProjectState();
+            });
+        }, token);
+    }
+
+    private async Task RefreshCodingProjectStateSafelyAsync()
+    {
+        try
+        {
+            await RefreshCodingProjectState().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[Lumi] Git status refresh failed: {ex}");
+        }
     }
 
     /// <summary>Toggles worktree mode. Only works before a chat is created (on the welcome screen).

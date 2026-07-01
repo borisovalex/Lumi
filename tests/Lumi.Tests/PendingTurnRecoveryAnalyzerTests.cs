@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.ViewModels;
 using Xunit;
 
@@ -107,12 +107,133 @@ public sealed class PendingTurnRecoveryAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_FlagsAssistantTurnEnded_WhenTurnEndsWithoutIdle()
+    {
+        var events = new SessionEvent[]
+        {
+            UserMessage("continue"),
+            AssistantMessage("Done"),
+            AssistantTurnEnd()
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Analyze(events, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.True(analysis.AssistantTurnEnded);
+        Assert.Equal(PendingTurnTerminalState.None, analysis.TerminalState);
+        Assert.Equal(0, analysis.ActiveToolCount);
+    }
+
+    [Fact]
+    public void Analyze_DoesNotFlagTurnEnded_WhenActivityFollowsTurnEnd()
+    {
+        var events = new SessionEvent[]
+        {
+            UserMessage("continue"),
+            AssistantTurnEnd(),
+            ToolStart("tool-1", "powershell")
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Analyze(events, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.False(analysis.AssistantTurnEnded);
+        Assert.Equal(1, analysis.ActiveToolCount);
+    }
+
+    [Theory]
+    [InlineData("assistant.message_start")]
+    [InlineData("assistant.streaming_delta")]
+    public void Analyze_DoesNotFlagTurnEnded_WhenNewAssistantActivityFollowsTurnEnd(string eventType)
+    {
+        var events = new List<SessionEvent>
+        {
+            UserMessage("continue"),
+            AssistantTurnEnd()
+        };
+        events.Add(eventType == "assistant.message_start"
+            ? AssistantMessageStart()
+            : AssistantStreamingDelta());
+
+        var analysis = PendingTurnRecoveryAnalyzer.Analyze(events, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.False(analysis.AssistantTurnEnded);
+        Assert.Equal(0, analysis.ActiveToolCount);
+    }
+
+    [Fact]
+    public void AnalyzePersistedLog_FlagsAssistantTurnEnded_WhenTurnEndsWithoutIdle()
+    {
+        var lines = new[]
+        {
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"continue\"}}",
+            "{\"type\":\"assistant.message\",\"data\":{\"content\":\"Done\"}}",
+            "{\"type\":\"assistant.turn_end\",\"data\":{\"turnId\":\"0\"}}"
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.AnalyzePersistedLog(lines, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.True(analysis.AssistantTurnEnded);
+        Assert.Equal(PendingTurnTerminalState.None, analysis.TerminalState);
+        Assert.Equal(0, analysis.ActiveToolCount);
+    }
+
+    [Theory]
+    [InlineData("assistant.turn_start")]
+    [InlineData("assistant.message_start")]
+    [InlineData("assistant.message_delta")]
+    [InlineData("assistant.streaming_delta")]
+    [InlineData("assistant.reasoning_delta")]
+    [InlineData("assistant.reasoning")]
+    [InlineData("session.background_tasks_changed")]
+    [InlineData("subagent.selected")]
+    [InlineData("subagent.deselected")]
+    [InlineData("subagent.started")]
+    [InlineData("subagent.completed")]
+    [InlineData("subagent.failed")]
+    public void AnalyzePersistedLog_DoesNotFlagTurnEnded_WhenActivityFollowsTurnEnd(string eventType)
+    {
+        var lines = new[]
+        {
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"continue\"}}",
+            "{\"type\":\"assistant.turn_end\",\"data\":{\"turnId\":\"0\"}}",
+            $@"{{""type"":""{eventType}"",""data"":{{}}}}"
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.AnalyzePersistedLog(lines, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.False(analysis.AssistantTurnEnded);
+        Assert.Equal(0, analysis.ActiveToolCount);
+    }
+
+    [Fact]
+    public void AnalyzePersistedLog_DoesNotFlagTurnEnded_WhenToolActivityFollowsTurnEnd()
+    {
+        var lines = new[]
+        {
+            "{\"type\":\"user.message\",\"data\":{\"content\":\"continue\"}}",
+            "{\"type\":\"assistant.turn_end\",\"data\":{\"turnId\":\"0\"}}",
+            "{\"type\":\"tool.execution_start\",\"data\":{\"toolCallId\":\"tool-1\",\"toolName\":\"powershell\"}}"
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.AnalyzePersistedLog(lines, expectedSessionUserMessageCount: 1);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.False(analysis.AssistantTurnEnded);
+        Assert.Equal(1, analysis.ActiveToolCount);
+    }
+
+    [Fact]
     public void Merge_PrefersPersistedTerminalState()
     {
         var liveAnalysis = new PendingTurnRecoveryAnalysis
         {
             UserMessageObserved = true,
-            AssistantMessages = [new RecoveredAssistantMessage("Recovered answer")]
+            AssistantMessages = [new RecoveredAssistantMessage("Recovered answer")],
+            AssistantTurnEnded = true
         };
         var persistedAnalysis = new PendingTurnRecoveryAnalysis
         {
@@ -124,7 +245,46 @@ public sealed class PendingTurnRecoveryAnalyzerTests
 
         Assert.True(analysis.UserMessageObserved);
         Assert.Equal(PendingTurnTerminalState.Shutdown, analysis.TerminalState);
+        Assert.False(analysis.AssistantTurnEnded);
         Assert.Equal("Recovered answer", Assert.Single(analysis.AssistantMessages).Content);
+    }
+
+    [Fact]
+    public void Merge_FlagsAssistantTurnEnded_FromLiveWhenNoTerminalState()
+    {
+        var liveAnalysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true,
+            AssistantTurnEnded = true
+        };
+        var persistedAnalysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Merge(liveAnalysis, persistedAnalysis);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.True(analysis.AssistantTurnEnded);
+    }
+
+    [Fact]
+    public void Merge_FlagsAssistantTurnEnded_FromPersistedWhenLiveMissedIt()
+    {
+        var liveAnalysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true
+        };
+        var persistedAnalysis = new PendingTurnRecoveryAnalysis
+        {
+            UserMessageObserved = true,
+            AssistantTurnEnded = true
+        };
+
+        var analysis = PendingTurnRecoveryAnalyzer.Merge(liveAnalysis, persistedAnalysis);
+
+        Assert.True(analysis.UserMessageObserved);
+        Assert.True(analysis.AssistantTurnEnded);
     }
 
     [Fact]
@@ -221,6 +381,31 @@ public sealed class PendingTurnRecoveryAnalyzerTests
                 MessageId = Guid.NewGuid().ToString("N"),
                 Content = content
             }
+        };
+
+    private static AssistantMessageStartEvent AssistantMessageStart()
+        => new()
+        {
+            Data = new AssistantMessageStartData
+            {
+                MessageId = Guid.NewGuid().ToString("N"),
+                Phase = "answer"
+            }
+        };
+
+    private static AssistantStreamingDeltaEvent AssistantStreamingDelta()
+        => new()
+        {
+            Data = new AssistantStreamingDeltaData
+            {
+                TotalResponseSizeBytes = 1
+            }
+        };
+
+    private static AssistantTurnEndEvent AssistantTurnEnd()
+        => new()
+        {
+            Data = new AssistantTurnEndData { TurnId = "turn" }
         };
 
     private static ToolExecutionStartEvent ToolStart(string toolCallId, string toolName)

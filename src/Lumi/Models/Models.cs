@@ -42,6 +42,12 @@ public class SkillReference
     public string Description { get; set; } = "";
 }
 
+public static class ModelContextWindowTiers
+{
+    public const string Default = "default";
+    public const string LongContext = "long_context";
+}
+
 public class SearchSource
 {
     public string Title { get; set; } = "";
@@ -83,6 +89,7 @@ public class Chat : INotifyPropertyChanged
         set => _activeExternalSkillNames = value ?? [];
     }
     public List<string> ActiveMcpServerNames { get; set; } = [];
+    public bool HasExplicitMcpServerSelection { get; set; }
 
     /// <summary>Deprecated — session mode is no longer used. Kept for backward-compatible deserialization.</summary>
     public string? SessionMode { get; set; }
@@ -98,6 +105,9 @@ public class Chat : INotifyPropertyChanged
 
     /// <summary>Last reasoning effort used in this chat. Restored alongside the selected model when reopened.</summary>
     public string? LastReasoningEffortUsed { get; set; }
+
+    /// <summary>Last context window tier used in this chat. Restored alongside the selected model when reopened.</summary>
+    public string? LastContextWindowTierUsed { get; set; }
 
     /// <summary>Cumulative input tokens consumed across all turns of this chat.</summary>
     public long TotalInputTokens { get; set; }
@@ -146,11 +156,17 @@ public class Chat : INotifyPropertyChanged
 public class Project : INotifyPropertyChanged
 {
     private bool _isRunning;
+    private List<string> _additionalContextDirectories = [];
 
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Name { get; set; } = "";
     public string Instructions { get; set; } = "";
     public string? WorkingDirectory { get; set; }
+    public List<string> AdditionalContextDirectories
+    {
+        get => _additionalContextDirectories;
+        set => _additionalContextDirectories = value ?? [];
+    }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
 
     /// <summary>Runtime-only flag indicating at least one chat in this project is actively generating a response.</summary>
@@ -359,9 +375,23 @@ public class UserSettings
     public bool ExpandReasoningWhileStreaming { get; set; } = true;
     public bool AutoGenerateTitles { get; set; } = true;
 
+    /// <summary>
+    /// User preference for the companion Workspace panel. null = automatic (shows only on wide
+    /// layouts when the chat has artifacts); true = always open; false = always closed. Set by the
+    /// header toggle and persisted app-wide.
+    /// </summary>
+    public bool? WorkspacePanelOpen { get; set; }
+
     // ── AI & Models ──
     public string PreferredModel { get; set; } = "";
     public string ReasoningEffort { get; set; } = ""; // "", "low", "medium", "high", "xhigh"
+    public string ContextWindowTier { get; set; } = ModelContextWindowTiers.Default;
+
+    // ── MCP ──
+    // When true, local MCP servers are routed through Lumi's shared proxy so they
+    // start once and are reused across chats. When false (default), MCP servers are
+    // passed directly to Copilot and initialized per session.
+    public bool UseMcpProxy { get; set; }
 
     // ── Privacy & Data ──
     public bool EnableMemoryAutoSave { get; set; } = true;
@@ -374,6 +404,7 @@ public class UserSettings
     public double? WindowLeft { get; set; }
     public double? WindowTop { get; set; }
     public double? SidebarWidth { get; set; }
+    public bool SidebarCollapsed { get; set; }
     public bool IsMaximized { get; set; }
 
     // ── Browser ──

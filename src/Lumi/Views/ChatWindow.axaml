@@ -1,0 +1,47 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:chrome="using:Avalonia.Controls.Chrome"
+        xmlns:vm="using:Lumi.ViewModels"
+        xmlns:views="using:Lumi.Views"
+        x:Class="Lumi.Views.ChatWindow"
+        x:DataType="vm:ChatWindowViewModel"
+        x:CompileBindings="True"
+        Title="{Binding WindowTitle}"
+        Width="1120"
+        Height="760"
+        MinWidth="760"
+        MinHeight="520"
+        WindowStartupLocation="CenterOwner"
+        TransparencyLevelHint="AcrylicBlur,Mica,Blur"
+        UseLayoutRounding="True"
+        Background="Transparent">
+
+  <Border x:Name="WindowIsland"
+          CornerRadius="0"
+          Background="{DynamicResource Brush.Surface1Translucent}"
+          BorderThickness="1"
+          ClipToBounds="True">
+    <Border.BorderBrush>
+      <SolidColorBrush Color="{DynamicResource Color.TextPrimary}" Opacity="0.08" />
+    </Border.BorderBrush>
+
+    <Grid RowDefinitions="38,*">
+      <Grid Grid.Row="0"
+            ColumnDefinitions="*,144"
+            Background="Transparent"
+            Panel.ZIndex="10">
+        <Border x:Name="TitleDragRegion"
+                Grid.Column="0"
+                chrome:WindowDecorationProperties.ElementRole="TitleBar"
+                Background="Transparent" />
+      </Grid>
+
+      <views:ChatWorkspaceView x:Name="DetachedChatView"
+                               Grid.Row="1"
+                               DataContext="{Binding ChatVM}"
+                               ShowInternalTitle="False"
+                               UseChatIslandChrome="False"
+                               PreviewIslandMargin="0,8,8,8" />
+    </Grid>
+  </Border>
+</Window>

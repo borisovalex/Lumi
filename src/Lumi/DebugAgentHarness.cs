@@ -8,7 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using GitHub.Copilot.SDK;
+using GitHub.Copilot;
 using Lumi.Models;
 using Lumi.Services;
 using Microsoft.Extensions.AI;
@@ -20,6 +20,10 @@ public static class DebugAgentHarness
 {
     private const string ExpectedStressOutput = "LUMI_CHAT_STRESS_OK";
     private const string ExpectedToolInput = "lumi-agent-harness";
+    private const string ExpectedNativeMcpOutput = "LUMI_MCP_NATIVE_OK";
+    private const string ExpectedNativeMcpResumeOutput = "LUMI_MCP_NATIVE_RESUME_OK";
+    private const string ExpectedProxyMcpOutput = "LUMI_MCP_PROXY_OK";
+    private const string ExpectedProxyMcpResumeOutput = "LUMI_MCP_PROXY_RESUME_OK";
 
     public static bool IsUiHarnessFlag(string arg)
         => string.Equals(arg, "--debug-agent-harness", StringComparison.OrdinalIgnoreCase)
@@ -29,16 +33,32 @@ public static class DebugAgentHarness
         => string.Equals(arg, "--test-chat-stress", StringComparison.OrdinalIgnoreCase)
            || string.Equals(arg, "--stress-chat", StringComparison.OrdinalIgnoreCase);
 
+    public static bool IsNativeMcpStressFlag(string arg)
+        => string.Equals(arg, "--test-mcp-native", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "--stress-mcp-native", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsProxyMcpStressFlag(string arg)
+        => string.Equals(arg, "--test-mcp-proxy", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(arg, "--stress-mcp-proxy", StringComparison.OrdinalIgnoreCase);
+
     public static Chat CreateTranscriptFixtureChat(DataStore dataStore)
     {
         var root = EnsureFixtureDirectory();
         var attachmentPath = Path.Combine(root, "fixture-attachment.md");
         var editedPath = Path.Combine(root, "FixtureWidget.cs");
         var createdPath = Path.Combine(root, "generated-fixture-output.md");
+        var comparisonPath = Path.Combine(root, "OLED-TV-Comparison.html");
+        var shortlistPath = Path.Combine(root, "TV-Shortlist.csv");
+        var dealSummaryPath = Path.Combine(root, "Deal-Summary.md");
+        var researchNotesPath = Path.Combine(root, "OLED-Research-Notes.md");
 
         File.WriteAllText(attachmentPath, "# Debug fixture attachment\n\nThis file exists so attachment chips can resolve size and icon metadata.\n");
         File.WriteAllText(editedPath, "public class FixtureWidget\n{\n    public string State => \"before\";\n}\n");
         File.WriteAllText(createdPath, "# Generated fixture output\n\nThis file is announced by the debug transcript fixture.\n");
+        File.WriteAllText(comparisonPath, "<!doctype html><meta charset=\"utf-8\"><title>65\\\" OLED TV Comparison</title>\n<h1>65\\\" OLED TV Comparison</h1>\n<p>Synthetic deliverable produced by the debug fixture so the Workspace rail has a real announced file.</p>\n");
+        File.WriteAllText(shortlistPath, "Model,Panel,Price,Rating\nLG C4,OLED evo,1799,9.1\nSamsung S90D,QD-OLED,1899,9.0\nSony Bravia 8,OLED,1999,8.8\n");
+        File.WriteAllText(dealSummaryPath, "# 65\\\" OLED Deal Summary\n\n- LG C4 - $1,799 (Best Buy)\n- Samsung S90D - $1,899\n- Sony Bravia 8 - $1,999\n");
+        File.WriteAllText(researchNotesPath, "# OLED research notes\n\nCreated by the debug fixture so the Workspace Changes tab shows a created file.\n");
 
         var codingSkill = dataStore.Data.Skills.FirstOrDefault(s =>
             s.Name.Equals("Code Helper", StringComparison.OrdinalIgnoreCase))
@@ -54,6 +74,44 @@ public static class DebugAgentHarness
             Name = codingSkill.Name,
             Glyph = codingSkill.IconGlyph,
             Description = codingSkill.Description
+        };
+
+        // A second, distinct skill that is loaded at runtime (via fetch_skill) mid-turn —
+        // intentionally NOT attached to the user message, so the inline "skill loaded" chip
+        // is visible in the fixture instead of being de-duplicated away.
+        var researchSkill = dataStore.Data.Skills.FirstOrDefault(s =>
+            s.Name.Equals("Web Researcher", StringComparison.OrdinalIgnoreCase))
+            ?? new Skill
+            {
+                Name = "Web Researcher",
+                Description = "Searches the web and summarizes findings on any topic.",
+                IconGlyph = "\U0001F50E"
+            };
+
+        var fetchedSkillRef = new SkillReference
+        {
+            Name = researchSkill.Name,
+            Glyph = researchSkill.IconGlyph,
+            Description = researchSkill.Description
+        };
+
+        // A third, distinct skill reported by the SDK on the assistant message (the
+        // SkillInvokedEvent path, with no inline fetch_skill tool call). It surfaces as a
+        // chip at the end of the assistant turn.
+        var documentSkill = dataStore.Data.Skills.FirstOrDefault(s =>
+            s.Name.Equals("Document Creator", StringComparison.OrdinalIgnoreCase))
+            ?? new Skill
+            {
+                Name = "Document Creator",
+                Description = "Creates Word, Excel, and PowerPoint documents from descriptions.",
+                IconGlyph = "\U0001F4C4"
+            };
+
+        var assistantSkillRef = new SkillReference
+        {
+            Name = documentSkill.Name,
+            Glyph = documentSkill.IconGlyph,
+            Description = documentSkill.Description
         };
 
         var chat = new Chat
@@ -109,10 +167,94 @@ public static class DebugAgentHarness
             | Markdown | rendered |
             | Sources | visible below |
             | Model label | visible after turn |
+
+            A wide table wraps to fit, then switches to a horizontal scrollbar with readable columns when there are too many columns to fit:
+
+            | Column A | Column B | Column C | Column D | Column E | Column F | Column G | Column H |
+            | --- | --- | --- | --- | --- | --- | --- | --- |
+            | Markdown rendering pipeline | rendered correctly | full fidelity incl. tables | Strata Markdown | verified | passing now | extra column | last column here |
+            | Sources visible below | visible below message | search source chips appear | ChatView | in progress | still good | another value | trailing value |
+            | Model label visibility | visible after turn | the model name label renders | ChatViewModel | pending | confirmed ok | one more | the very end |
+
+            The two-option comparison control (StrataFork) should switch when either tab is clicked:
+
+            ```comparison
+            {"optionA":{"title":"LG C4","content":"- OLED evo panel\n- Excellent for gaming\n- **$1,799**"},"optionB":{"title":"Samsung S90D","content":"- QD-OLED panel\n- Brighter highlights\n- **$1,899**"}}
+            ```
+
+            A native Mermaid **architecture diagram** verifies subgraph containers and distributed (fan-out / fan-in) arrows:
+
+            ```mermaid
+            flowchart TB
+                User[User] --> LB[Load Balancer]
+                subgraph Frontend
+                    Web[Web App]
+                    Mobile[Mobile App]
+                end
+                subgraph Backend
+                    API[API Gateway]
+                    Auth[Auth Service]
+                    Orders[Order Service]
+                end
+                subgraph Data
+                    DB[(Database)]
+                    Cache[(Redis)]
+                end
+                LB --> Web
+                LB --> Mobile
+                Web --> API
+                Mobile --> API
+                API --> Auth
+                API --> Orders
+                Orders --> DB
+                Orders --> Cache
+                Auth --> DB
+            ```
+
+            A **decision flowchart** verifies rank-skipping edges route around intermediate nodes — the `No` path leaves *Tests pass?* and drops down its own lane past the *Security scan* row instead of behind it:
+
+            ```mermaid
+            flowchart TD
+                Start([Push to main]) --> Build[Build]
+                Build --> Test{Tests pass?}
+                Test -->|No| Notify[Notify devs]
+                Test -->|Yes| Scan{Security scan}
+                Scan -->|Fail| Notify
+                Scan -->|Pass| Stage[Deploy staging]
+                Notify --> Fix[Fix issues]
+                Fix --> Build
+                Stage --> Done([Released])
+            ```
+
+            A **class diagram** verifies hierarchical layout, three compartments, and inheritance markers:
+
+            ```mermaid
+            classDiagram
+                Animal <|-- Duck
+                Animal <|-- Fish
+                Animal : +int age
+                Animal : +String gender
+                Animal : +isMammal()
+                Animal : +mate()
+                Duck : +String beakColor
+                Duck : +swim()
+                Duck : +quack()
+                Fish : -int sizeInFeet
+                Fish : -canEat()
+            ```
+
+            An **ER diagram** verifies crow's-foot cardinality and orthogonal routing:
+
+            ```mermaid
+            erDiagram
+                CUSTOMER ||--o{ ORDER : places
+                CUSTOMER ||--o{ DELIVERY-ADDRESS : uses
+                ORDER ||--|{ LINE-ITEM : contains
+            ```
             """);
         firstAssistant.Author = "Lumi";
         firstAssistant.Model = "gpt-5.5";
-        firstAssistant.ActiveSkills.Add(skillRef);
+        firstAssistant.ActiveSkills.Add(assistantSkillRef);
         firstAssistant.Sources.Add(new SearchSource
         {
             Title = "Lumi debug fixture",
@@ -131,11 +273,21 @@ public static class DebugAgentHarness
 
         chat.Messages.Add(Tool("report_intent", JsonObject(
             JsonProperty("intent", JsonString("Exercising fixture"))), "Completed"));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("best 65-inch OLED TV 2026"))), "Completed", output: "Returned 8 results"));
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Comparing OLED panels"))), "Completed"));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("LG C4 vs Samsung S90D picture quality"))), "Completed", output: "Returned 6 results"));
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Summarizing the best deals"))), "Completed"));
         chat.Messages.Add(Tool("fetch_skill", JsonObject(
-            JsonProperty("name", JsonString(skillRef.Name))), "Completed", output: $"Fetched skill: {skillRef.Name}"));
+            JsonProperty("name", JsonString(fetchedSkillRef.Name))), "Completed", output: $"Fetched skill: {fetchedSkillRef.Name}"));
         chat.Messages.Add(Tool("powershell", JsonObject(
             JsonProperty("command", JsonString("Write-Output 'fixture terminal output'")),
             JsonProperty("description", JsonString("Emit fixture output"))), "Completed", output: "fixture terminal output\nexit code: 0"));
+        chat.Messages.Add(Tool("example_mcp_lookup", JsonObject(
+            JsonProperty("query", JsonString("Busy"))), "Failed", output: "MCP server returned an example lookup failure."));
         var todoArgs = JsonObject(
             JsonProperty("todoList", JsonArray(
                 JsonObject(
@@ -155,6 +307,9 @@ public static class DebugAgentHarness
             JsonProperty("filePath", JsonString(editedPath)),
             JsonProperty("oldString", JsonString("public class FixtureWidget")),
             JsonProperty("newString", JsonString("public partial class FixtureWidget"))), "Completed", output: "Updated FixtureWidget.cs"));
+        chat.Messages.Add(Tool("create", JsonObject(
+            JsonProperty("filePath", JsonString(researchNotesPath)),
+            JsonProperty("file_text", JsonString("# OLED research notes\n\n- Compared LG C4, Samsung S90D, Sony Bravia 8.\n- Tracked retailer pricing for 65-inch panels.\n"))), "Completed", output: "Created OLED-Research-Notes.md"));
 
         var subagentId = "debug-subagent-fixture";
         chat.Messages.Add(Tool("task", JsonObject(
@@ -190,6 +345,12 @@ public static class DebugAgentHarness
 
         chat.Messages.Add(Tool("announce_file", JsonObject(
             JsonProperty("filePath", JsonString(createdPath))), "Completed", output: createdPath));
+        chat.Messages.Add(Tool("announce_file", JsonObject(
+            JsonProperty("filePath", JsonString(comparisonPath))), "Completed", output: comparisonPath));
+        chat.Messages.Add(Tool("announce_file", JsonObject(
+            JsonProperty("filePath", JsonString(shortlistPath))), "Completed", output: shortlistPath));
+        chat.Messages.Add(Tool("announce_file", JsonObject(
+            JsonProperty("filePath", JsonString(dealSummaryPath))), "Completed", output: dealSummaryPath));
 
         var finalAssistant = Message("assistant", """
             The fixture turn includes:
@@ -208,7 +369,120 @@ public static class DebugAgentHarness
             Snippet = "The debug map names stable controls and nav indices.",
             Url = "https://example.com/lumi-agent-debug-map"
         });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "The 5 Best 65\" OLED TVs (early 2026)",
+            Snippet = "Hands-on rankings of this year's 65-inch OLED panels.",
+            Url = "https://www.rtings.com/tv/reviews/best/oled"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "LG C4 OLED review",
+            Snippet = "Full review of the LG C4 evo panel and gaming features.",
+            Url = "https://www.techradar.com/televisions/lg-c4-oled-review"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "Samsung S90D vs LG C4",
+            Snippet = "QD-OLED versus OLED evo head-to-head comparison.",
+            Url = "https://www.whathifi.com/features/samsung-s90d-vs-lg-c4"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "65-inch OLED TV deals",
+            Snippet = "Current retailer pricing on 65-inch OLED models.",
+            Url = "https://www.bestbuy.com/site/searchpage.jsp?st=65+oled"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "C4 vs G4 for gaming",
+            Snippet = "Community thread weighing the C4 against the brighter G4.",
+            Url = "https://www.reddit.com/r/OLED_Gaming/comments/lg-c4-vs-g4"
+        });
+        finalAssistant.Sources.Add(new SearchSource
+        {
+            Title = "Best OLED TV 2026",
+            Snippet = "Editor picks for the best OLED TVs to buy right now.",
+            Url = "https://www.tomsguide.com/best-picks/best-oled-tv"
+        });
         chat.Messages.Add(finalAssistant);
+
+        // ── Parallel multi-subagent fan-out turn ──────────────────────────────
+        // Exercises the grouped layout used when several sub-agents run at once.
+        var parallelUser = Message("user", "Research the three OLED contenders in parallel and tell me which wins.");
+        parallelUser.Author = userName;
+        chat.Messages.Add(parallelUser);
+
+        chat.Messages.Add(Message("reasoning", """
+            I'll fan out three agents at once — one per panel — then compare their findings.
+            """));
+
+        const string agentA = "debug-parallel-agent-a";
+        const string agentB = "debug-parallel-agent-b";
+        const string agentC = "debug-parallel-agent-c";
+
+        // Launch all three agents together (the fan-out the user sees as one batch).
+        chat.Messages.Add(Tool("task", JsonObject(
+            JsonProperty("description", JsonString("Benchmark the LG C4 evo panel")),
+            JsonProperty("agent_type", JsonString("research")),
+            JsonProperty("agentName", JsonString("research")),
+            JsonProperty("agentDisplayName", JsonString("Research agent")),
+            JsonProperty("agentDescription", JsonString("Deep web research agent.")),
+            JsonProperty("mode", JsonString("background")),
+            JsonProperty("model", JsonString("claude-sonnet-4.6")),
+            JsonProperty("reasoning", JsonString("Pulling rtings measurements for the C4.")),
+            JsonProperty("transcript", JsonString("LG C4: 1,000 nits peak, 144Hz, excellent near-black handling."))),
+            "Completed", toolCallId: agentA, output: "Research agent completed"));
+        chat.Messages.Add(Tool("task", JsonObject(
+            JsonProperty("description", JsonString("Benchmark the Samsung S90D QD-OLED")),
+            JsonProperty("agent_type", JsonString("research")),
+            JsonProperty("agentName", JsonString("research")),
+            JsonProperty("agentDisplayName", JsonString("Research agent")),
+            JsonProperty("agentDescription", JsonString("Deep web research agent.")),
+            JsonProperty("mode", JsonString("background")),
+            JsonProperty("model", JsonString("claude-sonnet-4.6")),
+            JsonProperty("reasoning", JsonString("Checking QD-OLED brightness claims.")),
+            JsonProperty("transcript", JsonString("Samsung S90D: brighter highlights, wider color volume, 144Hz."))),
+            "Completed", toolCallId: agentB, output: "Research agent completed"));
+        chat.Messages.Add(Tool("task", JsonObject(
+            JsonProperty("description", JsonString("Benchmark the Sony Bravia 8")),
+            JsonProperty("agent_type", JsonString("explore")),
+            JsonProperty("agentName", JsonString("explore")),
+            JsonProperty("agentDisplayName", JsonString("Explore agent")),
+            JsonProperty("agentDescription", JsonString("Fast codebase/data exploration agent.")),
+            JsonProperty("mode", JsonString("background")),
+            JsonProperty("model", JsonString("claude-haiku-4.5")),
+            JsonProperty("reasoning", JsonString("Still gathering Bravia 8 motion data."))),
+            "InProgress", toolCallId: agentC, output: null));
+
+        // Each agent's own activity streams in under its card.
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Measuring C4 peak brightness"))), "Completed", parentToolCallId: agentA));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("LG C4 rtings peak brightness 10% window"))), "Completed", parentToolCallId: agentA, output: "Returned 5 results"));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("LG C4 input lag 4k 120hz"))), "Completed", parentToolCallId: agentA, output: "Returned 4 results"));
+
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Comparing QD-OLED color volume"))), "Completed", parentToolCallId: agentB));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("Samsung S90D color volume measurement"))), "Completed", parentToolCallId: agentB, output: "Returned 6 results"));
+        chat.Messages.Add(Tool("powershell", JsonObject(
+            JsonProperty("command", JsonString("Write-Output 'S90D brightness: 1320 nits'")),
+            JsonProperty("description", JsonString("Record measurement"))), "Completed", parentToolCallId: agentB, output: "S90D brightness: 1320 nits\nexit code: 0"));
+
+        chat.Messages.Add(Tool("report_intent", JsonObject(
+            JsonProperty("intent", JsonString("Checking Bravia 8 motion handling"))), "Completed", parentToolCallId: agentC));
+        chat.Messages.Add(Tool("web_search", JsonObject(
+            JsonProperty("query", JsonString("Sony Bravia 8 motion interpolation review"))), "InProgress", parentToolCallId: agentC));
+
+        var parallelAssistant = Message("assistant", """
+            All three agents reported back. The **Samsung S90D** edges ahead on brightness and
+            color volume, with the **LG C4** close behind for gaming value.
+            """);
+        parallelAssistant.Author = "Lumi";
+        parallelAssistant.Model = "claude-sonnet-4.6";
+        chat.Messages.Add(parallelAssistant);
 
         chat.Messages.Add(Message("error", "Debug fixture error bubble: simulated recoverable Copilot error with retry styling."));
 
@@ -282,7 +556,7 @@ public static class DebugAgentHarness
             },
             async (session, innerCt) =>
             {
-                using var sub = session.On(evt =>
+                using var sub = session.On<SessionEvent>(evt =>
                 {
                     switch (evt)
                     {
@@ -334,6 +608,304 @@ public static class DebugAgentHarness
         if (!hasExpectedOutput)
             Console.Error.WriteLine($"- final response did not contain {ExpectedStressOutput}.");
         return 1;
+    }
+
+    public static Task<int> RunNativeMcpStressAsync(CopilotService copilotService, CancellationToken ct)
+        => RunMcpStressAsync(copilotService, useProxy: false, ct);
+
+    public static Task<int> RunProxyMcpStressAsync(CopilotService copilotService, CancellationToken ct)
+        => RunMcpStressAsync(copilotService, useProxy: true, ct);
+
+    private static async Task<int> RunMcpStressAsync(CopilotService copilotService, bool useProxy, CancellationToken ct)
+    {
+        var harnessName = useProxy ? "proxy" : "native";
+        var marker = useProxy ? "PROXY_GLOBAL" : "NATIVE_GLOBAL";
+        var serverName = useProxy ? "proxy-global" : "native-global";
+        var expectedOutput = useProxy ? ExpectedProxyMcpOutput : ExpectedNativeMcpOutput;
+        var expectedResumeOutput = useProxy ? ExpectedProxyMcpResumeOutput : ExpectedNativeMcpResumeOutput;
+        var expectedMarker = $"MCP_MARKER:{marker}:SDK_NATIVE";
+        var expectedResumeMarker = $"MCP_MARKER:{marker}:SDK_RESUME";
+
+        Console.WriteLine($"Lumi {harnessName} MCP stress harness");
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.Error.WriteLine($"FAIL: {harnessName} MCP stress harness currently uses a Windows PowerShell fake MCP server.");
+            return 1;
+        }
+
+        var powershell = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        if (!File.Exists(powershell))
+        {
+            Console.Error.WriteLine($"FAIL: PowerShell not found at {powershell}");
+            return 1;
+        }
+
+        Console.WriteLine("Connecting to Copilot...");
+        await copilotService.ConnectAsync(ct).ConfigureAwait(false);
+        var model = await copilotService.GetFastestModelIdAsync(ct).ConfigureAwait(false);
+        Console.WriteLine($"Model: {model ?? "(default)"}");
+
+        var root = Path.Combine(Path.GetTempPath(), $"lumi-mcp-{harnessName}-stress-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var scriptPath = Path.Combine(root, "fake-mcp.ps1");
+        var logPath = Path.Combine(root, "starts.log");
+        McpProxyRuntime? proxyRuntime = null;
+
+        try
+        {
+            await File.WriteAllTextAsync(scriptPath, """
+                [System.IO.File]::AppendAllText($env:MCP_TEST_LOG, "$($env:MCP_MARKER)|$PID`n")
+                function Write-Json($obj) {
+                    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 30))
+                    [Console]::Out.Flush()
+                }
+                while ($null -ne ($line = [Console]::In.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $msg = $line | ConvertFrom-Json
+                    if ($msg.method -eq "initialize") {
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ protocolVersion = "2025-11-25"; capabilities = @{}; serverInfo = @{ name = "lumi-native-fake-mcp"; version = "1" } } }
+                    } elseif ($msg.method -eq "tools/list") {
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ tools = @(@{ name = "emit_marker"; description = "Return the configured native MCP stress marker and requested value."; inputSchema = @{ type = "object"; properties = @{ value = @{ type = "string" } }; required = @("value") } }) } }
+                    } elseif ($msg.method -eq "tools/call") {
+                        $value = [string]$msg.params.arguments.value
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ content = @(@{ type = "text"; text = "MCP_MARKER:$($env:MCP_MARKER):$value" }) } }
+                    }
+                }
+                """, ct).ConfigureAwait(false);
+
+            var server = new McpServer
+            {
+                Name = serverName,
+                Command = powershell,
+                Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                Env =
+                {
+                    ["MCP_MARKER"] = marker,
+                    ["MCP_TEST_LOG"] = logPath,
+                },
+            };
+            var data = new AppData { McpServers = [server] };
+            var chat = new Chat { ActiveMcpServerNames = [serverName] };
+            if (useProxy)
+                proxyRuntime = new McpProxyRuntime();
+            var mcpServers = McpSessionPlanner.Build(data, root, new ProjectContextCatalogSnapshot([], [], []), chat, [serverName], null, proxyRuntime);
+            if (!mcpServers.ContainsKey(serverName))
+            {
+                Console.Error.WriteLine($"FAIL: {serverName} MCP server was not included in the SDK config.");
+                return 1;
+            }
+            if (useProxy)
+            {
+                if (mcpServers[serverName] is not McpHttpServerConfig { Url: var proxyUrl }
+                    || !proxyUrl.StartsWith("http://127.0.0.1:", StringComparison.Ordinal))
+                {
+                    Console.Error.WriteLine("FAIL: local MCP server was not routed through the loopback proxy.");
+                    return 1;
+                }
+            }
+
+            var toolStarted = 0;
+            var toolCompleted = 0;
+            string? finalContent = null;
+            var config = SessionConfigBuilder.Build(
+                systemPrompt: $"""
+                    You are running Lumi's deterministic {harnessName} MCP debug harness.
+                    You have an MCP tool named emit_marker available through the Copilot SDK MCP integration.
+                    You must call emit_marker with value "SDK_NATIVE".
+                    After the tool call, include "{expectedOutput}" and the exact MCP marker text in the final answer.
+                    """,
+                model: model,
+                workingDirectory: root,
+                skillDirectories: null,
+                customAgents: null,
+                tools: null,
+                mcpServers: mcpServers,
+                reasoningEffort: null,
+                userInputHandler: null,
+                onPermission: null,
+                hooks: null);
+
+            CopilotSession? session = null;
+            try
+            {
+                session = await copilotService.CreateSessionAsync(config, ct).ConfigureAwait(false);
+                using var sub = session.On<SessionEvent>(evt =>
+                {
+                    switch (evt)
+                    {
+                        case ToolExecutionStartEvent:
+                            Interlocked.Increment(ref toolStarted);
+                            break;
+                        case ToolExecutionCompleteEvent:
+                            Interlocked.Increment(ref toolCompleted);
+                            break;
+                    }
+                });
+
+                var result = await session.SendAndWaitAsync(
+                    new MessageOptions
+                    {
+                        Prompt = $"Run the {harnessName} MCP validation now. Use emit_marker with {{\"value\":\"SDK_NATIVE\"}}.\n"
+                            + $"Final answer must include {expectedOutput} and {expectedMarker}."
+                    },
+                    TimeSpan.FromMinutes(3),
+                    ct).ConfigureAwait(false);
+                finalContent = result?.Data?.Content;
+            }
+            finally
+            {
+                await copilotService.DisposeAndDeleteSessionAsync(session).ConfigureAwait(false);
+            }
+
+            var starts = File.Exists(logPath)
+                ? await File.ReadAllLinesAsync(logPath, ct).ConfigureAwait(false)
+                : [];
+            var serverStarts = starts.Count(line => line.StartsWith(marker + "|", StringComparison.Ordinal));
+            var hasExpectedOutput = finalContent?.Contains(expectedMarker, StringComparison.Ordinal) == true;
+            var hasContract = finalContent?.Contains(expectedOutput, StringComparison.Ordinal) == true;
+            var hasToolLifecycle = toolStarted > 0 && toolCompleted > 0;
+            var startedServer = useProxy ? serverStarts == 1 : serverStarts > 0;
+            var createPassed = hasExpectedOutput && hasContract && hasToolLifecycle && startedServer;
+
+            Console.WriteLine($"Tool started: {toolStarted}");
+            Console.WriteLine($"Tool completed: {toolCompleted}");
+            Console.WriteLine($"{harnessName} MCP starts: {serverStarts}");
+            Console.WriteLine($"Final content: {finalContent}");
+
+            var resumeToolStarted = 0;
+            var resumeToolCompleted = 0;
+            var resumeServerStarts = 0;
+            string? resumeFinalContent = null;
+            var resumePassed = false;
+            if (createPassed)
+            {
+                string? resumeSessionId = null;
+                CopilotSession? seedSession = null;
+                CopilotSession? resumedSession = null;
+                try
+                {
+                    var seedConfig = SessionConfigBuilder.Build(
+                        systemPrompt: $"You are seeding Lumi's {harnessName} MCP resume validation. Reply normally.",
+                        model: model,
+                        workingDirectory: root,
+                        skillDirectories: null,
+                        customAgents: null,
+                        tools: null,
+                        mcpServers: [],
+                        reasoningEffort: null,
+                        userInputHandler: null,
+                        onPermission: null,
+                        hooks: null);
+                    seedSession = await copilotService.CreateSessionAsync(seedConfig, ct).ConfigureAwait(false);
+                    resumeSessionId = seedSession.SessionId;
+                    await seedSession.SendAndWaitAsync(
+                        new MessageOptions { Prompt = "Reply exactly MCP_RESUME_SEED_READY." },
+                        TimeSpan.FromMinutes(1),
+                        ct).ConfigureAwait(false);
+                    await seedSession.DisposeAsync().ConfigureAwait(false);
+                    seedSession = null;
+
+                    var resumeConfig = SessionConfigBuilder.BuildForResume(
+                        systemPrompt: $"""
+                            You are running Lumi's deterministic {harnessName} MCP resume harness.
+                            You have an MCP tool named emit_marker available through the Copilot SDK MCP integration.
+                            You must call emit_marker with value "SDK_RESUME".
+                            After the tool call, include "{expectedResumeOutput}" and the exact MCP marker text in the final answer.
+                            """,
+                        model: model,
+                        workingDirectory: root,
+                        skillDirectories: null,
+                        customAgents: null,
+                        tools: null,
+                        mcpServers: mcpServers,
+                        reasoningEffort: null,
+                        userInputHandler: null,
+                        onPermission: null,
+                        hooks: null);
+                    resumedSession = await copilotService.ResumeSessionAsync(resumeSessionId, resumeConfig, ct).ConfigureAwait(false);
+                    using var resumeSub = resumedSession.On<SessionEvent>(evt =>
+                    {
+                        switch (evt)
+                        {
+                            case ToolExecutionStartEvent:
+                                Interlocked.Increment(ref resumeToolStarted);
+                                break;
+                            case ToolExecutionCompleteEvent:
+                                Interlocked.Increment(ref resumeToolCompleted);
+                                break;
+                        }
+                    });
+
+                    var resumeResult = await resumedSession.SendAndWaitAsync(
+                        new MessageOptions
+                        {
+                            Prompt = $"Run the {harnessName} MCP resume validation now. Use emit_marker with {{\"value\":\"SDK_RESUME\"}}.\n"
+                                + $"Final answer must include {expectedResumeOutput} and {expectedResumeMarker}."
+                        },
+                        TimeSpan.FromMinutes(3),
+                        ct).ConfigureAwait(false);
+                    resumeFinalContent = resumeResult?.Data?.Content;
+                }
+                finally
+                {
+                    if (seedSession is not null)
+                        await seedSession.DisposeAsync().ConfigureAwait(false);
+
+                    await copilotService.DisposeAndDeleteSessionAsync(resumedSession).ConfigureAwait(false);
+
+                    if (resumedSession is null && !string.IsNullOrWhiteSpace(resumeSessionId))
+                        await copilotService.DeleteSessionAsync(resumeSessionId, ct).ConfigureAwait(false);
+                }
+
+                var startsAfterResume = File.Exists(logPath)
+                    ? await File.ReadAllLinesAsync(logPath, ct).ConfigureAwait(false)
+                    : [];
+                var totalStartsAfterResume = startsAfterResume.Count(line => line.StartsWith(marker + "|", StringComparison.Ordinal));
+                resumeServerStarts = Math.Max(0, totalStartsAfterResume - serverStarts);
+                var hasResumeExpectedOutput = resumeFinalContent?.Contains(expectedResumeMarker, StringComparison.Ordinal) == true;
+                var hasResumeContract = resumeFinalContent?.Contains(expectedResumeOutput, StringComparison.Ordinal) == true;
+                var hasResumeToolLifecycle = resumeToolStarted > 0 && resumeToolCompleted > 0;
+                var hasExpectedResumeStarts = useProxy ? resumeServerStarts == 0 : resumeServerStarts > 0;
+                resumePassed = hasResumeExpectedOutput && hasResumeContract && hasResumeToolLifecycle && hasExpectedResumeStarts;
+            }
+
+            Console.WriteLine($"Resume tool started: {resumeToolStarted}");
+            Console.WriteLine($"Resume tool completed: {resumeToolCompleted}");
+            Console.WriteLine($"Resume MCP starts: {resumeServerStarts}");
+            Console.WriteLine($"Resume final content: {resumeFinalContent}");
+
+            if (createPassed && resumePassed)
+            {
+                Console.WriteLine($"PASS: {harnessName} Copilot SDK MCP stress check completed.");
+                return 0;
+            }
+
+            Console.Error.WriteLine($"FAIL: {harnessName} MCP stress check did not satisfy the contract.");
+            if (!hasToolLifecycle)
+                Console.Error.WriteLine($"- {harnessName} MCP tool lifecycle events were not observed.");
+            if (!startedServer)
+                Console.Error.WriteLine(useProxy
+                    ? "- fake MCP server did not start exactly once."
+                    : "- fake MCP server did not start.");
+            if (!hasExpectedOutput)
+                Console.Error.WriteLine($"- final response did not include {expectedMarker}.");
+            if (!hasContract)
+                Console.Error.WriteLine($"- final response did not include {expectedOutput}.");
+            if (!resumePassed)
+                Console.Error.WriteLine($"- {harnessName} MCP resume validation did not satisfy the contract.");
+            return 1;
+        }
+        finally
+        {
+            if (proxyRuntime is not null)
+                await proxyRuntime.DisposeAsync().ConfigureAwait(false);
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
     }
 
     private static string EnsureFixtureDirectory()

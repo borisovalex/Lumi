@@ -28,6 +28,30 @@ public class AppDataSnapshotFactoryTests
     }
 
     [Fact]
+    public void CreateIndexSnapshot_PreservesUseMcpProxy()
+    {
+        var source = new AppData { Settings = new UserSettings { UseMcpProxy = true } };
+
+        var snapshot = InvokeCreateIndexSnapshot(source);
+
+        Assert.True(snapshot.Settings.UseMcpProxy);
+    }
+
+    [Fact]
+    public void AppDataJsonContext_SerializesUseMcpProxy()
+    {
+        var data = new AppData { Settings = new UserSettings { UseMcpProxy = true } };
+
+        var json = JsonSerializer.Serialize(data, AppDataJsonContext.Default.AppData);
+        using var document = JsonDocument.Parse(json);
+
+        Assert.True(document.RootElement
+            .GetProperty("settings")
+            .GetProperty("useMcpProxy")
+            .GetBoolean());
+    }
+
+    [Fact]
     public void AppDataJsonContext_SerializesSettingsReasoningEffort()
     {
         var data = new AppData
@@ -84,6 +108,53 @@ public class AppDataSnapshotFactoryTests
         Assert.Equal(MemoryStatuses.Active, memory.GetProperty("status").GetString());
         Assert.Equal(88, memory.GetProperty("confidence").GetInt32());
         Assert.Equal("Reviewed", memory.GetProperty("maintenanceNote").GetString());
+    }
+
+    [Fact]
+    public void AppDataJsonContext_SerializesProjectAdditionalContextDirectories()
+    {
+        var data = new AppData
+        {
+            Projects =
+            [
+                new Project
+                {
+                    Name = "Multi folder project",
+                    WorkingDirectory = @"C:\Repo",
+                    AdditionalContextDirectories = [@"C:\SharedSkills", @"D:\McpConfigs"]
+                }
+            ]
+        };
+
+        var json = JsonSerializer.Serialize(data, AppDataJsonContext.Default.AppData);
+        using var document = JsonDocument.Parse(json);
+
+        var project = document.RootElement.GetProperty("projects")[0];
+        Assert.Equal(@"C:\SharedSkills", project.GetProperty("additionalContextDirectories")[0].GetString());
+        Assert.Equal(@"D:\McpConfigs", project.GetProperty("additionalContextDirectories")[1].GetString());
+    }
+
+    [Fact]
+    public void CreateIndexSnapshot_PreservesProjectAdditionalContextDirectories()
+    {
+        var source = new AppData
+        {
+            Projects =
+            [
+                new Project
+                {
+                    Name = "Multi folder project",
+                    WorkingDirectory = @"C:\Repo",
+                    AdditionalContextDirectories = [@"C:\SharedSkills", @"D:\McpConfigs"]
+                }
+            ]
+        };
+
+        var snapshot = InvokeCreateIndexSnapshot(source);
+
+        var project = Assert.Single(snapshot.Projects);
+        Assert.Equal([@"C:\SharedSkills", @"D:\McpConfigs"], project.AdditionalContextDirectories);
+        Assert.NotSame(source.Projects[0].AdditionalContextDirectories, project.AdditionalContextDirectories);
     }
 
     [Fact]
@@ -394,6 +465,7 @@ public class AppDataSnapshotFactoryTests
         Assert.Equal(currentSnapshot.Chats[0].UpdatedAt, chat.UpdatedAt);
         Assert.Equal(currentSnapshot.Chats[0].ActiveSkillIds, chat.ActiveSkillIds);
         Assert.Equal(currentSnapshot.Chats[0].ActiveMcpServerNames, chat.ActiveMcpServerNames);
+        Assert.Equal(currentSnapshot.Chats[0].HasExplicitMcpServerSelection, chat.HasExplicitMcpServerSelection);
         Assert.Equal("gpt-5.4", chat.LastModelUsed);
         Assert.Equal("high", chat.LastReasoningEffortUsed);
         Assert.Equal(100, chat.TotalInputTokens);
@@ -600,6 +672,7 @@ public class AppDataSnapshotFactoryTests
             UpdatedAt = updatedAt,
             ActiveSkillIds = skillIds ?? [],
             ActiveMcpServerNames = mcpServers ?? [],
+            HasExplicitMcpServerSelection = mcpServers is not null,
             LastModelUsed = lastModelUsed,
             LastReasoningEffortUsed = lastReasoningEffortUsed,
             TotalInputTokens = totalInputTokens,
