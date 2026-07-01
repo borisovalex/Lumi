@@ -724,13 +724,28 @@
                                   </ContextMenu>
                                 </Panel.ContextMenu>
                                 <DockPanel>
-                                  <TextBlock DockPanel.Dock="Bottom"
-                                             x:Name="ProjectLabel"
-                                             FontSize="10"
-                                             Foreground="{DynamicResource Brush.AccentDefault}"
-                                             Opacity="0.7"
-                                             TextTrimming="CharacterEllipsis"
-                                             IsVisible="False" />
+                                  <Border DockPanel.Dock="Bottom"
+                                          x:Name="ProjectBadge"
+                                          IsVisible="False"
+                                          HorizontalAlignment="Left"
+                                          MaxWidth="180"
+                                          Margin="0,5,0,1"
+                                          Padding="7,2,9,2"
+                                          CornerRadius="{DynamicResource Radius.Full}"
+                                          Background="{DynamicResource Brush.AccentSubtle}">
+                                    <StackPanel Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                                      <PathIcon Data="{StaticResource Icon.Folder}"
+                                                Width="10" Height="10"
+                                                VerticalAlignment="Center"
+                                                Foreground="{DynamicResource Brush.AccentDefault}" />
+                                      <TextBlock x:Name="ProjectLabel"
+                                                 FontSize="10.5"
+                                                 FontWeight="Medium"
+                                                 VerticalAlignment="Center"
+                                                 Foreground="{DynamicResource Brush.AccentDefault}"
+                                                 TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                  </Border>
                                   <Border x:Name="UnreadIndicator" DockPanel.Dock="Left"
                                           Width="6" Height="6" CornerRadius="3"
                                           Background="{DynamicResource Brush.AccentDefault}"

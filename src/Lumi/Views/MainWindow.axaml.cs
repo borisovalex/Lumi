@@ -2862,19 +2862,23 @@ public partial class MainWindow : Window
             foreach (var item in lb.GetVisualDescendants().OfType<ListBoxItem>())
             {
                 if (item.DataContext is not Chat chat) continue;
-                var label = item.GetVisualDescendants().OfType<TextBlock>()
+                var descendants = item.GetVisualDescendants().ToList();
+                var badge = descendants.OfType<Border>()
+                    .FirstOrDefault(b => b.Name == "ProjectBadge");
+                var label = descendants.OfType<TextBlock>()
                     .FirstOrDefault(t => t.Name == "ProjectLabel");
-                if (label is null) continue;
+                if (badge is null || label is null) continue;
 
                 if (showLabels && chat.ProjectId.HasValue)
                 {
                     var name = vm.GetProjectName(chat.ProjectId);
                     label.Text = name ?? "";
-                    label.IsVisible = name is not null;
+                    ToolTip.SetTip(badge, name);
+                    badge.IsVisible = name is not null;
                 }
                 else
                 {
-                    label.IsVisible = false;
+                    badge.IsVisible = false;
                 }
             }
         }
