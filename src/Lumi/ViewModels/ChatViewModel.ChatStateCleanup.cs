@@ -23,6 +23,16 @@ public partial class ChatViewModel
         _copilotService.SessionDeletedRemotely -= OnSessionDeletedRemotely;
         _transcriptWindow.PropertyChanged -= OnTranscriptWindowPropertyChanged;
 
+        // Detach the title-tracking subscription from the chat model. The chat outlives this surface
+        // (it stays in DataStore.Data.Chats and MainViewModel keeps a running-state PropertyChanged
+        // subscription on it), so leaving this handler attached pins the whole disposed surface — its
+        // Messages, transcript turns, and realized Avalonia controls — in memory until app shutdown.
+        if (_currentChatTitleSource is not null)
+        {
+            _currentChatTitleSource.PropertyChanged -= OnCurrentChatPropertyChanged;
+            _currentChatTitleSource = null;
+        }
+
         lock (_chatLoadSync)
         {
             _chatLoadRequestId++;

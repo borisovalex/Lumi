@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -16,6 +17,77 @@ namespace Lumi.Tests;
 
 public sealed class ChatViewModelLeakTests
 {
+    [Fact]
+    public void Dispose_UnsubscribesFromChatModel_SoDisposedSurfaceIsNotPinned()
+    {
+        var dataStore = CreateDataStore();
+        var chat = new Chat { Title = "leaky" };
+        dataStore.Data.Chats.Add(chat);
+
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        vm.CurrentChat = chat;
+
+        // While active the surface tracks the chat's title through PropertyChanged.
+        Assert.True(ChatEventReferencesTarget(chat, vm));
+
+        vm.Dispose();
+
+        // The chat model outlives the surface (it stays in DataStore.Data.Chats and MainViewModel keeps
+        // a running-state PropertyChanged subscription on it). If Dispose leaves this handler attached,
+        // the chat's event invocation list pins the entire disposed ChatViewModel — its Messages,
+        // transcript turns, and realized Avalonia controls — until app shutdown.
+        Assert.False(
+            ChatEventReferencesTarget(chat, vm),
+            "Disposed ChatViewModel is still in the chat model's PropertyChanged invocation list.");
+    }
+
+    private static bool ChatEventReferencesTarget(Chat chat, object target)
+    {
+        var field = typeof(Chat).GetField("PropertyChanged", BindingFlags.Instance | BindingFlags.NonPublic);
+        var handler = field?.GetValue(chat) as PropertyChangedEventHandler;
+        return handler?.GetInvocationList().Any(d => ReferenceEquals(d.Target, target)) == true;
+    }
+
+    [Fact]
+    public async Task IdleCacheEviction_DisposesSurface_AndUnsubscribesFromChatModel()
+    {
+        var chatA = new Chat { Title = "A" };
+        var chatB = new Chat { Title = "B" };
+        chatA.Messages.Add(new ChatMessage { Role = "user", Content = "a" });
+        chatB.Messages.Add(new ChatMessage { Role = "user", Content = "b" });
+
+        var dataStore = new DataStore(new AppData
+        {
+            Settings = new UserSettings { AutoSaveChats = false, EnableMemoryAutoSave = false },
+            Chats = [chatA, chatB]
+        });
+        using var registry = new ChatSurfaceRegistry();
+        using var sessionStore = new ChatSessionStore(
+            dataStore,
+            new CopilotService(),
+            registry,
+            static (surface, chat) =>
+            {
+                surface.CurrentChat = chat;
+                return Task.CompletedTask;
+            },
+            maxIdleCachedSurfaces: 1);
+
+        var surfaceA = await sessionStore.AcquireChatAsync(chatA);
+        Assert.True(ChatEventReferencesTarget(chatA, surfaceA));
+        sessionStore.Release(surfaceA); // A becomes idle-cached (single slot).
+
+        // Acquiring/releasing a second chat overflows the one idle slot, evicting and disposing A
+        // through the real pool lifecycle (TrimIdleCache -> UntrackSurface -> ChatViewModel.Dispose).
+        var surfaceB = await sessionStore.AcquireChatAsync(chatB);
+        sessionStore.Release(surfaceB);
+
+        Assert.NotSame(surfaceA, surfaceB);
+        Assert.False(
+            ChatEventReferencesTarget(chatA, surfaceA),
+            "Evicted+disposed surface is still subscribed to its chat model — it leaks until app shutdown.");
+    }
+
     [Fact]
     public void ReleaseInactiveChatState_ReleasesDetachedRuntimeResourcesWithoutEvictingMessages()
     {
