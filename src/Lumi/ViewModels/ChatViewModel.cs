@@ -1638,9 +1638,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 // accumulated (e.g. from chats the user left while they were streaming).
                 SweepInactiveChatStates();
 
-                // If this chat has an active browser, show its panel (after CurrentChat is set
-                // so ActiveChatId is already updated when the MainWindow handler runs)
-                if (_chatBrowserServices.ContainsKey(chat.Id))
+                // If this chat's browser was left open, restore its panel (after CurrentChat is set
+                // so ActiveChatId is already updated when the MainWindow handler runs). A live browser
+                // service outlives a closed panel, so gate on IsBrowserOpen to avoid reopening a browser
+                // the user closed.
+                if (_chatBrowserServices.ContainsKey(chat.Id) && IsBrowserOpen)
                     BrowserShowRequested?.Invoke(chat.Id);
 
                 // Rebuild transcript items from the fully loaded message list before

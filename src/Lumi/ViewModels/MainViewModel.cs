@@ -426,6 +426,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         ChatVM = surface;
         AttachChatViewModel(surface);
         ActiveChatId = surface.CurrentChat?.Id;
+        // Cached surfaces are reused without re-running LoadChatAsync, so re-establish the browser panel
+        // here (after ActiveChatId is set) to keep the toggle button working after switching chats.
+        surface.RestoreBrowserPanelForActiveChat();
         _chatSessionStore.Release(previous);
     }
 
