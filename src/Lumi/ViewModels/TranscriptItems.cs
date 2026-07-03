@@ -406,7 +406,11 @@ public partial class ErrorMessageItem : TranscriptItem
     [ObservableProperty] private bool _showRetryButton;
 
     public string? Author { get; }
-    public ICommand? RetryCommand { get; set; }
+
+    // Observable so a Retry affordance attached AFTER the card has already rendered — e.g. when
+    // UpdateStuckChatRetryAffordance heals a reopened, previously-bricked chat — actually notifies
+    // the button's Command binding instead of silently leaving it command-less.
+    [ObservableProperty] private ICommand? _retryCommand;
 
     public ErrorMessageItem(ChatMessageViewModel source, bool showTimestamps)
         : base($"message:error:{source.Message.Id}")

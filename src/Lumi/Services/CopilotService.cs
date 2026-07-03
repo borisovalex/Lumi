@@ -37,6 +37,16 @@ public sealed record ModelContextWindowCatalog(
     IReadOnlySet<string> LongContextModelIds,
     IReadOnlyDictionary<string, ModelContextWindowLimits> Limits);
 
+/// <summary>
+/// The outcome of classifying a failed send: whether it is <see cref="Recoverable"/> (abandon the
+/// poisoned session and rebuild from the transcript as text, offering Retry) and, when it is,
+/// whether the recovery copy should name an <see cref="IsImageError"/> (an image the backend could
+/// not process). Produced by <see cref="CopilotService.ClassifySendFailure"/> so BOTH failure entry
+/// points — the exception path (<c>HandleSendError</c>) and the structured <c>session.error</c> path
+/// (<c>SessionErrorEvent</c>) — reach an identical verdict from a single place.
+/// </summary>
+internal readonly record struct SendFailureClassification(bool Recoverable, bool IsImageError);
+
 public class CopilotService : IAsyncDisposable
 {
     private CopilotClient? _client;
@@ -1124,6 +1134,150 @@ public class CopilotService : IAsyncDisposable
         // The status code / category alone is never enough to call an auth failure "transient" —
         // require a provable backend-internal marker in the message.
         return IsTransientServerAuthError(message);
+    }
+
+    /// <summary>
+    /// True when the backend refused to process an <b>image</b> that is part of the session history
+    /// (e.g. <c>400 invalid_request_error "Could not process image"</c> or
+    /// <c>"The image data you provided does not represent a valid image."</c>).
+    /// <para>
+    /// A tool-result / attached image can be stored perfectly on our side yet still be rejected by
+    /// the upstream model. Because it lives in the server-side session history, it is re-sent on
+    /// <i>every</i> turn and permanently bricks the chat — a plain resend can never recover. Callers
+    /// use this to rebuild the session from the local transcript as text (dropping the image).
+    /// </para>
+    /// This is an ALLOW-LIST: it matches only when the message is unambiguously about an image the
+    /// backend could not process/validate, so unrelated request errors keep their normal handling.
+    /// </summary>
+    internal static bool IsUnprocessableImageError(string? errorText)
+    {
+        if (string.IsNullOrWhiteSpace(errorText))
+            return false;
+
+        var text = errorText.ToLowerInvariant();
+
+        // Must be about an image AND about a processing/validity failure of that image.
+        if (!text.Contains("image"))
+            return false;
+
+        return text.Contains("could not process")
+            || text.Contains("cannot process")
+            || text.Contains("couldn't process")
+            || text.Contains("unable to process")
+            || text.Contains("failed to process")
+            || text.Contains("could not be processed")
+            || text.Contains("does not represent a valid")
+            || text.Contains("not a valid image")
+            || text.Contains("invalid image");
+    }
+
+    /// <summary>
+    /// Structured variant for SDK <c>session.error</c> events. Quota / rate-limit / context-limit and
+    /// auth categories have dedicated handling and are never treated as an unprocessable-image error,
+    /// even in the unlikely event their message mentions an image.
+    /// </summary>
+    internal static bool IsUnprocessableImageError(int? statusCode, string? errorType, string? message)
+    {
+        var type = errorType?.ToLowerInvariant();
+        if (type is "quota" or "rate_limit" or "context_limit" or "authentication" or "authorization")
+            return false;
+
+        return IsUnprocessableImageError(message);
+    }
+
+    /// <summary>
+    /// True when retrying a failed turn cannot possibly help by itself, because the failure is a hard
+    /// credential / capacity / policy limit rather than a recoverable session or transport glitch:
+    /// a genuine logout, an exhausted quota or rate limit, an exceeded context window, or a content
+    /// policy rejection. Callers use this as the single "should we even offer Retry?" gate — EVERY
+    /// other terminal error is treated as recoverable by rebuilding the session from the transcript
+    /// as text (which safely drops any poisoned history such as an unprocessable image).
+    /// </summary>
+    internal static bool IsFatalNonRetryableError(int? statusCode, string? errorType, string? message)
+    {
+        // A bare 401/403 with no transient backend marker is a genuine logout / permission denial —
+        // the transient allow-list (IsTransientServerAuthError) has already had its chance upstream,
+        // so retrying the same turn just fails again; the user must re-authenticate.
+        if (statusCode is 401 or 403)
+            return true;
+
+        var type = errorType?.ToLowerInvariant();
+        if (type is "authentication" or "authorization" or "permission"
+            or "quota" or "insufficient_quota" or "rate_limit"
+            or "context_limit" or "context_length_exceeded"
+            or "content_policy" or "content_filter"
+            or "model_not_supported")
+            return true;
+
+        return IsFatalNonRetryableError(message);
+    }
+
+    /// <summary>String overload of <see cref="IsFatalNonRetryableError(int?,string?,string?)"/> used
+    /// when only a flattened / persisted error message is available (e.g. reclassifying a stored
+    /// <c>error</c> message on chat reload to decide whether to show a Retry button).</summary>
+    internal static bool IsFatalNonRetryableError(string? errorText)
+    {
+        if (string.IsNullOrWhiteSpace(errorText))
+            return false;
+
+        var text = errorText.ToLowerInvariant();
+
+        return text.Contains("quota")
+            || text.Contains("rate limit") || text.Contains("rate_limit")
+            || text.Contains("context length") || text.Contains("context_length")
+            || text.Contains("context window") || text.Contains("context_limit")
+            || text.Contains("maximum context")
+            || text.Contains("content policy") || text.Contains("content_policy")
+            || text.Contains("content filter") || text.Contains("content_filter")
+            || text.Contains("responsible ai")
+            // A genuine logout / permission failure: retrying the same turn just fails again, so it
+            // must NOT be offered a Retry. Only unambiguous auth-failure phrases are matched — bare
+            // "401" / "403" are deliberately excluded because those digits collide with request IDs.
+            || text.Contains("unauthorized") || text.Contains("unauthenticated")
+            || text.Contains("forbidden")
+            || text.Contains("bad credentials") || text.Contains("invalid credentials")
+            || text.Contains("authentication failed") || text.Contains("authorization failed")
+            || text.Contains("not authenticated")
+            // Permission / model-access denials (often a 403 whose numeric code we deliberately don't
+            // substring-match because bare "403" collides with request IDs). Retrying the identical
+            // request can never grant access, so these must surface terminally, not as a Retry.
+            || text.Contains("not have access") || text.Contains("access denied")
+            || text.Contains("permission denied")
+            || text.Contains("model_not_supported") || text.Contains("model not supported")
+            || text.Contains("log in again") || text.Contains("sign in again")
+            || text.Contains("logged out") || text.Contains("re-authenticate");
+    }
+
+    /// <summary>
+    /// The single send-failure decision shared by both handlers. Given whatever the failure exposed
+    /// — an HTTP <paramref name="statusCode"/> and <paramref name="errorType"/> from a structured
+    /// <c>session.error</c>, or just a flattened <paramref name="message"/> from a thrown exception —
+    /// it decides whether the turn is <see cref="SendFailureClassification.Recoverable"/> and, if so,
+    /// whether to show the unprocessable-<see cref="SendFailureClassification.IsImageError"/> copy.
+    /// <para>
+    /// The exception path passes <c>(null, null, flattenedMessage, …)</c>; the structured classifiers
+    /// degrade gracefully to the message heuristic when status/type are null, so that path gets
+    /// exactly the string-only result it had before. Centralizing the logic here is what keeps the two
+    /// handlers from drifting apart — a divergence that has recurred across reviews.
+    /// </para>
+    /// </summary>
+    /// <param name="hasTerminalOverride">True when the caller supplied a synthetic TERMINAL message
+    /// (e.g. "start a new chat" / "restart Lumi") that its call site already deemed unrecoverable. Such
+    /// a state is never reclassified and never offered Retry, so this short-circuits to
+    /// non-recoverable / non-image.</param>
+    internal static SendFailureClassification ClassifySendFailure(
+        int? statusCode, string? errorType, string? message, bool hasTerminalOverride)
+    {
+        if (hasTerminalOverride)
+            return new SendFailureClassification(Recoverable: false, IsImageError: false);
+
+        // Recoverable = anything that is NOT a hard auth / quota / context / policy limit; those are
+        // rebuilt from the transcript as text (safely dropping any poisoned history). An image
+        // rejection can ALSO be fatal (e.g. a content-policy image block), so the fatal verdict wins
+        // and gates the image flag — the "click Retry" copy is only used when Retry is actually shown.
+        var recoverable = !IsFatalNonRetryableError(statusCode, errorType, message);
+        var isImageError = recoverable && IsUnprocessableImageError(statusCode, errorType, message);
+        return new SendFailureClassification(recoverable, isImageError);
     }
 
     internal static string? TryGetGitHubTokenForMcp()

@@ -1036,6 +1036,56 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         RebuildWorkspacePanel();
 
         TranscriptRebuilt?.Invoke();
+
+        // A chat can be reopened while its last message is an error that was persisted in a previous
+        // run (e.g. a session the backend bricked). Re-derive the Retry affordance from that tail so
+        // the chat becomes recoverable again the moment it is displayed.
+        UpdateStuckChatRetryAffordance();
+    }
+
+    /// <summary>
+    /// If the displayed chat is idle and ends on a RECOVERABLE error — anything the backend rejected
+    /// that is not a hard auth / quota / context / policy limit (see
+    /// <see cref="CopilotService.IsFatalNonRetryableError(string?)"/>) — attach a one-click Retry to
+    /// that trailing error card and arm a session reset. The decision is derived purely from the
+    /// persisted transcript, so a chat that was bricked in an earlier run (its <c>error</c> messages
+    /// saved to disk) heals as soon as it is reopened: Retry — or simply sending a new message —
+    /// rebuilds a fresh session and replays the conversation as text, dropping whatever poisoned the
+    /// old session (such as an image the model could not process). Fatal errors get no false-hope
+    /// Retry, and a card that already carries a retry command (e.g. a transient connection-loss card)
+    /// is left untouched.
+    /// </summary>
+    /// <param name="recoverableOverride">The authoritative recoverability decision from the live error
+    /// handler, when known. A structured <c>session.error</c> can be fatal by its <c>ErrorType</c>
+    /// alone (e.g. a genuine logout whose message is just "unauthorized"), but that type is NOT
+    /// preserved in the persisted <c>"Error: {message}"</c> text — so the live path passes its exact
+    /// decision here to avoid a false Retry, while the reopen path (which only has the persisted text)
+    /// passes <see langword="null"/> and falls back to a best-effort message heuristic.</param>
+    private void UpdateStuckChatRetryAffordance(bool? recoverableOverride = null)
+    {
+        if (CurrentChat is null || IsBusy || IsStreaming)
+            return;
+
+        var tailItem = TranscriptTurns.LastOrDefault(static t => t.Items.Count > 0)?.Items.LastOrDefault();
+        if (tailItem is not ErrorMessageItem errorItem || errorItem.RetryCommand is not null)
+            return;
+
+        var lastError = CurrentChat.Messages.LastOrDefault(static m => m.Role == "error");
+        if (lastError is null)
+            return;
+
+        var recoverable = recoverableOverride
+            ?? !CopilotService.IsFatalNonRetryableError(lastError.Content);
+        if (!recoverable)
+            return;
+
+        _pendingSessionInvalidations.Add(CurrentChat.Id);
+        errorItem.RetryCommand = new RelayCommand(() =>
+        {
+            errorItem.ShowRetryButton = false;
+            _ = RetryAfterConnectionLossAsync();
+        });
+        errorItem.ShowRetryButton = true;
     }
 
     private IReadOnlyList<ChatMessage> GetDisplayMessagesForChat(Chat chat)
@@ -3072,26 +3122,45 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             return;
         }
 
-        var message = overrideMessage ?? FlattenExceptionMessages(ex);
-        var errorText = string.Format(Loc.Status_Error, message);
+        // Classify from the raw backend failure: anything that is NOT a hard auth / quota / context /
+        // policy limit is recoverable by rebuilding the session from the transcript AS TEXT, which
+        // safely drops any poisoned history (e.g. an image the backend can't process). A caller-
+        // supplied overrideMessage is a synthetic TERMINAL state (e.g. "start a new chat" / "restart
+        // Lumi") whose call site already deemed it unrecoverable — it is neither reclassified nor
+        // offered a Retry. The image copy is only used when we will actually show Retry.
+        var flattened = FlattenExceptionMessages(ex);
+        // Shared decision (identical logic to SessionErrorEvent's). The exception path carries no HTTP
+        // status/type, so it feeds nulls and the classifier falls back to the flattened text. A
+        // caller-supplied overrideMessage is a synthetic TERMINAL state, marked unrecoverable here.
+        var (recoverable, isImageError) = CopilotService.ClassifySendFailure(
+            statusCode: null, errorType: null, message: flattened,
+            hasTerminalOverride: overrideMessage is not null);
+        var message = overrideMessage ?? flattened;
+        var display = isImageError ? Loc.Status_ImageRejectedReset : string.Format(Loc.Status_Error, message);
 
         if (chat is not null)
         {
             var runtime = GetOrCreateRuntimeState(chat.Id);
-            MarkRuntimeTerminal(runtime, errorText);
+            MarkRuntimeTerminal(runtime, display);
+
+            // Recoverable errors abandon the current server session; arm a reset so the next send (a
+            // new message OR the Retry button) rebuilds a fresh one. Arm here — not only in the
+            // displayed-UI branch — so a background / inactive chat recovers without being reopened.
+            if (recoverable)
+                _pendingSessionInvalidations.Add(chat.Id);
 
             var errorMsg = new ChatMessage
             {
                 Role = "error",
                 Author = Loc.Author_Lumi,
-                Content = errorText
+                Content = display
             };
             chat.Messages.Add(errorMsg);
 
             // Only update view-level state if this chat is still displayed
             if (CurrentChat?.Id == chat.Id)
             {
-                StatusText = errorText;
+                StatusText = display;
                 IsBusy = false;
                 IsStreaming = false;
                 _transcriptBuilder.HideTypingIndicator();
@@ -3099,12 +3168,22 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
                 var msgVm = new ChatMessageViewModel(errorMsg);
                 Messages.Add(msgVm);
+                // Pass this handler's authoritative decision: a fatal error — or a synthetic terminal
+                // overrideMessage — must not have Retry re-derived from its lossy persisted string.
+                UpdateStuckChatRetryAffordance(recoverable);
                 ScrollToEndRequested?.Invoke();
             }
+
+            // Persist the error card so it survives a restart before the next send. For a recoverable
+            // error this also lets the reopen path re-arm session recovery from the persisted card; for
+            // a fatal / terminal-override error the card simply stays visible. Mirrors the
+            // SessionErrorEvent path (which already saves here) — without it the exception path silently
+            // dropped the card (and its recovery affordance) on the next launch.
+            QueueSaveChat(chat, saveIndex: false, releaseIfInactive: CurrentChat?.Id != chat.Id);
         }
         else
         {
-            StatusText = errorText;
+            StatusText = display;
             IsBusy = false;
             IsStreaming = false;
             _transcriptBuilder.HideTypingIndicator();

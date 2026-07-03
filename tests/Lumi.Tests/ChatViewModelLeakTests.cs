@@ -8,6 +8,7 @@ using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using GitHub.Copilot;
+using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
@@ -946,6 +947,267 @@ public sealed class ChatViewModelLeakTests
         var turn = Assert.Single(vm.TranscriptTurns);
         var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
         Assert.Contains("Copilot request failed", errorItem.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HandleSendError_UnprocessableImage_SchedulesSessionResetAndOffersRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "bricked-chat", CopilotSessionId = "poisoned-session" };
+        chat.Messages.Add(new ChatMessage { Role = "user", Content = "take a screenshot" });
+        chat.Messages.Add(new ChatMessage { Role = "assistant", Content = "done" });
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+        vm.IsBusy = true;
+        vm.IsStreaming = true;
+
+        // The verbatim rejection that permanently bricked the "Sub Agent Window Bug" chat.
+        InvokePrivate(
+            vm,
+            "HandleSendError",
+            new InvalidOperationException(
+                "CAPIError: 400 invalid_request_error: The image data you provided does not represent a valid image."),
+            false,
+            null!,
+            chat);
+
+        // The chat is flagged so the NEXT send recreates a fresh session and replays the
+        // transcript as text (dropping the rejected image) instead of resuming the poisoned one.
+        Assert.Contains(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+
+        // The user gets a clear, one-click-retryable affordance — not a dead-end error.
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.True(errorItem.ShowRetryButton);
+        Assert.NotNull(errorItem.RetryCommand);
+        Assert.Equal(Loc.Status_ImageRejectedReset, errorItem.Content);
+        // The raw CAPI wording is replaced by the friendly recovery message.
+        Assert.DoesNotContain("does not represent", errorItem.Content, StringComparison.OrdinalIgnoreCase);
+
+        // The error is PERSISTED (as an error-role message) so the affordance survives a reload:
+        // reopening the chat re-derives Retry from this tail via UpdateStuckChatRetryAffordance.
+        var persisted = Assert.IsType<ChatMessage>(chat.Messages[^1]);
+        Assert.Equal("error", persisted.Role);
+        Assert.Equal(Loc.Status_ImageRejectedReset, persisted.Content);
+    }
+
+    [Fact]
+    public void HandleSendError_GenericRecoverableError_SchedulesResetAndOffersRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "error-chat", CopilotSessionId = "live-session" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        InvokePrivate(
+            vm,
+            "HandleSendError",
+            new InvalidOperationException("Copilot request failed"),
+            false,
+            null!,
+            chat);
+
+        // Round 2: EVERY non-fatal terminal error is recoverable by rebuilding the session from the
+        // transcript as text, so a generic failure now arms a reset and offers a one-click Retry
+        // (previously it was a dead end).
+        Assert.Contains(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.True(errorItem.ShowRetryButton);
+        Assert.NotNull(errorItem.RetryCommand);
+        // The raw message is surfaced (no friendly image copy) for a non-image error.
+        Assert.Contains("Copilot request failed", errorItem.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void HandleSendError_FatalError_DoesNotScheduleResetOrOfferRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "fatal-chat", CopilotSessionId = "live-session" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        // A hard limit (context window) can't be fixed by resending the same conversation, so Retry
+        // would be false hope — no reset is armed and no Retry button is shown.
+        InvokePrivate(
+            vm,
+            "HandleSendError",
+            new InvalidOperationException("The context length exceeded the model's maximum."),
+            false,
+            null!,
+            chat);
+
+        Assert.DoesNotContain(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.False(errorItem.ShowRetryButton);
+        Assert.Null(errorItem.RetryCommand);
+    }
+
+    [Fact]
+    public void HandleSendError_BareAuthLogout_DoesNotScheduleResetOrOfferRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "logged-out", CopilotSessionId = "live-session" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        // A genuine logout surfaces as a plain exception with no transient backend marker, so it reaches
+        // the terminal path. Retrying the same turn can't help — the user must re-authenticate — so no
+        // reset is armed and no false Retry is offered.
+        InvokePrivate(
+            vm,
+            "HandleSendError",
+            new InvalidOperationException("401 Unauthorized: Bad credentials"),
+            false,
+            null!,
+            chat);
+
+        Assert.DoesNotContain(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.False(errorItem.ShowRetryButton);
+        Assert.Null(errorItem.RetryCommand);
+    }
+
+    [Fact]
+    public void HandleSendError_TerminalOverrideMessage_DoesNotOfferRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "session-gone", CopilotSessionId = "live-session" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        // A synthetic terminal override ("Start a new chat to continue.") is unrecoverable by design.
+        // Its persisted "Error: {text}" carries no fatal keyword, so the affordance must NOT re-derive
+        // a Retry from that lossy string — HandleSendError passes its authoritative (false) decision.
+        InvokePrivate(
+            vm,
+            "HandleSendError",
+            new InvalidOperationException("inner transport failure"),
+            false,
+            Loc.Status_OriginalSessionUnavailable,
+            chat);
+
+        Assert.DoesNotContain(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.False(errorItem.ShowRetryButton);
+        Assert.Null(errorItem.RetryCommand);
+        Assert.Equal(string.Format(Loc.Status_Error, Loc.Status_OriginalSessionUnavailable), errorItem.Content);
+    }
+
+    [Fact]
+    public void HandleSendError_FatalErrorWithImageMessage_UsesPlainErrorCopyAndNoRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "policy-image", CopilotSessionId = "live-session" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        // A content-policy block whose message ALSO matches image phrasing. It is fatal (retry can't
+        // help), so the "click Retry" image copy must NOT be shown and no Retry offered — the image copy
+        // is gated on `recoverable`. This is the exact overlap SessionErrorEvent now mirrors.
+        const string msg = "content policy violation: could not process image";
+        Assert.True(CopilotService.IsUnprocessableImageError(msg));   // image phrasing matches...
+        Assert.True(CopilotService.IsFatalNonRetryableError(msg));    // ...but it is fatal
+
+        InvokePrivate(vm, "HandleSendError", new InvalidOperationException(msg), false, null!, chat);
+
+        Assert.DoesNotContain(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var errorItem = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.False(errorItem.ShowRetryButton);
+        Assert.Null(errorItem.RetryCommand);
+        // Plain "Error: {message}" — NOT the recovery-implying image copy.
+        Assert.Equal(string.Format(Loc.Status_Error, msg), errorItem.Content);
+        Assert.NotEqual(Loc.Status_ImageRejectedReset, errorItem.Content);
+    }
+
+    [Fact]
+    public void HandleSendError_QueuesChatSave_SoErrorCardSurvivesRestart()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "persist-me", CopilotSessionId = "live-session" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        var before = DirtyChatVersion(dataStore, chat.Id);
+        InvokePrivate(vm, "HandleSendError", new InvalidOperationException("could not process image"), false, null!, chat);
+        var after = DirtyChatVersion(dataStore, chat.Id);
+
+        // HandleSendError must queue a per-chat save (MarkChatChanged bumps the dirty version) so the
+        // error card it just appended is persisted — otherwise a restart before the next send drops it
+        // and, for a recoverable error, the reopen path can't re-arm recovery from the missing card.
+        Assert.True(after > before, $"expected a dirty-version bump; before={before} after={after}");
+        Assert.Contains(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations")); // recoverable → armed
+    }
+
+    private static long DirtyChatVersion(DataStore store, Guid chatId)
+    {
+        var field = typeof(DataStore).GetField("_dirtyChatVersions", BindingFlags.NonPublic | BindingFlags.Instance)!;
+        var dict = (System.Collections.IDictionary)field.GetValue(store)!;
+        return dict.Contains(chatId) ? Convert.ToInt64(dict[chatId]) : 0L;
+    }
+
+    [Fact]
+    public void UpdateStuckChatRetryAffordance_AuthoritativeFatalDecision_SuppressesRetryDespiteRecoverableLookingText()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "logout-bricked", CopilotSessionId = "poisoned" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        // A structured session.error that is fatal purely by its ErrorType (e.g. a content-policy or
+        // quota rejection) but whose backend message is opaque: once persisted as plain "Error: {message}"
+        // the type is gone and the generic text carries no fatal keyword, so the string heuristic alone
+        // would wrongly recover. This is exactly the case the authoritative-decision param exists for.
+        var err = new ChatMessage { Role = "error", Author = "Lumi", Content = "Error: The request could not be completed." };
+        chat.Messages.Add(err);
+        vm.Messages.Add(new ChatMessageViewModel(err)); // renders the trailing ErrorMessageItem
+        Assert.False(CopilotService.IsFatalNonRetryableError(err.Content)); // text heuristic == "recoverable"
+
+        // The live handler passes its authoritative (structured) decision — fatal — so no false Retry
+        // and no needless session reset are armed, even though the persisted text looks recoverable.
+        InvokePrivate(vm, "UpdateStuckChatRetryAffordance", false);
+
+        Assert.DoesNotContain(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var item = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.False(item.ShowRetryButton);
+        Assert.Null(item.RetryCommand);
+    }
+
+    [Fact]
+    public void UpdateStuckChatRetryAffordance_RecoverableDecision_ArmsResetAndOffersRetry()
+    {
+        var dataStore = CreateDataStore();
+        var vm = new ChatViewModel(dataStore, new CopilotService());
+        var chat = new Chat { Title = "recoverable-bricked", CopilotSessionId = "poisoned" };
+        dataStore.Data.Chats.Add(chat);
+        vm.CurrentChat = chat;
+
+        var err = new ChatMessage { Role = "error", Author = "Lumi", Content = "Error: something odd happened" };
+        chat.Messages.Add(err);
+        vm.Messages.Add(new ChatMessageViewModel(err));
+
+        InvokePrivate(vm, "UpdateStuckChatRetryAffordance", true);
+
+        Assert.Contains(chat.Id, GetField<HashSet<Guid>>(vm, "_pendingSessionInvalidations"));
+        var turn = Assert.Single(vm.TranscriptTurns);
+        var item = Assert.IsType<ErrorMessageItem>(Assert.Single(turn.Items));
+        Assert.True(item.ShowRetryButton);
+        Assert.NotNull(item.RetryCommand);
     }
 
     [Fact]

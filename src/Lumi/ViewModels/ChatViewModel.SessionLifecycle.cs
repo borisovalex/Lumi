@@ -1335,7 +1335,32 @@ public partial class ChatViewModel
                             return;
                         }
 
-                        MarkRuntimeTerminal(runtime, string.Format(Loc.Status_Error, err.Data.Message));
+                        // Classify the terminal error. Anything that is NOT a hard auth / quota /
+                        // context / policy limit is recoverable by rebuilding the session from the
+                        // transcript AS TEXT, which safely drops any poisoned server-side history —
+                        // e.g. an image the backend refuses to process (a tool-result screenshot, an
+                        // attachment, …) re-sent on every turn that would otherwise brick the chat
+                        // forever, since there is no SDK API to remove a single asset. Arm a reset so
+                        // the next send (a new message OR the Retry button) rebuilds a fresh session;
+                        // arming here (not only in the displayed branch) recovers a background chat too.
+                        // Shared decision (identical logic to HandleSendError's). A structured
+                        // session.error carries HTTP status + errorType, so a fatal-by-type failure —
+                        // a genuine logout, or a content-policy image block whose message also says
+                        // "could not process image" — is correctly NOT recoverable and NOT shown the
+                        // image copy: the fatal verdict gates the image flag inside ClassifySendFailure.
+                        // Without that gate the recovery-implying copy (which carries no fatal keyword)
+                        // would be re-read as recoverable on reopen and dangle a false Retry.
+                        var (recoverable, isImageError) = CopilotService.ClassifySendFailure(
+                            err.Data.StatusCode, err.Data.ErrorType, err.Data.Message,
+                            hasTerminalOverride: false);
+                        var display = isImageError
+                            ? Loc.Status_ImageRejectedReset
+                            : string.Format(Loc.Status_Error, err.Data.Message);
+
+                        if (recoverable)
+                            _pendingSessionInvalidations.Add(chat.Id);
+
+                        MarkRuntimeTerminal(runtime, display);
                         if (shouldUpdateDisplayedChatUi)
                         {
                             // Clean up typing indicator and tool groups
@@ -1348,16 +1373,22 @@ public partial class ChatViewModel
                             IsBusy = runtime.IsBusy;
                             IsStreaming = runtime.IsStreaming;
 
-                            // Surface the error as a visible chat message
+                            // Surface the error as a visible chat message. Adding to Messages renders
+                            // it via the CollectionChanged handler (no explicit ProcessMessageToTranscript
+                            // — a second call here would render a duplicate error card).
                             var errorMsg = new ChatMessage
                             {
                                 Role = "error",
                                 Author = Loc.Author_Lumi,
-                                Content = string.Format(Loc.Status_Error, err.Data.Message)
+                                Content = display
                             };
                             chat.Messages.Add(errorMsg);
                             Messages.Add(new ChatMessageViewModel(errorMsg));
-                            _transcriptBuilder.ProcessMessageToTranscript(Messages[^1]);
+                            // Pass the authoritative (structured) recoverability decision: a
+                            // fatal-by-ErrorType error (e.g. a genuine logout) loses its type once
+                            // persisted as plain "Error: {message}", so the affordance must not
+                            // re-derive it from that lossy text and offer a false Retry.
+                            UpdateStuckChatRetryAffordance(recoverable);
                             ScrollToEndRequested?.Invoke();
                         }
                         QueueSaveChat(chat, saveIndex: false, releaseIfInactive: CurrentChat?.Id != chat.Id);
