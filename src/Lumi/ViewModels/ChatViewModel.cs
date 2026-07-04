@@ -1505,8 +1505,14 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 var createdSession = await _copilotService.CreateSessionAsync(createConfig, sessionCt);
                 chat.CopilotSessionId = createdSession.SessionId;
                 _dataStore.MarkChatChanged(chat);
+                if (!SubscribeToSession(createdSession, chat, workDir))
+                {
+                    // This surface was disposed while the session was being created; the session
+                    // has already been released. Don't publish it as active — abort cleanly.
+                    _activeSession = null;
+                    return false;
+                }
                 _activeSession = createdSession;
-                SubscribeToSession(createdSession, chat, workDir);
 
                 // Check MCP server status after session creation and surface errors
                 if (mcpServers is { Count: > 0 })
@@ -1536,8 +1542,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName, contextTier);
                 var session = await _copilotService.ResumeSessionAsync(
                     chat.CopilotSessionId, resumeConfig, sessionCt);
+                if (!SubscribeToSession(session, chat, workDir))
+                {
+                    // Surface disposed mid-resume; the session was released. Abort cleanly.
+                    _activeSession = null;
+                    return false;
+                }
                 _activeSession = session;
-                SubscribeToSession(session, chat, workDir);
                 if (mcpServers is { Count: > 0 })
                     _ = CheckMcpServerStatusAsync(session, chat.Id, mcpServers, ct);
 
@@ -1595,8 +1606,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 mcpServers, effort, userInputHandler, onPermission: null, hooks, agentName, contextTier);
             var createdSession = await _copilotService.CreateSessionAsync(createConfig, sessionCt);
             chat.CopilotSessionId = createdSession.SessionId;
+            if (!SubscribeToSession(createdSession, chat, workDir))
+            {
+                // Surface disposed mid-create; the session was released. Abort cleanly.
+                _activeSession = null;
+                return false;
+            }
             _activeSession = createdSession;
-            SubscribeToSession(createdSession, chat, workDir);
             if (mcpServers is { Count: > 0 })
                 _ = CheckMcpServerStatusAsync(createdSession, chat.Id, mcpServers, ct);
             _dataStore.MarkChatChanged(chat);

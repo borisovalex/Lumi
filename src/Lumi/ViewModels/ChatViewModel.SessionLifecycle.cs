@@ -108,8 +108,11 @@ public partial class ChatViewModel
 
     /// <summary>Subscribes to events on a CopilotSession. Each subscription captures its own
     /// streaming state via closures and always updates the Chat model. UI updates are gated
-    /// on _activeSession so only the displayed chat's events touch the UI.</summary>
-    private void SubscribeToSession(CopilotSession session, Chat chat, string workDir)
+    /// on _activeSession so only the displayed chat's events touch the UI.
+    /// Returns <c>false</c> when this surface was disposed while the session was being
+    /// created/resumed: the incoming session is released (not subscribed) and callers must NOT
+    /// publish it as <c>_activeSession</c> or send on it.</summary>
+    private bool SubscribeToSession(CopilotSession session, Chat chat, string workDir)
     {
         // Dispose previous subscription for this chat (e.g., session was resumed)
         if (_sessionSubs.TryGetValue(chat.Id, out var oldSub))
@@ -138,7 +141,7 @@ public partial class ChatViewModel
         if (_isDisposed)
         {
             TrackSessionRelease(chat.Id, session, deleteServerSession: false);
-            return;
+            return false;
         }
 
         _sessionCache[chat.Id] = session;
@@ -2025,6 +2028,7 @@ public partial class ChatViewModel
             assistantStream,
             reasoningStream,
             new ActionDisposable(() => _copilotService.CliProcessExited -= OnCliProcessExited));
+        return true;
     }
 
     private static void MarkRuntimeTerminal(ChatRuntimeState runtime, string? statusText = null)

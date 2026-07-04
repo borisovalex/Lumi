@@ -377,6 +377,30 @@ public sealed class ChatViewModelLeakTests
     }
 
     [Fact]
+    public void AcquireDraft_DoesNotDisposeReturnedDraftSurface()
+    {
+        // Regression: AcquireDraft seeded the draft's project context (SetDraftProjectContext ->
+        // ChatViewModel.ClearProjectId) BEFORE retaining the surface. For a brand-new draft, ClearProjectId
+        // raises a CurrentChat PropertyChanged (its else branch fires even when CurrentChat is null); the
+        // store listens (OnSurfacePropertyChanged -> CacheOrReleaseIfIdleAndUnhosted). With CurrentChat null,
+        // CanCacheIdleSurface is false, so while the draft was still unhosted (hostCount 0) the idle-release
+        // path disposed it on the spot — AcquireDraft then returned a DISPOSED surface, which threw
+        // ObjectDisposedException on the first send in a new chat. Uses the same public constructor (default
+        // idle-cache size) as the app, so it reproduces at production settings.
+        var dataStore = CreateDataStore();
+        using var registry = new ChatSurfaceRegistry();
+        using var store = new ChatSessionStore(dataStore, new CopilotService(), registry);
+
+        var surface = store.AcquireDraft(projectId: null);
+
+        var isDisposed = (bool)surface.GetType()
+            .GetField("_isDisposed", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(surface)!;
+
+        Assert.False(isDisposed, "AcquireDraft must not return a disposed surface.");
+    }
+
+    [Fact]
     public void ReleaseInactiveChatState_LeavesBusyChatAttached()
     {
         var dataStore = CreateDataStore();

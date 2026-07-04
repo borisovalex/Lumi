@@ -75,8 +75,14 @@ public sealed class ChatSessionStore : IDisposable
         ThrowIfDisposed();
 
         var surface = CreateTrackedSurface(configure);
-        SetDraftProjectContext(surface, projectId);
+        // Retain BEFORE seeding the draft's project context. SetDraftProjectContext raises a
+        // PropertyChanged the store listens to (OnSurfacePropertyChanged -> CacheOrReleaseIfIdleAndUnhosted).
+        // A brand-new draft has no CurrentChat and hostCount 0, so that callback would treat it as an idle,
+        // uncacheable, unhosted surface and dispose it on the spot — handing the caller a disposed surface
+        // that then throws ObjectDisposedException on first send. Retaining first (hostCount = 1) makes the
+        // callback treat it as hosted and leave it alive.
         Retain(surface);
+        SetDraftProjectContext(surface, projectId);
         return surface;
     }
 
