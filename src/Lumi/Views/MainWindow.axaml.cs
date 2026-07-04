@@ -1577,6 +1577,14 @@ public partial class MainWindow : Window
 
             _pendingNavHoverIndex = -1;
             SetHoveredNavButton(index);
+
+            // Pre-warm the hovered page off the click path. Hovering a nav item signals intent to
+            // open it, so inflate its (lazily-created, then cached) view now at Background priority.
+            // By click time the heavy one-time XAML/template inflation is already paid, turning a
+            // cold first-visit hitch (worst: the MCP servers page) into an instant warm switch.
+            // Idempotent: EnsurePageViewLoaded no-ops once the page's host content exists.
+            if (index > 0)
+                Dispatcher.UIThread.Post(() => EnsurePageViewLoaded(index), DispatcherPriority.Background);
         }, DispatcherPriority.Input);
     }
 
@@ -1831,9 +1839,17 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
+    /// <summary>
+    /// Root for chat-sidebar visual-tree walks. Scoped to the chat-list scroller subtree (just the
+    /// visible chat rows) instead of the whole window — the window tree also contains the entire
+    /// mounted transcript (hundreds of turn controls) and every management page, so walking <c>this</c>
+    /// on every list rebuild/selection was orders of magnitude more work than the sidebar needs.
+    /// </summary>
+    private Visual ChatListWalkRoot => (Visual?)_chatListScroller ?? this;
+
     private void AttachListBoxHandlers()
     {
-        foreach (var lb in this.GetVisualDescendants().OfType<ListBox>())
+        foreach (var lb in ChatListWalkRoot.GetVisualDescendants().OfType<ListBox>())
         {
             if (!lb.Classes.Contains("chat-list")) continue;
             if (lb.GetValue(ChatListHandlersAttachedProperty)) continue;
@@ -1914,7 +1930,7 @@ public partial class MainWindow : Window
 
         // Deselect other group ListBoxes
         _suppressSelectionSync = true;
-        foreach (var otherLb in this.GetVisualDescendants().OfType<ListBox>())
+        foreach (var otherLb in ChatListWalkRoot.GetVisualDescendants().OfType<ListBox>())
         {
             if (!otherLb.Classes.Contains("chat-list")) continue;
             if (otherLb != lb)
@@ -1930,7 +1946,7 @@ public partial class MainWindow : Window
         _suppressSelectionSync = true;
         try
         {
-            foreach (var lb in this.GetVisualDescendants().OfType<ListBox>())
+            foreach (var lb in ChatListWalkRoot.GetVisualDescendants().OfType<ListBox>())
             {
                 if (!lb.Classes.Contains("chat-list")) continue;
 
@@ -2007,7 +2023,7 @@ public partial class MainWindow : Window
         if (_chatListScroller is null)
             return;
 
-        var items = this.GetVisualDescendants()
+        var items = ChatListWalkRoot.GetVisualDescendants()
             .OfType<ListBoxItem>()
             .Where(IsChatListItem)
             .Select(item => new
@@ -2120,7 +2136,7 @@ public partial class MainWindow : Window
         var cts = ReplaceCancellationTokenSource(ref _titleAnimCts);
 
         TextBlock? titleBlock = null;
-        foreach (var lb in this.GetVisualDescendants().OfType<ListBox>())
+        foreach (var lb in ChatListWalkRoot.GetVisualDescendants().OfType<ListBox>())
         {
             if (!lb.Classes.Contains("chat-list")) continue;
             foreach (var container in lb.GetVisualDescendants().OfType<ListBoxItem>())
@@ -2855,18 +2871,14 @@ public partial class MainWindow : Window
         // Only show project labels when NOT filtering by a specific project
         var showLabels = !vm.SelectedProjectFilter.HasValue;
 
-        foreach (var lb in this.GetVisualDescendants().OfType<ListBox>())
+        foreach (var lb in ChatListWalkRoot.GetVisualDescendants().OfType<ListBox>())
         {
             if (!lb.Classes.Contains("sidebar-list")) continue;
 
             foreach (var item in lb.GetVisualDescendants().OfType<ListBoxItem>())
             {
                 if (item.DataContext is not Chat chat) continue;
-                var descendants = item.GetVisualDescendants().ToList();
-                var badge = descendants.OfType<Border>()
-                    .FirstOrDefault(b => b.Name == "ProjectBadge");
-                var label = descendants.OfType<TextBlock>()
-                    .FirstOrDefault(t => t.Name == "ProjectLabel");
+                FindProjectBadgeControls(item, out var badge, out var label);
                 if (badge is null || label is null) continue;
 
                 if (showLabels && chat.ProjectId.HasValue)
@@ -2884,9 +2896,33 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Locates the ProjectBadge/ProjectLabel controls inside a chat row in a single short-circuiting
+    /// visual-tree pass, instead of materializing the row's entire descendant list per rebuild.
+    /// </summary>
+    private static void FindProjectBadgeControls(Visual item, out Border? badge, out TextBlock? label)
+    {
+        badge = null;
+        label = null;
+        foreach (var d in item.GetVisualDescendants())
+        {
+            if (badge is null && d is Border { Name: "ProjectBadge" } b)
+                badge = b;
+            else if (label is null && d is TextBlock { Name: "ProjectLabel" } t)
+                label = t;
+
+            if (badge is not null && label is not null)
+                return;
+        }
+    }
+
     /// <summary>Populates the "Move to Project" context menu items for each chat.</summary>
     private void ApplyMoveToProjectMenus(MainViewModel vm)
     {
+        // NOTE: intentionally NOT scoped to ChatListWalkRoot. These items live in lazy ContextMenu
+        // popups; when open they may be hosted in a window-level overlay outside the chat scroller
+        // subtree, so this walk stays rooted at the window to preserve behavior. This path is not the
+        // rebuild bottleneck (container realization dominates) — see roadmap for lazy on-open populate.
         foreach (var menuItem in this.GetVisualDescendants().OfType<MenuItem>())
         {
             if (menuItem.Header is not string header || header != Loc.Menu_MoveToProject) continue;
