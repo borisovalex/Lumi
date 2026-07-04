@@ -1064,6 +1064,15 @@ public partial class ChatViewModel
                                 _transcriptBuilder.UpdateTerminalOutput(rootToolCallId, output, true);
                                 QueueSaveChat(chat, saveIndex: false);
                             }
+
+                            // An async shell's tool call returns in a fraction of a second while the OS
+                            // process keeps running. Keep the card honestly "Running in background"
+                            // (instead of flipping to "Completed") and let the Tasks-API monitor track it.
+                            if (toolName == "powershell" && LooksLikeBackgroundShellArgs(toolMsg.Content))
+                            {
+                                var command = ToolDisplayHelper.ExtractJsonField(toolMsg.Content, "command") ?? string.Empty;
+                                TrackBackgroundShell(rootToolCallId, command);
+                            }
                         }
                     }
                     });
@@ -1211,7 +1220,10 @@ public partial class ChatViewModel
                         {
                             MarkRuntimeActive(runtime, isStreaming: false, hasPendingBackgroundWork: true);
                             if (IsDisplayedSession())
+                            {
+                                EnsureBackgroundShellMonitorRunning();
                                 ApplyDisplayedRuntimeState(runtime);
+                            }
                         });
                     }
                     break;
@@ -1232,6 +1244,11 @@ public partial class ChatViewModel
                         // In SDK 0.2.2+, session.idle is only emitted once background work is drained.
                         // Clearing IsBusy updates Chat.IsRunning, so keep it on the UI thread.
                         MarkRuntimeTerminal(runtime);
+
+                        // Session idle == all attached background work has drained, so any terminal
+                        // cards still shown "running in background" for this chat are now finished.
+                        if (shouldUpdateDisplayedChatUi)
+                            CompleteAllBackgroundShellsAndStop();
 
                         // Mark chat as unread if user is on a different chat
                         if (CurrentChat?.Id != chat.Id)
@@ -2124,6 +2141,11 @@ public partial class ChatViewModel
 
         if (CurrentChat?.Id == chat.Id)
         {
+            // Resolve any visible "Running in background" card and stop the 1.5s monitor. The card's
+            // own 1s elapsed clock ticks independently of the monitor, so merely dropping the session
+            // would leave the card counting up forever — CompleteAllBackgroundShellsAndStop flips
+            // IsRunningInBackground=false and clears this chat's running-shell map + timer.
+            CompleteAllBackgroundShellsAndStop();
             _transcriptBuilder.HideTypingIndicator();
             _transcriptBuilder.CloseCurrentToolGroup();
             _transcriptBuilder.CollapseCompletedBlocksInCurrentTurn();
@@ -2207,8 +2229,17 @@ public partial class ChatViewModel
             runtime.PostToolReconciliationCts?.Cancel();
             runtime.PostToolReconciliationCts?.Dispose();
             runtime.PostToolReconciliationCts = null;
+            // Every session died with the old CLI process, so no background shell can still be running;
+            // drop each chat's running-shell seed map so a later switch-back does not resurrect a stuck
+            // "Running in background" card (RebuildTranscript would otherwise re-seed from it).
+            runtime.RunningBackgroundShells.Clear();
             MarkRuntimeTerminal(runtime);
         }
+
+        // Resolve any visible running-background card on the current chat and stop the monitor timer
+        // (its card clock ticks independently of the session, so it must be flipped off, not just
+        // abandoned).
+        CompleteAllBackgroundShellsAndStop();
 
         _inProgressMessages.Clear();
 

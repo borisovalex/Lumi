@@ -269,6 +269,7 @@
   "Status_Generating": "Generating\u2026",
   "Status_Reasoning": "Reasoning\u2026",
   "Status_Running": "Running {0}\u2026",
+  "Status_BackgroundRunning": "Running in background \u00b7 {0}",
   "Status_Stopped": "Stopped",
   "Status_NotConnected": "Not connected to GitHub Copilot. Retrying\u2026",
   "Status_CheckAccess": "Connection failed. Check your GitHub Copilot access.",

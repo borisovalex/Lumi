@@ -556,6 +556,9 @@ public partial class SingleToolItem : TranscriptItem
     public string? TerminalOutput => Inner is TerminalPreviewItem tp && !string.IsNullOrWhiteSpace(tp.Output) ? tp.Output : null;
     public bool IsTerminal => Inner is TerminalPreviewItem;
 
+    /// <summary>The message this flattened tool came from (needed to re-wrap it in a tool group).</summary>
+    public ChatMessageViewModel? Source => _source;
+
     public bool HasContent => !string.IsNullOrWhiteSpace(InputParameters) || !string.IsNullOrWhiteSpace(MoreInfo);
 
     public bool HasDiff => Inner is ToolCallItem { HasDiff: true };
@@ -815,6 +818,17 @@ public partial class TerminalPreviewItem : ToolCallItemBase
     [ObservableProperty] private StrataAiToolCallStatus _status;
     [ObservableProperty] private double _durationMs;
     [ObservableProperty] private bool _isExpanded;
+
+    /// <summary>True when the tool call has returned but the shell it launched (an <c>async</c>
+    /// command the agent left running past its turn) is still executing in the background. Keeps the
+    /// card visibly "running" instead of prematurely reading "Completed".</summary>
+    [ObservableProperty] private bool _isRunningInBackground;
+
+    /// <summary>The shell's authoritative start time (from the Tasks API), used to anchor the live
+    /// "running in background" elapsed clock. Bound to the card's <c>RunningSince</c> so the readout
+    /// stays correct across control recreation (chat switch, virtualization) and manual collapse —
+    /// the clock is derived from this fixed instant rather than from when the control last loaded.</summary>
+    [ObservableProperty] private DateTimeOffset? _backgroundStartedUtc;
 
     public TerminalPreviewItem(string toolName, string command, StrataAiToolCallStatus status, string? stableId = null)
         : base(stableId ?? TranscriptIds.Create("terminal"))

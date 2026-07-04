@@ -69,6 +69,12 @@ internal sealed class ChatRuntimeState
     /// Keeps the session alive without blocking the UI until session.idle arrives.</summary>
     public bool HasPendingBackgroundWork { get; set; }
 
+    /// <summary>Async shells still running in the background for this chat (root tool-call id →
+    /// authoritative start time). Unlike the transcript builder's transient maps, this survives
+    /// transcript rebuilds, so switching away and back re-materializes the live terminal card in its
+    /// running state (visible, expanded, correct elapsed clock) instead of a folded "finished" pill.</summary>
+    public Dictionary<string, DateTimeOffset> RunningBackgroundShells { get; } = new(StringComparer.Ordinal);
+
     public bool HasActiveWork
         => IsBusy
            || IsStreaming

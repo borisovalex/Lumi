@@ -227,6 +227,7 @@ internal sealed class LumiDebugBridge : IAsyncDisposable
             "read_transcript" => ReadTranscriptAsync(arguments),
             "read_activity" => ReadActivityAsync(arguments),
             "load_fixture" => InvokeUiAsync(LoadFixture),
+            "load_background_shell" => InvokeUiAsync(LoadBackgroundShellFixture),
             "list_features" => InvokeUiAsync(() => ListFeatures(arguments)),
             "configure_feature" => InvokeUiAsync(() => ConfigureFeatureAsync(arguments)),
             _ => throw new InvalidOperationException($"Unknown Lumi debug bridge action '{action}'.")
@@ -868,6 +869,21 @@ internal sealed class LumiDebugBridge : IAsyncDisposable
             transcriptTurnCount = _mainViewModel.ChatVM.TranscriptTurns.Count,
             mountedTranscriptTurnCount = _mainViewModel.ChatVM.MountedTranscriptTurns.Count,
             transcriptItemCount = _mainViewModel.ChatVM.TranscriptTurns.Count
+        };
+    }
+
+    private object LoadBackgroundShellFixture()
+    {
+        _mainViewModel.ChatVM.LoadDebugBackgroundShellFixture();
+        _mainViewModel.SelectedNavIndex = 0;
+        return new
+        {
+            loaded = true,
+            variant = "background-shell",
+            chat = _mainViewModel.ChatVM.CurrentChat is null ? null : ChatDetails(_mainViewModel.ChatVM.CurrentChat),
+            messageCount = _mainViewModel.ChatVM.Messages.Count,
+            statusText = _mainViewModel.ChatVM.StatusText,
+            isBusy = _mainViewModel.ChatVM.IsBusy,
         };
     }
 

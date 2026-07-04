@@ -269,6 +269,7 @@
   "Status_Generating": "מייצר\u2026",
   "Status_Reasoning": "חושב\u2026",
   "Status_Running": "מריץ {0}\u2026",
+  "Status_BackgroundRunning": "רץ ברקע \u00b7 {0}",
   "Status_Stopped": "הופסק",
   "Status_NotConnected": "לא מחובר ל-GitHub Copilot. מנסה שוב\u2026",
   "Status_CheckAccess": "החיבור נכשל. בדוק את הגישה שלך ל-GitHub Copilot.",

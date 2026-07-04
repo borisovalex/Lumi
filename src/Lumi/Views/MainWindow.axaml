@@ -1528,6 +1528,13 @@
                     Padding="8,4"
                     MinHeight="0"
                     FontSize="11" />
+            <Button Name="BgShellFixtureButton"
+                    Content="Bg shell"
+                    Command="{Binding OpenBackgroundShellHarnessCommand}"
+                    ToolTip.Tip="Reproduce the honest 'running in background' state"
+                    Padding="8,4"
+                    MinHeight="0"
+                    FontSize="11" />
           </StackPanel>
           <StackPanel>
             <TextBlock Text="Agent debug map"

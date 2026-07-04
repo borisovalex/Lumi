@@ -1062,6 +1062,8 @@
                                 Command="{Binding Command}"
                                 Output="{Binding Output}"
                                 Status="{Binding Status}"
+                                IsRunningInBackground="{Binding IsRunningInBackground}"
+                                RunningSince="{Binding BackgroundStartedUtc}"
                                 DurationMs="{Binding DurationMs}"
                                 IsExpanded="{Binding IsExpanded}" />
     </DataTemplate>

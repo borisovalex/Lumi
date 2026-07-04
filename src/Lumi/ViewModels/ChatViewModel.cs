@@ -1024,6 +1024,34 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     internal void RebuildTranscript()
     {
+        // Seed the builder with this chat's still-running background shells BEFORE the rebuild so their
+        // terminal cards are recreated already in the running state (visible, expanded, correct elapsed
+        // clock) instead of flashing "finished" or folding into a summary until the monitor rediscovers
+        // them. Persisted per-chat on the runtime state, so it survives switching away and back.
+        //
+        // BUT only while background work is genuinely still pending. If the session went terminal
+        // (idle/remote-shutdown/reconnect all clear HasPendingBackgroundWork via MarkRuntimeTerminal)
+        // while this chat was hidden, any leftover entries are stale — the shell already finished — so
+        // recreating the card would resurrect a "Running in background" card that ticks forever with no
+        // monitor to resolve it. Drop the stale map instead and rebuild the card as completed.
+        if (CurrentChat is { } current)
+        {
+            var seedRuntime = GetOrCreateRuntimeState(current.Id);
+            if (seedRuntime.HasPendingBackgroundWork && seedRuntime.RunningBackgroundShells.Count > 0)
+            {
+                _transcriptBuilder.SetKnownRunningBackgroundShells(seedRuntime.RunningBackgroundShells);
+            }
+            else
+            {
+                seedRuntime.RunningBackgroundShells.Clear();
+                _transcriptBuilder.SetKnownRunningBackgroundShells(EmptyRunningBackgroundShells);
+            }
+        }
+        else
+        {
+            _transcriptBuilder.SetKnownRunningBackgroundShells(EmptyRunningBackgroundShells);
+        }
+
         TranscriptTurns = _transcriptBuilder.Rebuild(Messages);
         _transcriptWindow.BindTranscript(TranscriptTurns, "rebuild");
         _transcriptWindow.ResetToLatest(TranscriptWindowController.DefaultInitialViewportHeight, "rebuild");
@@ -1032,6 +1060,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         // Re-show it if this chat is still busy (e.g. switching to a streaming chat).
         if (IsBusy)
             _transcriptBuilder.ShowTypingIndicator(StatusText);
+
+        // Re-arm the background-shell monitor when switching to a chat that left an async shell
+        // running; it rediscovers the shell (by command) and re-marks the freshly-rebuilt card.
+        _trackedBackgroundShells.Clear();
+        if (CurrentChat is not null && GetOrCreateRuntimeState(CurrentChat.Id).HasPendingBackgroundWork)
+            EnsureBackgroundShellMonitorRunning();
 
         RebuildWorkspacePanel();
 
@@ -3213,6 +3247,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var stoppedTools = MarkInProgressToolsStopped(chat);
         MarkRuntimeTerminal(runtime, Loc.Status_Stopped);
         ClearPendingTurnTracking(chatId);
+
+        // Aborting the session kills any background shell it launched, so stop showing them "running".
+        if (CurrentChat?.Id == chatId)
+            CompleteAllBackgroundShellsAndStop();
 
         // Only update UI properties if this is still the displayed chat
         if (CurrentChat?.Id == chatId)

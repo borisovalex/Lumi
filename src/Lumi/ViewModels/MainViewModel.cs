@@ -943,6 +943,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
+    private void OpenBackgroundShellHarness()
+    {
+#if DEBUG
+        ChatVM.LoadDebugBackgroundShellFixture();
+        SelectedNavIndex = 0;
+#endif
+    }
+
+    [RelayCommand]
     private void DismissAgentDebugMap()
     {
         IsAgentDebugMapDismissed = true;
