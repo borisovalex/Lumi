@@ -4055,9 +4055,11 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
         _transcriptBuilder.ShownFileChips.Clear();
 
-        // For edits: there is currently no public SDK API to rewind/remove prior
-        // turns from the server-side history. To avoid leaking the pre-edit prompt,
-        // we recreate the backend session and pass only the retained transcript.
+        // For edits: rewind the live session's server-side history to just before the
+        // edited turn via the SDK History.Truncate API (see TryRewindEditedHistoryAsync),
+        // then resend the edit as a normal turn. Only when that rewind is unavailable do
+        // we fall back to recreating the backend session and replaying the retained
+        // transcript as text to avoid leaking the pre-edit prompt.
         // For regenerates (same content): reuse the existing session as-is.
 
         // Re-add the user message as a fresh entry
@@ -4117,18 +4119,39 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             if (ConsumePendingSessionInvalidation(CurrentChat))
                 needsSessionSetup = true;
 
-            // Editing must not keep old server-side context. Recreate session first.
-            // Must happen BEFORE creating the new CTS, because InvalidateCurrentSession
-            // calls ReleaseSessionResources which disposes any CTS still in _ctsSources.
+            // For an edited turn, prefer rewinding the live session's server-side history to
+            // just before that turn (SDK History.Truncate) and resending the edit as a normal
+            // turn — this preserves the real multi-turn history, tools, and workspace state
+            // instead of recreating the session and replaying the transcript as one big text
+            // prompt. Only fall back to the recreate + replay path when the rewind fails.
+            //
+            // The rewind attempt runs BEFORE the new CTS is registered in _ctsSources, so the
+            // fallback InvalidateCurrentSession() (which disposes any CTS still tracked in
+            // _ctsSources) can never dispose this turn's CTS.
             var shouldReplayPrompt = wasEdited;
             var previousSessionId = CurrentChat.CopilotSessionId;
-            if (wasEdited)
-            {
-                InvalidateCurrentSession();
-                needsSessionSetup = true;
-            }
 
             var cts = new CancellationTokenSource();
+
+            var historyRewound = false;
+            if (wasEdited)
+            {
+                historyRewound = await TryRewindEditedHistoryAsync(CurrentChat, retainedContext, cts.Token);
+                if (historyRewound)
+                {
+                    // Live session preserved with history rewound to before the edited turn.
+                    shouldReplayPrompt = false;
+                    needsSessionSetup = false;
+                }
+                else
+                {
+                    // Rewind unavailable — recreate the session and replay the retained
+                    // transcript as text so no pre-edit server context leaks into the reply.
+                    InvalidateCurrentSession();
+                    needsSessionSetup = true;
+                }
+            }
+
             _ctsSources[chatId] = cts;
 
             if (needsSessionSetup)
@@ -4165,10 +4188,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             MarkRuntimeActive(runtime, Loc.Status_Thinking);
             ApplyDisplayedRuntimeState(runtime);
 
+            // After a successful rewind the edit is a normal fresh turn; only the fallback
+            // path replays the retained transcript as text.
             var resendPrompt = BuildResendPrompt(
                 retainedContext,
                 prompt,
-                wasEdited,
+                wasEdited && !historyRewound,
                 shouldReplayPrompt,
                 promptAdditions);
 
@@ -4258,6 +4283,70 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             if (CurrentChat is not null)
                 ClearPendingTurnTracking(CurrentChat.Id);
             HandleSendError(ex, WasCancelledByUser(CurrentChat?.Id));
+        }
+    }
+
+    /// <summary>
+    /// Rewinds the live Copilot session's server-side history to just before an edited user
+    /// turn using the SDK <see cref="GitHub.Copilot.Rpc.HistoryApi.TruncateAsync"/> API, so the
+    /// edit can be resent as a normal turn without recreating the session or replaying the
+    /// transcript as text. Truncation drops the target user event and everything after it,
+    /// from both the live session and the persisted session log.
+    /// </summary>
+    /// <param name="chat">The chat whose backend session should be rewound.</param>
+    /// <param name="retainedContext">The messages that remain before the edited turn. The
+    /// edited turn is the Nth user turn (0-based) where N is the count of user messages here.</param>
+    /// <param name="ct">Cancellation token for the rewind operation.</param>
+    /// <returns><c>true</c> if the history was truncated and the caller may resend the edit as a
+    /// normal turn; <c>false</c> if the caller should fall back to recreating the session and
+    /// replaying the transcript.</returns>
+    private async Task<bool> TryRewindEditedHistoryAsync(
+        Chat chat,
+        List<ChatMessage> retainedContext,
+        CancellationToken ct)
+    {
+        // No persisted session means there is nothing server-side to rewind.
+        if (string.IsNullOrWhiteSpace(chat.CopilotSessionId))
+            return false;
+
+        try
+        {
+            // Ensure the target session is live, but never fall back to creating a fresh
+            // (empty) one — a brand-new session would have no history to truncate.
+            if (_activeSession is null
+                || !string.Equals(_activeSession.SessionId, chat.CopilotSessionId, StringComparison.Ordinal))
+            {
+                var resumed = await EnsureSessionAsync(chat, ct, allowCreateFallback: false);
+                if (!resumed
+                    || _activeSession is null
+                    || !string.Equals(_activeSession.SessionId, chat.CopilotSessionId, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            var events = await _activeSession.GetEventsAsync(ct);
+
+            // The edited turn is the (retainedUserCount)-th genuine user turn (0-based).
+            // SelectEditTruncationTarget skips SDK/CLI-injected user messages (e.g. a
+            // system-sourced priming message) that have no local counterpart, so we truncate
+            // exactly the edited turn instead of an earlier one. A null result means the local
+            // and server user turns don't line up — fall back to the safe replay path.
+            var retainedUserCount = retainedContext.Count(static m => m.Role == "user");
+            var target = PendingTurnRecoveryAnalyzer.SelectEditTruncationTarget(events, retainedUserCount);
+            if (target is null)
+                return false;
+
+            // Truncating at the target user event drops it and everything after, leaving exactly
+            // the retained history; the edit is then resent as a normal turn.
+            await _activeSession.Rpc.History.TruncateAsync(target.Id.ToString(), ct);
+            return true;
+        }
+        catch
+        {
+            // Older CLI without the API, event-lookup mismatch, or a transport failure —
+            // let the caller fall back to recreating the session and replaying the transcript.
+            return false;
         }
     }
 
