@@ -2323,6 +2323,115 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         await SendMessageCore(PromptText, consumeComposerPrompt: true);
     }
 
+    /// <summary>
+    /// Steers the chat's in-flight turn: injects <paramref name="prompt"/> into the running turn via
+    /// the Copilot SDK's immediate send mode instead of stopping it (old stop-and-send) or deferring it
+    /// to a fresh turn (old busy queue). The agent interjects the message at its next step boundary.
+    /// </summary>
+    /// <remarks>
+    /// Safety invariants (do not violate — they keep stall-recovery/reconciliation correct):
+    /// <list type="bullet">
+    /// <item>The user message is added to the transcript locally. Lumi has no <c>UserMessageEvent</c>
+    /// switch case, so the SDK's echo of the steering message does not duplicate it.</item>
+    /// <item>The running turn's pending-turn tracking is left untouched — no new CTS, no re-arm, and
+    /// <c>PendingSessionUserMessageCount</c> keeps pointing at the ORIGINAL turn so the analyzer still
+    /// scans the whole (original + steered) turn to the end. Bumping it would drop the original turn's
+    /// assistant messages.</item>
+    /// <item>The turn is NOT aborted and <c>IsBusy</c> stays true.</item>
+    /// </list>
+    /// Falls back to the deferred busy queue when no live session exists yet (turn still in setup) or when
+    /// the turn has already ended and the runtime is only draining background work (no live step boundary).
+    /// </remarks>
+    private async Task SteerActiveTurnAsync(Chat activeChat, string prompt, bool consumeComposerPrompt)
+    {
+        var chatId = activeChat.Id;
+
+        // Resolve the live session driving the running turn. If it isn't up yet (turn still in setup),
+        // fall back to the deferred queue so the message is sent as a fresh turn once the turn is idle.
+        if (!_sessionCache.TryGetValue(chatId, out var session))
+            session = _activeSession;
+
+        // Immediate-mode steering only lands if the assistant turn is actually progressing, i.e. a live
+        // step boundary is still coming. After AssistantTurnEnd the runtime can stay busy purely to drain
+        // background shells or pending-turn tracking (see MarkRuntimeWaitingForSessionIdle) — there is no
+        // running turn to interject into then, so an immediate send would be silently dropped. Detect that
+        // window and fall back to the deferred queue so the message lands as a fresh turn once idle.
+        var turnActivelyRunning = _runtimeStates.TryGetValue(chatId, out var runtime)
+            && (runtime.IsStreaming
+                || runtime.ActiveToolCount > 0
+                || runtime.ActiveSubagentExecutionDepth > 0);
+
+        if (session is null || !turnActivelyRunning)
+        {
+            QueueBusySendPrompt(chatId, prompt);
+            if (consumeComposerPrompt)
+            {
+                PromptText = "";
+                _chatDrafts.Remove(chatId);
+            }
+
+            return;
+        }
+
+        var attachments = TakePendingAttachments();
+
+        // Add the steering message to the transcript up-front so it renders before any assistant
+        // reaction to it. There is no await between here and the send below, so ordering is stable.
+        var userMsg = new ChatMessage
+        {
+            Role = "user",
+            Content = prompt,
+            Author = _dataStore.Data.Settings.UserName ?? Loc.Author_You,
+            Attachments = attachments?.OfType<AttachmentFile>().Select(a => a.Path).ToList() ?? [],
+            ActiveSkills = BuildSkillReferences(ActiveSkillIds)
+        };
+
+        // Mirror the normal send path: files dragged from the project directory while a worktree is
+        // already active must be rebased onto the worktree so the agent reads the right copy. No-op
+        // when there's no worktree or the paths don't sit under the project directory.
+        if (WorktreePath is { Length: > 0 } wtPath && attachments is { Count: > 0 })
+        {
+            var projDir = GetProjectWorkingDirectory();
+            var effectiveWorktreeDir = GitService.ResolveWorktreeWorkingDirectory(wtPath, projDir);
+            RebaseAttachmentPaths(attachments, userMsg, projDir, effectiveWorktreeDir);
+        }
+
+        activeChat.Messages.Add(userMsg);
+        Messages.Add(new ChatMessageViewModel(userMsg));
+        QueueSaveChat(activeChat, saveIndex: true, touchIndex: true);
+        ChatUpdated?.Invoke();
+        UserMessageSent?.Invoke();
+
+        if (consumeComposerPrompt)
+        {
+            PromptText = "";
+            _chatDrafts.Remove(chatId);
+        }
+        ClearSuggestions();
+
+        var sendOptions = new MessageOptions
+        {
+            Prompt = prompt + BuildSendPromptAdditions(),
+            Mode = GitHub.Copilot.Rpc.SendMode.Immediate.Value
+        };
+        if (attachments is { Count: > 0 })
+            sendOptions.Attachments = attachments;
+
+        // Immediate mode returns a message id almost instantly and does NOT abort or restart the turn;
+        // send on the running turn's token so a user Stop still tears the inject down with the turn.
+        var token = _ctsSources.TryGetValue(chatId, out var cts) ? cts.Token : CancellationToken.None;
+        try
+        {
+            await session.SendAsync(sendOptions, token);
+        }
+        catch (Exception ex)
+        {
+            // Steering is best-effort: a failed inject must never tear down the running turn or its
+            // pending-turn tracking. Keep the already-added user message and just log.
+            Debug.WriteLine($"[Steer] Immediate send failed for chat {chatId}: {ex.Message}");
+        }
+    }
+
     private async Task SendMessageCore(string? promptText, bool consumeComposerPrompt)
     {
         if (string.IsNullOrWhiteSpace(promptText))
@@ -2331,13 +2440,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         var prompt = promptText.Trim();
         if (CurrentChat is { } activeChat && IsChatRuntimeActive(activeChat.Id))
         {
-            QueueBusySendPrompt(activeChat.Id, prompt);
-            if (consumeComposerPrompt)
-            {
-                PromptText = "";
-                _chatDrafts.Remove(activeChat.Id);
-            }
-
+            await SteerActiveTurnAsync(activeChat, prompt, consumeComposerPrompt);
             return;
         }
 
