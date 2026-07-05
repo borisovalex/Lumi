@@ -763,6 +763,18 @@ public partial class MainViewModel : ObservableObject, IDisposable
         HasMoreChats = allOrdered.Count > _chatLoadLimit;
         var ordered = allOrdered.Take(_chatLoadLimit).ToList();
 
+        // Compute the project folder badge shown under each chat row. Badges only appear in the
+        // "All projects" view (no active project filter). Setting these observable properties lets
+        // the sidebar bind directly to each Chat, so the badge stays correct across virtualization,
+        // container recycling, and group reshuffles (e.g. a chat bumped into "Today" on send).
+        var showBadges = !SelectedProjectFilter.HasValue;
+        foreach (var chat in ordered)
+        {
+            var name = showBadges ? GetProjectName(chat.ProjectId) : null;
+            chat.ProjectBadgeText = name;
+            chat.ShowProjectBadge = name is not null;
+        }
+
         // Group by time period
         var now = DateTimeOffset.Now;
         var today = now.Date;

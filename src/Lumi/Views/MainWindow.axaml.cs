@@ -910,7 +910,6 @@ public partial class MainWindow : Window
                 AttachListBoxHandlers();
                 SyncListBoxSelection(vm.ActiveChatId);
                 RefreshProjectSwitcher(vm);
-                ApplyProjectLabelsToChats(vm);
                 if (vm.IsOnboarded && vm.SelectedNavIndex == 0)
                 {
                     // Delay so the user sees the textbox focus animation
@@ -1052,7 +1051,6 @@ public partial class MainWindow : Window
                 {
                     AttachListBoxHandlers();
                     SyncListBoxSelection(vm.ActiveChatId);
-                    ApplyProjectLabelsToChats(vm);
                     ApplyMoveToProjectMenus(vm);
                     if (shouldRevealChats)
                         QueueProjectChatListReveal();
@@ -2863,57 +2861,6 @@ public partial class MainWindow : Window
             return string.Format(Loc.ProjectSwitcher_WorkspaceSubtitle, countText, Path.GetFileName(project.WorkingDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)));
 
         return countText;
-    }
-
-    /// <summary>Sets the ProjectLabel TextBlock on each chat ListBoxItem to show the project name.</summary>
-    private void ApplyProjectLabelsToChats(MainViewModel vm)
-    {
-        // Only show project labels when NOT filtering by a specific project
-        var showLabels = !vm.SelectedProjectFilter.HasValue;
-
-        foreach (var lb in ChatListWalkRoot.GetVisualDescendants().OfType<ListBox>())
-        {
-            if (!lb.Classes.Contains("sidebar-list")) continue;
-
-            foreach (var item in lb.GetVisualDescendants().OfType<ListBoxItem>())
-            {
-                if (item.DataContext is not Chat chat) continue;
-                FindProjectBadgeControls(item, out var badge, out var label);
-                if (badge is null || label is null) continue;
-
-                if (showLabels && chat.ProjectId.HasValue)
-                {
-                    var name = vm.GetProjectName(chat.ProjectId);
-                    label.Text = name ?? "";
-                    ToolTip.SetTip(badge, name);
-                    badge.IsVisible = name is not null;
-                }
-                else
-                {
-                    badge.IsVisible = false;
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Locates the ProjectBadge/ProjectLabel controls inside a chat row in a single short-circuiting
-    /// visual-tree pass, instead of materializing the row's entire descendant list per rebuild.
-    /// </summary>
-    private static void FindProjectBadgeControls(Visual item, out Border? badge, out TextBlock? label)
-    {
-        badge = null;
-        label = null;
-        foreach (var d in item.GetVisualDescendants())
-        {
-            if (badge is null && d is Border { Name: "ProjectBadge" } b)
-                badge = b;
-            else if (label is null && d is TextBlock { Name: "ProjectLabel" } t)
-                label = t;
-
-            if (badge is not null && label is not null)
-                return;
-        }
     }
 
     /// <summary>Populates the "Move to Project" context menu items for each chat.</summary>
