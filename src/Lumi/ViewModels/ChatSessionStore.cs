@@ -23,6 +23,9 @@ public sealed class ChatSessionStore : IDisposable
     private readonly DataStore _dataStore;
     private readonly CopilotService _copilotService;
     private readonly ChatSurfaceRegistry _registry;
+    // Owned for the store's entire lifetime so every surface (and every window sharing this store)
+    // drives the same manage_chats backend; no per-window owner can dispose it out from under another.
+    private readonly ChatOrchestrationService _orchestrationService;
     private readonly GlobalSearchService? _globalSearchService;
     private readonly Func<ChatViewModel, Chat, Task> _loadChatAsync;
     private readonly int _maxIdleCachedSurfaces;
@@ -59,6 +62,9 @@ public sealed class ChatSessionStore : IDisposable
         _globalSearchService = globalSearchService;
         _loadChatAsync = loadChatAsync;
         _maxIdleCachedSurfaces = maxIdleCachedSurfaces;
+        // Pass `this`: the service only stores the reference (it makes no store calls during construction).
+        _orchestrationService = new ChatOrchestrationService(dataStore, registry, this);
+        OrchestrationService = _orchestrationService;
     }
 
     /// <summary>
@@ -72,10 +78,11 @@ public sealed class ChatSessionStore : IDisposable
 
     /// <summary>
     /// The chat-orchestration backend shared with every surface this store creates, so any chat
-    /// (foreground, background, or detached) can drive the <c>manage_chats</c> tool. Set once by the
-    /// owner (MainViewModel) right after construction, before the first surface is acquired.
+    /// (foreground, background, or detached) can drive the <c>manage_chats</c> tool. Created and
+    /// owned by the store (disposed with it) so its lifetime tracks the store rather than any single
+    /// window that happens to share it; tests may replace it with an instrumented instance.
     /// </summary>
-    public ChatOrchestrationService? OrchestrationService { get; set; }
+    public ChatOrchestrationService OrchestrationService { get; set; }
 
     public ChatViewModel AcquireDraft(Guid? projectId, Action<ChatViewModel>? configure = null)
     {
@@ -187,6 +194,7 @@ public sealed class ChatSessionStore : IDisposable
         _isDisposed = true;
         foreach (var surface in _surfaces.ToArray())
             UntrackSurface(surface, dispose: true);
+        _orchestrationService.Dispose();
         _acquireChatLock.Dispose();
     }
 

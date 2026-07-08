@@ -210,10 +210,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _ownsChatSessionStore = chatSessionStore is null;
 
         // Backs the manage_chats tool ("Lumi as a manager"): create/list/status/send across chats.
-        // Must be set on the store before any surface is acquired (below) so every ChatViewModel the
-        // store creates can drive orchestration.
-        _chatOrchestrationService = new ChatOrchestrationService(dataStore, _chatSurfaceRegistry, _chatSessionStore);
-        _chatSessionStore.OrchestrationService = _chatOrchestrationService;
+        // The backend is owned by the (possibly shared) session store for the store's whole lifetime,
+        // so every window observes the same instance and none disposes it per-window. We only subscribe.
+        _chatOrchestrationService = _chatSessionStore.OrchestrationService;
         _chatOrchestrationService.ChatsChanged += OnOrchestrationChatsChanged;
 
         var settings = _dataStore.Data.Settings;
@@ -588,10 +587,6 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _backgroundJobService.JobsChanged -= OnBackgroundJobServiceJobsChanged;
         _chatSessionStore.SurfaceFeatureManagementStateChanged -= OnChatFeatureManagementStateChanged;
         _chatOrchestrationService.ChatsChanged -= OnOrchestrationChatsChanged;
-        // Detach from the (possibly externally-owned) session store first, so a store that outlives this
-        // MainViewModel never hands a disposed orchestration service to a surface it creates later.
-        _chatSessionStore.OrchestrationService = null;
-        _chatOrchestrationService.Dispose();
         if (_ownsBackgroundJobService)
             _backgroundJobService.Dispose();
         DetachChatViewModel(ChatVM);

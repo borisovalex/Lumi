@@ -434,6 +434,13 @@ public class TranscriptBuilder
 
         if (!showToolCalls)
         {
+            // Tool cards are hidden, but the open-chat chip is a first-class transcript affordance
+            // (like a loaded-skill chip), so it must still surface. Emit any link already known at
+            // process time (a rebuild replaying history, or a stamp that landed before the card) and
+            // subscribe for one that arrives asynchronously after the manage_chats call completes.
+            TryEmitLinkedChatChip(msgVm);
+            if (!IsRebuildingTranscript && msgVm.Message.LinkedChatId is null && toolName == "manage_chats")
+                SubscribeLinkedChatChip(msgVm);
             if (shouldFlushLateFileEdit && diffs.Count > 0)
                 FlushPendingFileEdits();
             return;
@@ -629,6 +636,24 @@ public class TranscriptBuilder
             () => _openChatAction?.Invoke(chatId));
         CloseCurrentToolGroup();
         AppendToCurrentTurn(new LinkedChatItem(chip), TurnStableIdFor($"linked-chat:{key}"));
+    }
+
+    /// <summary>
+    /// Subscribes for an asynchronous <see cref="ChatMessageViewModel.LinkedChatId"/> stamp so the
+    /// open-chat chip surfaces even when tool cards are hidden (the live tool-card handler that
+    /// normally carries this is never attached in that mode). The de-dup in
+    /// <see cref="TryEmitLinkedChatChip"/> guarantees a single chip if a rebuild later replays it.
+    /// </summary>
+    private void SubscribeLinkedChatChip(ChatMessageViewModel msgVm)
+    {
+        PropertyChangedEventHandler? handler = null;
+        handler = (_, args) =>
+        {
+            if (args.PropertyName == nameof(ChatMessageViewModel.LinkedChatId))
+                TryEmitLinkedChatChip(msgVm);
+        };
+        msgVm.PropertyChanged += handler;
+        _pendingToolHandlers.Add((msgVm, handler));
     }
 
     private static string? BuildToolCallMoreInfo(

@@ -796,7 +796,7 @@ public partial class ChatViewModel
                 [Description("For 'create': skill names or ids to attach to the chat. Optional.")] string[]? skills = null,
                 [Description("For 'create': model id override for the chat. Optional — defaults to the user's preferred model.")] string? model = null,
                 [Description("For 'create'/'send': when true, wait for the worker chat to finish its reply before returning (up to timeoutSeconds). When false (default), start the work in the background and return immediately so you can keep managing.")] bool wait = false,
-                [Description("For 'create'/'send' with wait=true: how long to wait, in seconds, before returning with a 'still running' note. Default 120, max 600.")] int? timeoutSeconds = null,
+                [Description("For 'create'/'send' with wait=true: how long to wait, in seconds, before returning with a 'still running' note. Default 240, max 1800.")] int? timeoutSeconds = null,
                 [Description("For 'status': how many recent messages to summarize (1-40, default 8). For 'list': ignored.")] int? maxMessages = null,
                 [Description("For 'list': optional text filter to match chat titles/projects.")] string? query = null,
                 [Description("For 'list': maximum number of chats to return (1-100, default 40).")] int? limit = null) =>
@@ -831,6 +831,11 @@ public partial class ChatViewModel
                     Dispatcher.UIThread.Post(() =>
                     {
                         var chat = _dataStore.Data.Chats.Find(c => c.Id == chatId);
+                        // Correlate this completed call to its own tool card by taking the newest still-unlinked
+                        // manage_chats message. This is exact because tool calls within a turn are executed and
+                        // completed sequentially: each card is created and stamped before the next manage_chats
+                        // card exists, so at most one unlinked card is present here. If the runtime is ever changed
+                        // to invoke tool calls concurrently, this must instead key off the SDK tool-call id.
                         var toolMsg = chat?.Messages.LastOrDefault(m => m.ToolName == "manage_chats" && m.LinkedChatId is null);
                         if (toolMsg is null) return;
                         toolMsg.LinkedChatId = lid;
