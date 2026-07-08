@@ -246,7 +246,12 @@ public partial class ChatViewModel
         }
     }
 
-    private void CancelPendingQuestions(Chat chat)
+    /// <summary>
+    /// Cancels a chat's tracked question tasks and marks any unanswered <c>ask_question</c> tool
+    /// messages as expired. Returns <c>true</c> when it mutated a persisted message field, so the
+    /// caller knows the chat's on-disk snapshot is now stale and must not be unloaded.
+    /// </summary>
+    private bool CancelPendingQuestions(Chat chat)
     {
         var pendingQuestionIds = chat.Messages
             .Where(static m => !string.IsNullOrWhiteSpace(m.QuestionId))
@@ -264,6 +269,7 @@ public partial class ChatViewModel
         }
 
         // Mark unanswered ask_question tool messages as Failed so rebuild renders them as expired
+        var markedExpired = false;
         foreach (var msg in chat.Messages)
         {
             if (msg.ToolName == "ask_question"
@@ -271,11 +277,13 @@ public partial class ChatViewModel
                 && string.IsNullOrEmpty(msg.ToolOutput))
             {
                 msg.ToolStatus = "Failed";
+                markedExpired = true;
             }
         }
 
         // Expire any live QuestionItem cards in the current transcript
         ExpireUnansweredQuestions(chat.Id);
+        return markedExpired;
     }
 
     private bool MarkInProgressToolsStopped(Chat chat)
@@ -398,7 +406,12 @@ public partial class ChatViewModel
         if (CurrentChat?.Id == chat.Id || IsChatRuntimeActive(chat.Id))
             return;
 
-        CancelPendingQuestions(chat);
+        // CancelPendingQuestions can flip an unanswered ask_question tool message to "Failed" in
+        // memory. That mutation happens AFTER the caller persisted this chat, so the on-disk
+        // snapshot no longer matches memory. Unloading would then discard the Failed state and
+        // reload the question as a stuck "live" card on next open, so skip the message unload when
+        // it mutated — the chat becomes unloadable again once a later save persists the new state.
+        var mutatedPersistedMessages = CancelPendingQuestions(chat);
         ReleaseSessionResources(chat.Id, cancelActiveRequest: false, deleteServerSession: false);
         RemoveSuggestionTracking(chat.Id);
         // Intentionally keep the chat's BrowserService alive. A browser session belongs to the
@@ -407,7 +420,7 @@ public partial class ChatViewModel
         // chat is deleted (CleanupSession) or the app shuts down (Dispose).
         _runtimeStates.Remove(chat.Id);
 
-        if (unloadMessages)
+        if (unloadMessages && !mutatedPersistedMessages)
             TryUnloadInactiveChatMessages(chat, expectedMessageCount);
     }
 
