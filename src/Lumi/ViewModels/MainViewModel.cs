@@ -1149,8 +1149,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
         // parameter is a two-element array: [Chat, Project]
         if (parameter is object[] args && args.Length == 2 && args[0] is Chat chat && args[1] is Project project)
         {
+            if (chat.ProjectId == project.Id)
+                return;
+
             chat.ProjectId = project.Id;
             _dataStore.MarkChatChanged(chat);
+            // Refresh the live surface (which may null CopilotSessionId) BEFORE kicking off the save,
+            // so the persisted index snapshot captures a consistent {ProjectId, CopilotSessionId} pair.
+            NotifyProjectChangedForOpenSurfaces(chat);
             _ = _dataStore.SaveAsync();
             RefreshChatList();
         }
@@ -1159,11 +1165,26 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void RemoveChatFromProject(Chat? chat)
     {
-        if (chat is null) return;
+        if (chat is null || chat.ProjectId is null) return;
         chat.ProjectId = null;
         _dataStore.MarkChatChanged(chat);
+        NotifyProjectChangedForOpenSurfaces(chat);
         _ = _dataStore.SaveAsync();
         RefreshChatList();
+    }
+
+    /// <summary>
+    /// When a chat is moved between projects from the sidebar, any chat surface currently showing
+    /// that chat must resync its live project context (composer chip, system prompt/session,
+    /// working directory) — otherwise the open chat keeps the stale project until it's reopened.
+    /// </summary>
+    private void NotifyProjectChangedForOpenSurfaces(Chat chat)
+    {
+        _chatSessionStore.ApplyToSurfaces(surface =>
+        {
+            if (surface.CurrentChat is { } current && current.Id == chat.Id)
+                surface.OnCurrentChatProjectChangedExternally();
+        });
     }
 
     [RelayCommand(AllowConcurrentExecutions = true)]

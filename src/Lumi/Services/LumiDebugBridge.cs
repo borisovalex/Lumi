@@ -222,6 +222,7 @@ internal sealed class LumiDebugBridge : IAsyncDisposable
             "list_chats" => InvokeUiAsync(() => ListChats(arguments)),
             "create_chat" => InvokeUiAsync(() => CreateChatAsync(arguments)),
             "open_chat" => InvokeUiAsync(() => OpenChatAsync(arguments)),
+            "move_chat" => InvokeUiAsync(() => MoveChat(arguments)),
             "send_message" => SendMessageAsync(arguments, cancellationToken),
             "wait_for_idle" => WaitForIdleAsync(arguments, cancellationToken),
             "read_transcript" => ReadTranscriptAsync(arguments),
@@ -1176,6 +1177,36 @@ internal sealed class LumiDebugBridge : IAsyncDisposable
         _mainViewModel.JobsVM.RefreshFromStore();
         _mainViewModel.ChatVM.RefreshComposerCatalogs(syncProjectContextMcpSelections: false);
         _mainViewModel.ChatVM.RaiseFeatureManagementStateChangedForTest();
+    }
+
+    private object MoveChat(JsonElement? arguments)
+    {
+        var chat = ResolveChat(arguments, required: true)!;
+        var args = arguments ?? default;
+        var oldProjectId = chat.ProjectId;
+
+        // A target project resolves to an assign; no project (or removeFromProject:true) resolves to
+        // "All projects" (remove). Mirrors exactly what the sidebar context menu invokes.
+        var removeRequested = GetBool(args, "removeFromProject") ?? false;
+        var project = removeRequested ? null : ResolveProject(args, required: false);
+
+        if (project is null)
+            _mainViewModel.RemoveChatFromProjectCommand.Execute(chat);
+        else
+            _mainViewModel.AssignChatToProjectCommand.Execute(new object[] { chat, project });
+
+        return new
+        {
+            moved = true,
+            chatId = chat.Id,
+            oldProjectId,
+            newProjectId = chat.ProjectId,
+            newProjectName = GetProjectName(chat.ProjectId),
+            // Null after an idle move means the session was invalidated and the next send rebuilds
+            // it with the new project's working directory / system prompt.
+            copilotSessionId = chat.CopilotSessionId,
+            isCurrentChat = _mainViewModel.ChatVM.CurrentChat?.Id == chat.Id
+        };
     }
 
     private Chat? ResolveChat(JsonElement? arguments, bool required, bool allowCurrent = true)

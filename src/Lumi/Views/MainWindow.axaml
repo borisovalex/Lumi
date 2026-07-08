@@ -682,9 +682,9 @@
                                  ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                           <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="models:Chat">
-                              <Panel Background="Transparent">
+                              <Panel Background="Transparent" DataContextChanged="OnChatRowDataContextChanged">
                                  <Panel.ContextMenu>
-                                   <ContextMenu x:CompileBindings="False">
+                                   <ContextMenu x:CompileBindings="False" Opening="OnChatContextMenuOpening">
                                      <MenuItem Header="{loc:Str Menu_Rename}"
                                                Command="{Binding $parent[Window].DataContext.StartRenameChatCommand}"
                                                CommandParameter="{Binding}">
@@ -705,14 +705,6 @@
                                          <PathIcon Data="{StaticResource Icon.Folder}" Width="14" Height="14" />
                                        </MenuItem.Icon>
                                      </MenuItem>
-                                     <MenuItem Header="{loc:Str Menu_RemoveFromProject}"
-                                               Command="{Binding $parent[Window].DataContext.RemoveChatFromProjectCommand}"
-                                              CommandParameter="{Binding}"
-                                              IsVisible="{Binding ProjectId, Converter={x:Static ObjectConverters.IsNotNull}}">
-                                      <MenuItem.Icon>
-                                        <PathIcon Data="{StaticResource Icon.Folder}" Width="14" Height="14" />
-                                      </MenuItem.Icon>
-                                    </MenuItem>
                                     <Separator />
                                     <MenuItem Header="{loc:Str Menu_Delete}"
                                               Command="{Binding $parent[Window].DataContext.DeleteChatCommand}"

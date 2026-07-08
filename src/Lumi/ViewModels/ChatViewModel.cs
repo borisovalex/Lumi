@@ -2042,6 +2042,40 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
     }
 
+    /// <summary>
+    /// Called when the current chat's project assignment was changed from outside the composer
+    /// (e.g. moved between projects via the sidebar context menu). Mirrors the refresh performed by
+    /// <see cref="SetProjectId"/>/<see cref="ClearProjectId"/> so the live surface stays in sync:
+    /// rebuilds the session so the next turn uses the new project's system prompt and working
+    /// directory, updates the composer project chip/selection, and rescans project-scoped catalogs.
+    /// </summary>
+    public void OnCurrentChatProjectChangedExternally()
+    {
+        if (CurrentChat is null)
+            return;
+
+        if (OwnsLiveChat(CurrentChat.Id))
+        {
+            // A turn is in flight for this chat. Tearing the session down now would cancel the
+            // in-flight response the user never asked to stop (and, mid-session-setup, could leave a
+            // fresh session built from the OLD project). Defer instead: the current turn finishes on
+            // its existing session, and the NEXT send consumes this and rebuilds with the new project
+            // (same mechanism used for busy MCP/project changes elsewhere).
+            _pendingSessionInvalidations.Add(CurrentChat.Id);
+        }
+        else if (CurrentChat.CopilotSessionId is not null)
+        {
+            // Idle with an established session: rebuild eagerly so the next turn uses the new project.
+            InvalidateProjectSession();
+        }
+        // Idle with no session: nothing to invalidate — EnsureSessionAsync builds fresh on first send.
+
+        SyncComposerProjectSelectionFromState();
+        RefreshProjectBadge();
+        RefreshComposerCatalogs();
+        QueueRefreshCodingProjectState();
+    }
+
     /// <summary>Discards the current chat's session so a fresh one is created on the next message.</summary>
     private void InvalidateCurrentSession()
     {
