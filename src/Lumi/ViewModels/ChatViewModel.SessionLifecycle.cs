@@ -40,6 +40,9 @@ public partial class ChatViewModel
         return string.IsNullOrWhiteSpace(existingContent) ? null : existingContent;
     }
 
+    internal static bool ShouldDeferAssistantMessageEvent(string? finalEventContent, string? phase)
+        => string.IsNullOrWhiteSpace(finalEventContent) && string.IsNullOrWhiteSpace(phase);
+
     internal static bool FinalizeTerminalAssistantMessage(Chat chat, ChatMessage streamingMessage)
     {
         streamingMessage.IsStreaming = false;
@@ -773,6 +776,12 @@ public partial class ChatViewModel
                     if (IsSubagentOutputActive())
                         break;
                     var capturedFinalContent = msg.Data.Content;
+                    // Older CLI versions can emit an empty assistant envelope immediately before the
+                    // substantive message for the same turn. Finalizing from buffered deltas here
+                    // commits the stream once, then the following content event creates it again.
+                    // Keep the stream open instead; the content event or turn-end fallback will finish it.
+                    if (ShouldDeferAssistantMessageEvent(capturedFinalContent, msg.Data.Phase))
+                        break;
                     assistantStream.CancelPending();
                     Dispatcher.UIThread.Post(() =>
                     {
@@ -1573,7 +1582,6 @@ public partial class ChatViewModel
                         };
                         chat.Messages.Add(warnMsg);
                         Messages.Add(new ChatMessageViewModel(warnMsg));
-                        _transcriptBuilder.ProcessMessageToTranscript(Messages[^1]);
                         ScrollToEndRequested?.Invoke();
                     }
                     });

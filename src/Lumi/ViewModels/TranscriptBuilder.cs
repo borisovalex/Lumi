@@ -55,6 +55,7 @@ public class TranscriptBuilder
     public bool IsRebuildingTranscript { get; set; }
 
     public HashSet<string> ShownFileChips { get; } = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<Guid> _processedMessageIds = [];
     private readonly HashSet<string> _shownSkillNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _shownLinkedChatKeys = new(StringComparer.Ordinal);
     private PlanCardItem? _pendingPlanCard;
@@ -196,6 +197,7 @@ public class TranscriptBuilder
         _pendingFileOriginalContents.Clear();
         _pendingWorkspaceFileChanges.Clear();
         ShownFileChips.Clear();
+        _processedMessageIds.Clear();
         _shownSkillNames.Clear();
         _shownLinkedChatKeys.Clear();
     }
@@ -214,6 +216,9 @@ public class TranscriptBuilder
 
     public void ProcessMessageToTranscript(ChatMessageViewModel msgVm)
     {
+        if (!_processedMessageIds.Add(msgVm.Message.Id))
+            return;
+
         var showToolCalls = _dataStore.Data.Settings.ShowToolCalls;
         var showReasoning = _dataStore.Data.Settings.ShowReasoning;
         var showTimestamps = _dataStore.Data.Settings.ShowTimestamps;

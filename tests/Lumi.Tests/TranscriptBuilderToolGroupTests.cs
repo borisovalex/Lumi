@@ -15,6 +15,27 @@ namespace Lumi.Tests;
 public sealed class TranscriptBuilderToolGroupTests
 {
     [Fact]
+    public void ProcessMessageToTranscript_SameMessageTwice_RendersOnce()
+    {
+        var builder = CreateBuilder();
+        var liveTurns = new ObservableCollection<TranscriptTurn>();
+        builder.SetLiveTarget(liveTurns);
+        var message = new ChatMessageViewModel(new ChatMessage
+        {
+            Role = "user",
+            Author = "You",
+            Content = "Do not render me twice.",
+            Timestamp = DateTimeOffset.Now,
+        });
+
+        builder.ProcessMessageToTranscript(message);
+        builder.ProcessMessageToTranscript(message);
+
+        var turn = Assert.Single(liveTurns);
+        Assert.IsType<UserMessageItem>(Assert.Single(turn.Items));
+    }
+
+    [Fact]
     public void ProcessMessageToTranscript_StreamingToolGroup_StaysCollapsedAndShowsSummary()
     {
         var builder = CreateBuilder();

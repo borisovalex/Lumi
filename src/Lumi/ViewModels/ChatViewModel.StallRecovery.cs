@@ -462,7 +462,6 @@ public partial class ChatViewModel
             {
                 var vm = new ChatMessageViewModel(errorMsg);
                 Messages.Add(vm);
-                _transcriptBuilder.ProcessMessageToTranscript(vm);
                 ScrollToEndRequested?.Invoke();
             }
 
