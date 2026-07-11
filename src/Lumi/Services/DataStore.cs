@@ -693,6 +693,7 @@ public class DataStore
             searchMessages.Add(new ChatSearchMessage
             {
                 Text = text,
+                Role = message.Role,
                 Timestamp = message.Timestamp
             });
         }
@@ -716,11 +717,13 @@ public class DataStore
             searchMessages.Add(new ChatSearchMessage
             {
                 Text = text,
+                Role = message.Role,
                 Timestamp = message.Timestamp
             });
 
             signature.Add(index);
             signature.Add(message.Id);
+            signature.Add(message.Role, StringComparer.OrdinalIgnoreCase);
             signature.Add(message.Timestamp.UtcTicks);
             signature.Add(text, StringComparer.Ordinal);
         }
