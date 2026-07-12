@@ -139,8 +139,8 @@ class Program
             return false;
         }
 
-        return stackTrace.Contains("TextSelectionHandleCanvas", StringComparison.Ordinal)
-            || stackTrace.Contains("SelectableTextBlock.RenderTextLayout", StringComparison.Ordinal);
+        return stackTrace.Contains("TextLineImpl.GetTextBounds", StringComparison.Ordinal)
+            && stackTrace.Contains("TextLayout.HitTestTextRange", StringComparison.Ordinal);
     }
 
 #if DEBUG
