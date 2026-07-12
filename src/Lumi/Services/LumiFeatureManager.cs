@@ -715,8 +715,13 @@ public sealed class LumiFeatureManager
             stagedContent = newContent;
         }
 
-        // All validations passed — commit. Metadata first so a rename + content edit in one
-        // call still yields the correct .md filename.
+        // Back up the current content BEFORE mutating any field, so a backup I/O failure aborts
+        // the whole update with the skill left untouched (atomicity). Then commit metadata +
+        // content together. Metadata first so a rename + content edit in one call still yields
+        // the correct .md filename.
+        if (stagedContent is not null && TryBackupSkillContent(skill, stagedContent) is { } backupError)
+            return Failure(backupError);
+
         if (stagedName is not null)
             skill.Name = stagedName;
         if (stagedDescription is not null)
@@ -724,7 +729,7 @@ public sealed class LumiFeatureManager
         if (iconGlyph is not null)
             skill.IconGlyph = NormalizeOrNull(iconGlyph) ?? "⚡";
         if (stagedContent is not null)
-            ApplySkillContentChange(skill, stagedContent);
+            skill.Content = stagedContent;
 
         return SkillSuccess(skill, "Skill updated.");
     }
@@ -772,21 +777,37 @@ public sealed class LumiFeatureManager
         if (_dataStore.SkillFileNameConflicts(newName, skill.Id))
             return Failure($"Imported skill name \"{newName}\" maps to the same mirror file as an existing skill.");
 
+        // Back up before mutating anything, so a backup failure leaves the skill untouched.
+        if (TryBackupSkillContent(skill, body!) is { } importBackupError)
+            return Failure(importBackupError);
+
         skill.Name = newName;
         skill.Description = importedDescription ?? "";
-        ApplySkillContentChange(skill, body!);
+        skill.Content = body!;
         return SkillSuccess(skill, $"Skill imported from {Path.GetFileName(path)}.");
     }
 
-    private void ApplySkillContentChange(Skill skill, string newContent)
+    /// <summary>Backs up the skill's current content before it is overwritten. Returns an error
+    /// message if the backup fails, so the caller can abort without having mutated the skill.</summary>
+    private string? TryBackupSkillContent(Skill skill, string newContent)
     {
-        if (!string.IsNullOrEmpty(skill.Content)
-            && !string.Equals(skill.Content, newContent, StringComparison.Ordinal))
+        if (string.IsNullOrEmpty(skill.Content)
+            || string.Equals(skill.Content, newContent, StringComparison.Ordinal))
+            return null;
+
+        try
         {
             _dataStore.BackupSkillContent(skill.Id, skill.Content);
+            return null;
         }
-
-        skill.Content = newContent;
+        catch (IOException ex)
+        {
+            return $"Failed to back up existing skill content, so no changes were made: {ex.Message}";
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return $"Failed to back up existing skill content, so no changes were made: {ex.Message}";
+        }
     }
 
     /// <summary>Rejects skill name/description values that would corrupt the single-line YAML
@@ -878,10 +899,13 @@ public sealed class LumiFeatureManager
             return (false, null, $"editOldString \"{heading}\" is not a markdown heading (it must start with '#').");
 
         var lines = content.Split('\n');
+        var inCode = ComputeFencedCodeMask(lines);
         var start = -1;
         var matches = 0;
         for (var i = 0; i < lines.Length; i++)
         {
+            if (inCode[i])
+                continue;
             if (string.Equals(lines[i].Trim(), heading, StringComparison.Ordinal))
             {
                 matches++;
@@ -897,6 +921,8 @@ public sealed class LumiFeatureManager
         var end = lines.Length;
         for (var j = start + 1; j < lines.Length; j++)
         {
+            if (inCode[j])
+                continue;
             var lvl = HeadingLevel(lines[j].Trim());
             if (lvl > 0 && lvl <= level)
             {
@@ -926,6 +952,57 @@ public sealed class LumiFeatureManager
         return hashes;
     }
 
+    /// <summary>Marks each line that is inside (or is the delimiter of) a fenced code block, so
+    /// heading-looking lines within ``` / ~~~ fences aren't mistaken for real section headings.</summary>
+    private static bool[] ComputeFencedCodeMask(string[] lines)
+    {
+        var mask = new bool[lines.Length];
+        var inFence = false;
+        var fenceChar = '\0';
+        var fenceLen = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var delim = FenceDelimiter(lines[i]);
+            if (!inFence)
+            {
+                if (delim is { } open)
+                {
+                    inFence = true;
+                    fenceChar = open.Ch;
+                    fenceLen = open.Len;
+                    mask[i] = true;
+                }
+            }
+            else
+            {
+                mask[i] = true; // interior line, including the closing delimiter
+                // Closing fence: same char, at least as long, and only fence chars (no info string).
+                if (delim is { } close && close.Ch == fenceChar && close.Len >= fenceLen
+                    && lines[i].Trim().Length == close.Len)
+                {
+                    inFence = false;
+                }
+            }
+        }
+        return mask;
+    }
+
+    /// <summary>Returns the fence character and run length when a line opens/closes a code fence
+    /// (3+ backticks or tildes), else null.</summary>
+    private static (char Ch, int Len)? FenceDelimiter(string line)
+    {
+        var trimmed = line.TrimStart();
+        if (trimmed.Length < 3)
+            return null;
+        var ch = trimmed[0];
+        if (ch != '`' && ch != '~')
+            return null;
+        var len = 0;
+        while (len < trimmed.Length && trimmed[len] == ch)
+            len++;
+        return len >= 3 ? (ch, len) : null;
+    }
+
     private static int CountOccurrences(string haystack, string needle)
     {
         var count = 0;
@@ -933,7 +1010,9 @@ public sealed class LumiFeatureManager
         while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0)
         {
             count++;
-            i += needle.Length;
+            // Advance by one (not needle.Length) so overlapping matches are all counted — e.g.
+            // "aa" occurs at index 0 and 1 in "aaa". A patch must treat that as ambiguous, not unique.
+            i += 1;
         }
         return count;
     }
@@ -965,7 +1044,7 @@ public sealed class LumiFeatureManager
             if (colon <= 0)
                 continue;
             var key = line[..colon].Trim();
-            var value = line[(colon + 1)..].Trim();
+            var value = DataStore.DecodeYamlScalar(line[(colon + 1)..].Trim());
             if (key.Equals("name", StringComparison.OrdinalIgnoreCase))
                 name = value;
             else if (key.Equals("description", StringComparison.OrdinalIgnoreCase))

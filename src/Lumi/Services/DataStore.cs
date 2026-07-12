@@ -831,12 +831,94 @@ public class DataStore
     {
         return $"""
             ---
-            name: {skill.Name}
-            description: {skill.Description}
+            name: {EncodeYamlScalar(skill.Name)}
+            description: {EncodeYamlScalar(skill.Description)}
             ---
 
             {skill.Content}
             """;
+    }
+
+    /// <summary>Encodes a value as a YAML scalar for skill frontmatter. Emits the value plainly when
+    /// it is unambiguous, otherwise as a double-quoted, escaped scalar so characters like ':', '#',
+    /// leading/trailing whitespace, or line breaks can't corrupt the mirror or change its parse.</summary>
+    public static string EncodeYamlScalar(string? value)
+    {
+        value ??= "";
+        if (!YamlScalarNeedsQuoting(value))
+            return value;
+
+        var sb = new StringBuilder(value.Length + 2).Append('"');
+        foreach (var c in value)
+        {
+            switch (c)
+            {
+                case '\\': sb.Append("\\\\"); break;
+                case '"': sb.Append("\\\""); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default: sb.Append(c); break;
+            }
+        }
+        return sb.Append('"').ToString();
+    }
+
+    /// <summary>Reverses <see cref="EncodeYamlScalar"/>. Plain (unquoted) scalars are returned as-is
+    /// for backward compatibility with older mirror files.</summary>
+    public static string DecodeYamlScalar(string raw)
+    {
+        if (raw.Length < 2 || raw[0] != '"' || raw[^1] != '"')
+            return raw;
+
+        var inner = raw[1..^1];
+        var sb = new StringBuilder(inner.Length);
+        for (var i = 0; i < inner.Length; i++)
+        {
+            var c = inner[i];
+            if (c == '\\' && i + 1 < inner.Length)
+            {
+                var next = inner[++i];
+                sb.Append(next switch
+                {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '"' => '"',
+                    '\\' => '\\',
+                    _ => next
+                });
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
+    private static bool YamlScalarNeedsQuoting(string value)
+    {
+        if (value.Length == 0)
+            return true;
+        if (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1]))
+            return true;
+
+        // Characters that are significant when they lead a YAML flow scalar.
+        const string leadingIndicators = "-?:,[]{}#&*!|>'\"%@`";
+        if (leadingIndicators.IndexOf(value[0]) >= 0)
+            return true;
+
+        foreach (var c in value)
+        {
+            if (c is '\n' or '\r' or '\t')
+                return true;
+        }
+
+        // ": " and " #" flip a plain scalar into a mapping / comment mid-line.
+        return value.Contains(": ", StringComparison.Ordinal)
+            || value.Contains(" #", StringComparison.Ordinal)
+            || value.EndsWith(':');
     }
 
     /// <summary>Absolute path of a skill's markdown mirror file for the given skill name.</summary>
@@ -939,14 +1021,7 @@ public class DataStore
             {
                 var safeName = SanitizeFileName(skill.Name);
                 var filePath = Path.Combine(dir, $"{safeName}.md");
-                var content = $"""
-                    ---
-                    name: {skill.Name}
-                    description: {skill.Description}
-                    ---
-
-                    {skill.Content}
-                    """;
+                var content = BuildSkillMarkdown(skill);
                 await File.WriteAllTextAsync(filePath, content, cancellationToken).ConfigureAwait(false);
             }
 

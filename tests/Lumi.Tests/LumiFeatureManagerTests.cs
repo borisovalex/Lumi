@@ -777,4 +777,97 @@ public sealed class LumiFeatureManagerTests
         }
         finally { CleanupDir(dir); }
     }
+
+    [Fact]
+    public void ManageSkills_RenameThenBackupFailure_LeavesSkillUnchanged()
+    {
+        var dir = NewTempSkillsDir();
+        try
+        {
+            Directory.CreateDirectory(dir);
+            var (store, manager, skill) = NewSkillStore(dir, "original body", name: "Old Skill");
+
+            // Force BackupSkillContent to throw: put a FILE where the .backups directory must be,
+            // so Directory.CreateDirectory(backupsDir) fails with an IOException.
+            File.WriteAllText(store.SkillBackupsDirectory, "not a directory");
+
+            var result = manager.ManageSkills("update", identifier: "Old Skill", name: "New Skill",
+                content: "replacement body");
+
+            Assert.False(result.DataChanged);
+            Assert.Contains("back up", result.Message, StringComparison.OrdinalIgnoreCase);
+            // Backup ran before any mutation, so the failed backup must leave name AND content intact.
+            Assert.Equal("Old Skill", skill.Name);
+            Assert.Equal("original body", skill.Content);
+        }
+        finally { CleanupDir(dir); }
+    }
+
+    [Fact]
+    public void ManageSkills_Patch_OverlappingMatch_Fails()
+    {
+        var dir = NewTempSkillsDir();
+        try
+        {
+            // "aa" occurs at index 0 and 1 in "aaa" — overlapping, hence ambiguous, not unique.
+            var (_, manager, skill) = NewSkillStore(dir, "aaa");
+            var result = manager.ManageSkills("update", identifier: skill.Name, updateMode: "patch",
+                editOldString: "aa", editNewString: "X");
+
+            Assert.False(result.DataChanged);
+            Assert.Contains("matched 2 times", result.Message);
+            Assert.Equal("aaa", skill.Content);
+        }
+        finally { CleanupDir(dir); }
+    }
+
+    [Fact]
+    public void ManageSkills_ReplaceSection_IgnoresHeadingInsideFencedCode()
+    {
+        var dir = NewTempSkillsDir();
+        try
+        {
+            // The "## Beta" inside the fenced code block must not be treated as a section boundary,
+            // so replacing "## Alpha" must consume the fenced sample and stop at the real "## Gamma".
+            var content = "# Skill\n\n## Alpha\nalpha body\n\n```md\n## Beta\nfenced sample\n```\n\n## Gamma\ngamma body";
+            var (_, manager, skill) = NewSkillStore(dir, content);
+            var result = manager.ManageSkills("update", identifier: skill.Name, updateMode: "replaceSection",
+                editOldString: "## Alpha", editNewString: "## Alpha\nreplaced alpha");
+
+            Assert.True(result.DataChanged);
+            Assert.Equal("# Skill\n\n## Alpha\nreplaced alpha\n## Gamma\ngamma body", skill.Content);
+            Assert.DoesNotContain("alpha body", skill.Content);
+            Assert.DoesNotContain("fenced sample", skill.Content);
+            Assert.Contains("## Gamma\ngamma body", skill.Content);
+        }
+        finally { CleanupDir(dir); }
+    }
+
+    [Fact]
+    public void ManageSkills_FrontmatterScalars_RoundTripThroughMirror()
+    {
+        var dir = NewTempSkillsDir();
+        try
+        {
+            // Values that would corrupt unquoted YAML: '#' comment, ':' mapping, trailing space.
+            var (store, manager, skill) = NewSkillStore(dir, "body text", name: "# Triage");
+            manager.ManageSkills("update", identifier: skill.Id.ToString(), description: "Use: tools now ");
+            store.SyncSkillFiles();
+
+            var import = manager.ManageSkills("import", identifier: skill.Id.ToString());
+
+            Assert.True(import.DataChanged);
+            Assert.Equal("# Triage", skill.Name);
+            Assert.Equal("Use: tools now", skill.Description);
+            Assert.Equal("body text", skill.Content);
+        }
+        finally { CleanupDir(dir); }
+    }
+
+    [Fact]
+    public void DataStore_EncodeDecodeYamlScalar_RoundTrips()
+    {
+        foreach (var value in new[] { "Word Creator", "# Triage", "Use: tools", "  spaced  ", "has \"quote\"", "back\\slash", "trailing:" })
+            Assert.Equal(value, DataStore.DecodeYamlScalar(DataStore.EncodeYamlScalar(value)));
+    }
 }
