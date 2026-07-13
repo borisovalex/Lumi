@@ -839,30 +839,11 @@ public class DataStore
             """;
     }
 
-    /// <summary>Encodes a value as a YAML scalar for skill frontmatter. Emits the value plainly when
-    /// it is unambiguous, otherwise as a double-quoted, escaped scalar so characters like ':', '#',
-    /// leading/trailing whitespace, or line breaks can't corrupt the mirror or change its parse.</summary>
+    /// <summary>Encodes a string as a JSON-compatible YAML double-quoted scalar. Skill name and
+    /// description are always strings, so quoting every value avoids YAML implicit typing
+    /// (for example <c>true</c>, <c>123</c>, or a date) without custom scalar heuristics.</summary>
     public static string EncodeYamlScalar(string? value)
-    {
-        value ??= "";
-        if (!YamlScalarNeedsQuoting(value))
-            return value;
-
-        var sb = new StringBuilder(value.Length + 2).Append('"');
-        foreach (var c in value)
-        {
-            switch (c)
-            {
-                case '\\': sb.Append("\\\\"); break;
-                case '"': sb.Append("\\\""); break;
-                case '\n': sb.Append("\\n"); break;
-                case '\r': sb.Append("\\r"); break;
-                case '\t': sb.Append("\\t"); break;
-                default: sb.Append(c); break;
-            }
-        }
-        return sb.Append('"').ToString();
-    }
+        => JsonSerializer.Serialize(value ?? "", AppDataJsonContext.Default.String);
 
     /// <summary>Reverses <see cref="EncodeYamlScalar"/>. Plain (unquoted) scalars are returned as-is
     /// for backward compatibility with older mirror files.</summary>
@@ -871,54 +852,8 @@ public class DataStore
         if (raw.Length < 2 || raw[0] != '"' || raw[^1] != '"')
             return raw;
 
-        var inner = raw[1..^1];
-        var sb = new StringBuilder(inner.Length);
-        for (var i = 0; i < inner.Length; i++)
-        {
-            var c = inner[i];
-            if (c == '\\' && i + 1 < inner.Length)
-            {
-                var next = inner[++i];
-                sb.Append(next switch
-                {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '"' => '"',
-                    '\\' => '\\',
-                    _ => next
-                });
-            }
-            else
-            {
-                sb.Append(c);
-            }
-        }
-        return sb.ToString();
-    }
-
-    private static bool YamlScalarNeedsQuoting(string value)
-    {
-        if (value.Length == 0)
-            return true;
-        if (char.IsWhiteSpace(value[0]) || char.IsWhiteSpace(value[^1]))
-            return true;
-
-        // Characters that are significant when they lead a YAML flow scalar.
-        const string leadingIndicators = "-?:,[]{}#&*!|>'\"%@`";
-        if (leadingIndicators.IndexOf(value[0]) >= 0)
-            return true;
-
-        foreach (var c in value)
-        {
-            if (c is '\n' or '\r' or '\t')
-                return true;
-        }
-
-        // ": " and " #" flip a plain scalar into a mapping / comment mid-line.
-        return value.Contains(": ", StringComparison.Ordinal)
-            || value.Contains(" #", StringComparison.Ordinal)
-            || value.EndsWith(':');
+        return JsonSerializer.Deserialize(raw, AppDataJsonContext.Default.String)
+               ?? throw new JsonException("Quoted skill frontmatter value must be a JSON string.");
     }
 
     /// <summary>Absolute path of a skill's markdown mirror file for the given skill name.</summary>

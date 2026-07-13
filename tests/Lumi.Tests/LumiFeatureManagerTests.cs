@@ -844,6 +844,25 @@ public sealed class LumiFeatureManagerTests
     }
 
     [Fact]
+    public void ManageSkills_ReplaceSection_DoesNotTreatFourSpaceIndentedFenceAsFence()
+    {
+        var dir = NewTempSkillsDir();
+        try
+        {
+            var content = "# Skill\n\n## Alpha\nalpha body\n    ```\n## Beta\nbeta body\n```\n\n## Gamma\ngamma body";
+            var (_, manager, skill) = NewSkillStore(dir, content);
+
+            var result = manager.ManageSkills("update", identifier: skill.Name, updateMode: "replaceSection",
+                editOldString: "## Alpha", editNewString: "## Alpha\nreplaced alpha");
+
+            Assert.True(result.DataChanged);
+            Assert.Contains("## Beta\nbeta body", skill.Content);
+            Assert.Contains("## Gamma\ngamma body", skill.Content);
+        }
+        finally { CleanupDir(dir); }
+    }
+
+    [Fact]
     public void ManageSkills_FrontmatterScalars_RoundTripThroughMirror()
     {
         var dir = NewTempSkillsDir();
@@ -867,7 +886,34 @@ public sealed class LumiFeatureManagerTests
     [Fact]
     public void DataStore_EncodeDecodeYamlScalar_RoundTrips()
     {
-        foreach (var value in new[] { "Word Creator", "# Triage", "Use: tools", "  spaced  ", "has \"quote\"", "back\\slash", "trailing:" })
+        foreach (var value in new[] { "Word Creator", "# Triage", "Use: tools", "  spaced  ", "has \"quote\"", "back\\slash", "true", "null", "123", "2026-07-12" })
+        {
+            Assert.StartsWith("\"", DataStore.EncodeYamlScalar(value));
             Assert.Equal(value, DataStore.DecodeYamlScalar(DataStore.EncodeYamlScalar(value)));
+        }
+
+        Assert.Equal("AB", DataStore.DecodeYamlScalar("\"A\\u0042\""));
+    }
+
+    [Fact]
+    public void ManageSkills_Import_NormalizesQuotedNameAndDescription()
+    {
+        var dir = NewTempSkillsDir();
+        try
+        {
+            var (store, manager, skill) = NewSkillStore(dir, "old body", name: "Old Name");
+            Directory.CreateDirectory(dir);
+            File.WriteAllText(
+                store.GetSkillFilePath(skill.Name),
+                "---\nname: \"  Foo  \"\ndescription: \"  useful description  \"\n---\n\nnew body");
+
+            var result = manager.ManageSkills("import", identifier: skill.Id.ToString());
+
+            Assert.True(result.DataChanged);
+            Assert.Equal("Foo", skill.Name);
+            Assert.Equal("useful description", skill.Description);
+            Assert.Equal("new body", skill.Content);
+        }
+        finally { CleanupDir(dir); }
     }
 }

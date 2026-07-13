@@ -17,4 +17,5 @@ namespace Lumi.Models;
 [JsonSerializable(typeof(List<BackgroundJob>))]
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(string[]))]
+[JsonSerializable(typeof(string))]
 internal partial class AppDataJsonContext : JsonSerializerContext;

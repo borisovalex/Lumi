@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Lumi.Models;
 
 namespace Lumi.Services;
@@ -766,13 +767,17 @@ public sealed class LumiFeatureManager
         if (string.IsNullOrWhiteSpace(body))
             return Failure("Imported skill body is empty.");
 
-        var newName = importedName!;
+        var newName = NormalizeOrNull(importedName);
+        if (newName is null)
+            return Failure("Imported skill name cannot be empty.");
+        var newDescription = NormalizeOrNull(importedDescription) ?? "";
+
         if (!string.Equals(newName, skill.Name, StringComparison.Ordinal)
             && HasConflictingLabel(_dataStore.Data.Skills, newName, static item => item.Name, static item => item.Id, skill.Id))
         {
             return Failure($"A skill named \"{newName}\" already exists.");
         }
-        if (ValidateSkillMirrorScalars(newName, NormalizeOrNull(importedDescription)) is { } importScalarError)
+        if (ValidateSkillMirrorScalars(newName, newDescription) is { } importScalarError)
             return Failure(importScalarError);
         if (_dataStore.SkillFileNameConflicts(newName, skill.Id))
             return Failure($"Imported skill name \"{newName}\" maps to the same mirror file as an existing skill.");
@@ -782,7 +787,7 @@ public sealed class LumiFeatureManager
             return Failure(importBackupError);
 
         skill.Name = newName;
-        skill.Description = importedDescription ?? "";
+        skill.Description = newDescription;
         skill.Content = body!;
         return SkillSuccess(skill, $"Skill imported from {Path.GetFileName(path)}.");
     }
@@ -991,7 +996,13 @@ public sealed class LumiFeatureManager
     /// (3+ backticks or tildes), else null.</summary>
     private static (char Ch, int Len)? FenceDelimiter(string line)
     {
-        var trimmed = line.TrimStart();
+        var indent = 0;
+        while (indent < line.Length && line[indent] == ' ')
+            indent++;
+        if (indent > 3 || (indent < line.Length && line[indent] == '\t'))
+            return null;
+
+        var trimmed = line[indent..];
         if (trimmed.Length < 3)
             return null;
         var ch = trimmed[0];
@@ -1044,7 +1055,16 @@ public sealed class LumiFeatureManager
             if (colon <= 0)
                 continue;
             var key = line[..colon].Trim();
-            var value = DataStore.DecodeYamlScalar(line[(colon + 1)..].Trim());
+            string value;
+            try
+            {
+                value = DataStore.DecodeYamlScalar(line[(colon + 1)..].Trim());
+            }
+            catch (JsonException ex)
+            {
+                return (false, null, null, null,
+                    $"Malformed frontmatter: invalid quoted value for '{key}': {ex.Message}");
+            }
             if (key.Equals("name", StringComparison.OrdinalIgnoreCase))
                 name = value;
             else if (key.Equals("description", StringComparison.OrdinalIgnoreCase))
