@@ -1094,6 +1094,9 @@ public partial class ChatViewModel
     /// <summary>Raised when the composer should receive focus (e.g., after attaching files or voice toggle).</summary>
     public event Action? FocusComposerRequested;
 
+    /// <summary>Raised when entering host-owned edit mode so the input focuses at the end once.</summary>
+    public event Action? FocusComposerAtEndRequested;
+
     // ── Attach files (requires view interaction for file picker) ──
 
     /// <summary>Raised when user requests file attachment. The view handles the file picker dialog.</summary>

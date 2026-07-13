@@ -347,6 +347,45 @@ public sealed class ChatViewModelEditTests
         Assert.Null(chat.AgentId);
     }
 
+    [Fact]
+    public void BeginComposerEdit_WhileBusy_DoesNotEnterEditMode()
+    {
+        var message = new ChatMessage { Role = "user", Content = "Original message" };
+        var chat = new Chat { Id = Guid.NewGuid(), Messages = [message] };
+        var viewModel = new ChatViewModel(
+            new DataStore(new AppData { Chats = [chat] }),
+            new CopilotService())
+        {
+            CurrentChat = chat,
+            IsBusy = true
+        };
+
+        InvokeBeginComposerEdit(viewModel, message);
+
+        Assert.False(viewModel.IsEditingMessage);
+    }
+
+    [Fact]
+    public void BeginDifferentMessageWhileEditing_KeepsCurrentEdit()
+    {
+        var first = new ChatMessage { Role = "user", Content = "First message" };
+        var second = new ChatMessage { Role = "user", Content = "Second message" };
+        var chat = new Chat { Id = Guid.NewGuid(), Messages = [first, second] };
+        var viewModel = new ChatViewModel(
+            new DataStore(new AppData { Chats = [chat] }),
+            new CopilotService())
+        {
+            CurrentChat = chat
+        };
+
+        InvokeBeginComposerEdit(viewModel, first);
+        viewModel.PromptText = "Unsaved first edit";
+        InvokeBeginComposerEdit(viewModel, second);
+
+        Assert.True(viewModel.IsEditingMessage);
+        Assert.Equal("Unsaved first edit", viewModel.PromptText);
+    }
+
     private static object CaptureSnapshot(ChatViewModel viewModel)
     {
         var method = typeof(ChatViewModel).GetMethod(

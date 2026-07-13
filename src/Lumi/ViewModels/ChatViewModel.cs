@@ -1037,6 +1037,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     partial void OnIsBusyChanged(bool value)
     {
+        UpdateUserMessageEditState();
         if (value)
             _transcriptBuilder.ShowTypingIndicator(StatusText);
         else
@@ -1053,6 +1054,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     partial void OnIsEditingMessageChanged(bool value)
     {
         OnPropertyChanged(nameof(ComposerPlaceholder));
+        UpdateUserMessageEditState();
     }
 
     partial void OnStatusTextChanged(string value)
@@ -1092,6 +1094,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         TranscriptTurns = _transcriptBuilder.Rebuild(Messages);
+        UpdateUserMessageEditState();
         _transcriptWindow.BindTranscript(TranscriptTurns, "rebuild");
         _transcriptWindow.ResetToLatest(TranscriptWindowController.DefaultInitialViewportHeight, "rebuild");
 
@@ -2507,6 +2510,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (CurrentChat is null || userMessage.Role != "user")
             return;
 
+        if (IsBusy)
+            return;
+
         if (_editingUserMessage?.Id == userMessage.Id && IsEditingMessage)
         {
             FocusComposerRequested?.Invoke();
@@ -2514,7 +2520,10 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         if (_editingUserMessage is not null && _editingUserMessage.Id != userMessage.Id)
-            CancelComposerEditInternal(restoreComposer: true, focusComposer: false);
+        {
+            FocusComposerRequested?.Invoke();
+            return;
+        }
 
         _preEditComposerSnapshot ??= CaptureComposerEditSnapshot();
         _editingUserMessage = userMessage;
@@ -2529,7 +2538,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         ApplyMessageModelSelection(userMessage);
         ApplyMessageMcpSelection(userMessage, syncToChat: false);
 
-        FocusComposerRequested?.Invoke();
+        FocusComposerAtEndRequested?.Invoke();
+    }
+
+    private void UpdateUserMessageEditState()
+    {
+        var editingMessageId = IsEditingMessage ? _editingUserMessage?.Id : null;
+        foreach (var userItem in TranscriptTurns
+                     .SelectMany(static turn => turn.Items)
+                     .OfType<UserMessageItem>())
+        {
+            userItem.UpdateEditState(editingMessageId, IsBusy);
+        }
     }
 
     private ComposerEditSnapshot CaptureComposerEditSnapshot()
