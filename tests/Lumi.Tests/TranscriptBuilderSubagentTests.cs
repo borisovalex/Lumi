@@ -330,7 +330,7 @@ public sealed class TranscriptBuilderSubagentTests
     }
 
     private static TranscriptBuilder CreateBuilder()
-        => new(CreateDataStore(), _ => { }, (_, _) => { }, (_, _) => Task.CompletedTask, () => null);
+        => new(CreateDataStore(), _ => { }, (_, _) => { }, _ => { }, (_, _) => Task.CompletedTask, () => null);
 
     private static (TranscriptBuilder Builder, SubagentGroupItem Group) CreateLiveGroup()
     {

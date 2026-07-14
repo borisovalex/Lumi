@@ -123,6 +123,11 @@
   "Chat_SuggestionB": "חקור נושא",
   "Chat_SuggestionC": "צור מסמך",
   "Chat_AvatarLetter": "ל",
+  "Chat_EditPlaceholder": "ערוך את ההודעה...",
+  "Chat_EditTitle": "עריכת הודעה",
+  "Chat_EditStatus": "העדכון מפעיל מחדש את השיחה מנקודה זו ומסיר הודעות מאוחרות יותר.",
+  "Chat_EditSubmit": "עדכן ושלח מחדש",
+  "Chat_EditSourceMarker": "הודעה זו בעריכה",
 
   "Editor_Lumi": "עורך לומי",
   "Editor_Project": "עורך פרויקט",

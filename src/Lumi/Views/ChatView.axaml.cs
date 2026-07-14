@@ -247,6 +247,7 @@ public partial class ChatView : UserControl
             vm.ClipboardPasteRequested += OnClipboardPasteRequested;
             vm.CopyToClipboardRequested += OnCopyToClipboardRequested;
             vm.FocusComposerRequested += FocusComposer;
+            vm.FocusComposerAtEndRequested += FocusComposerAtEnd;
             vm.WorkspaceJumpToTurnRequested += OnWorkspaceJumpToTurnRequested;
             SubscribeToMountedTurns(vm.MountedTranscriptTurns);
             Dispatcher.UIThread.Post(EnsureTranscriptScrollViewer, DispatcherPriority.Loaded);
@@ -279,6 +280,8 @@ public partial class ChatView : UserControl
         _composer?.FocusInput();
     }
 
+    private void FocusComposerAtEnd() => _composer?.FocusInputAtEnd();
+
     private void UnsubscribeFromViewModel()
     {
         if (_subscribedVm is null) return;
@@ -290,6 +293,7 @@ public partial class ChatView : UserControl
         _subscribedVm.ClipboardPasteRequested -= OnClipboardPasteRequested;
         _subscribedVm.CopyToClipboardRequested -= OnCopyToClipboardRequested;
         _subscribedVm.FocusComposerRequested -= FocusComposer;
+        _subscribedVm.FocusComposerAtEndRequested -= FocusComposerAtEnd;
         _subscribedVm.WorkspaceJumpToTurnRequested -= OnWorkspaceJumpToTurnRequested;
         // Clear the realizing gate so a view detach mid-open can't leave the overlay stuck up on the VM:
         // a suspended OpenTranscriptAtLatestAsync won't reach its gate-clearing finally once _subscribedVm

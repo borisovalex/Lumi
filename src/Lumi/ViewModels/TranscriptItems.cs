@@ -51,10 +51,13 @@ public abstract partial class TranscriptItem : ObservableObject
 public partial class UserMessageItem : TranscriptItem
 {
     private readonly ChatMessageViewModel _source;
+    private readonly Action<ChatMessage>? _beginEditAction;
     private readonly Action<ChatMessage, bool>? _resendAction;
 
     [ObservableProperty] private string _content;
     [ObservableProperty] private string _timestampText;
+    [ObservableProperty] private bool _isBeingEdited;
+    [ObservableProperty] private bool _isEditEnabled = true;
 
     public string? Author => _source.Author;
     public ChatMessage Message => _source.Message;
@@ -71,7 +74,7 @@ public partial class UserMessageItem : TranscriptItem
     public List<SkillChipItem>? DisplaySkills => HasSkills ? SkillChips : null;
 
     /// <summary>Command invoked when user clicks Edit on the message. Sets EditText to current content.</summary>
-    public ICommand BeginEditCommand { get; }
+    public IRelayCommand BeginEditCommand { get; }
 
     /// <summary>Command invoked when user confirms an edit. Parameter is the new text string.</summary>
     public ICommand ConfirmEditCommand { get; }
@@ -83,10 +86,18 @@ public partial class UserMessageItem : TranscriptItem
     /// badge — forces the still-pending steered message through to the running turn immediately.</summary>
     public IAsyncRelayCommand SendNowCommand { get; }
 
-    public UserMessageItem(ChatMessageViewModel source, bool showTimestamps, List<SkillReference>? filteredSkills = null, Action<ChatMessage, bool>? resendAction = null, Action<SkillReference>? openSkillAction = null, Func<ChatMessageViewModel, Task>? sendSteeredNowAsync = null)
+    public UserMessageItem(
+        ChatMessageViewModel source,
+        bool showTimestamps,
+        List<SkillReference>? filteredSkills = null,
+        Action<ChatMessage>? beginEditAction = null,
+        Action<ChatMessage, bool>? resendAction = null,
+        Action<SkillReference>? openSkillAction = null,
+        Func<ChatMessageViewModel, Task>? sendSteeredNowAsync = null)
         : base($"message:user:{source.Message.Id}")
     {
         _source = source;
+        _beginEditAction = beginEditAction;
         _resendAction = resendAction;
         _content = source.Content;
         _timestampText = showTimestamps ? source.TimestampText : "";
@@ -94,7 +105,9 @@ public partial class UserMessageItem : TranscriptItem
         Skills = filteredSkills ?? source.Message.ActiveSkills.ToList();
         SkillChips = Skills.Select(s => new SkillChipItem(s, () => openSkillAction?.Invoke(s))).ToList();
 
-        BeginEditCommand = new RelayCommand(() => { /* Strata handles entering edit mode internally */ });
+        BeginEditCommand = new RelayCommand(
+            () => _beginEditAction?.Invoke(_source.Message),
+            () => IsEditEnabled);
         ConfirmEditCommand = new RelayCommand<string>(text => EditAndResend(text ?? Content));
         ResendCommand = new RelayCommand(ResendFromMessage);
         SendNowCommand = new AsyncRelayCommand(
@@ -102,6 +115,13 @@ public partial class UserMessageItem : TranscriptItem
     }
 
     public void ResendFromMessage() => _resendAction?.Invoke(_source.Message, false);
+
+    public void UpdateEditState(Guid? editingMessageId, bool isBusy)
+    {
+        IsBeingEdited = editingMessageId == Message.Id;
+        IsEditEnabled = !isBusy && (editingMessageId is null || IsBeingEdited);
+        BeginEditCommand.NotifyCanExecuteChanged();
+    }
 
     public void EditAndResend(string newContent)
     {

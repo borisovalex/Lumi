@@ -879,7 +879,7 @@ public sealed class TranscriptBuilderToolGroupTests
     }
 
     private static TranscriptBuilder CreateBuilder(bool showToolCalls = true, Action<Guid>? openChatAction = null)
-        => new(CreateDataStore(showToolCalls), _ => { }, (_, _) => { }, (_, _) => Task.CompletedTask, () => null,
+        => new(CreateDataStore(showToolCalls), _ => { }, (_, _) => { }, _ => { }, (_, _) => Task.CompletedTask, () => null,
             openChatAction: openChatAction);
 
     private static void AssertCompactFinishedToolGroup(TranscriptItem item, int expectedToolCalls)

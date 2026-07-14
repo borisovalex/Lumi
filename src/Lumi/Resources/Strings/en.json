@@ -123,6 +123,11 @@
   "Chat_SuggestionB": "Research a topic",
   "Chat_SuggestionC": "Create a document",
   "Chat_AvatarLetter": "L",
+  "Chat_EditPlaceholder": "Edit your message...",
+  "Chat_EditTitle": "Editing message",
+  "Chat_EditStatus": "Updating restarts the conversation from this point and removes later messages.",
+  "Chat_EditSubmit": "Update & resend",
+  "Chat_EditSourceMarker": "Editing this message",
 
   "Editor_Lumi": "Lumi Editor",
   "Editor_Project": "Project Editor",

@@ -532,6 +532,25 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// <summary>0/1 guard ensuring at most one background history refresh runs at a time.</summary>
     private int _userPromptHistoryRefreshing;
 
+    private sealed record ComposerEditSnapshot(
+        string PromptText,
+        List<string> PendingAttachments,
+        List<Guid> ActiveSkillIds,
+        List<string> ActiveExternalSkillNames,
+        Guid? AgentId,
+        string? SdkAgentName,
+        string? SelectedModel,
+        string? SelectedReasoningEffort,
+        string? SelectedContextWindowTier,
+        List<string> ActiveMcpServerNames,
+        string? ChatLastModelUsed,
+        string? ChatLastReasoningEffortUsed,
+        string? ChatLastContextWindowTierUsed,
+        List<Guid> PendingSkillInjections);
+
+    private ComposerEditSnapshot? _preEditComposerSnapshot;
+    private ChatMessage? _editingUserMessage;
+
     /// <summary>Gets or lazily creates a per-chat BrowserService instance. Browser tool callbacks run
     /// off the UI thread while chat-switch/cleanup code touches this map on the UI thread, so the
     /// backing store is a ConcurrentDictionary and creation goes through an atomic GetOrAdd.</summary>
@@ -581,6 +600,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isStreaming;
     [ObservableProperty] private string _statusText = "";
     [ObservableProperty] private string? _selectedModel;
+    [ObservableProperty] private bool _isEditingMessage;
+    [ObservableProperty] private string _editingMessageStatusText = "";
+    public string ComposerPlaceholder => IsEditingMessage ? Loc.Get("Chat_EditPlaceholder") : Loc.Chat_Placeholder;
 
     partial void OnIsBusyChanging(bool value)
     {
@@ -935,6 +957,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             dataStore,
             showDiffAction: item => DiffShowRequested?.Invoke(item),
             submitQuestionAnswerAction: SubmitQuestionAnswer,
+            beginEditMessageAction: BeginComposerEdit,
             resendFromMessageAction: ResendFromMessageAsync,
             openSkillAction: OpenSkillPreview,
             resolveSkill: name => FindSkillReferenceByName(name),
@@ -1014,6 +1037,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     partial void OnIsBusyChanged(bool value)
     {
+        UpdateUserMessageEditState();
         if (value)
             _transcriptBuilder.ShowTypingIndicator(StatusText);
         else
@@ -1025,6 +1049,12 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             // Newly produced files / sources may have arrived this turn.
             RebuildWorkspacePanel();
         }
+    }
+
+    partial void OnIsEditingMessageChanged(bool value)
+    {
+        OnPropertyChanged(nameof(ComposerPlaceholder));
+        UpdateUserMessageEditState();
     }
 
     partial void OnStatusTextChanged(string value)
@@ -1064,6 +1094,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         TranscriptTurns = _transcriptBuilder.Rebuild(Messages);
+        UpdateUserMessageEditState();
         _transcriptWindow.BindTranscript(TranscriptTurns, "rebuild");
         _transcriptWindow.ResetToLatest(TranscriptWindowController.DefaultInitialViewportHeight, "rebuild");
 
@@ -1333,6 +1364,37 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 Description = s.Description
             })
             .ToList();
+    }
+
+    /// <summary>
+    /// Builds skill references for a message from both internal skill ids and external
+    /// (file/project-context) skill names, so edited messages can restore the full skill
+    /// selection through the composer.
+    /// </summary>
+    private List<SkillReference> BuildSkillReferences(
+        IReadOnlyCollection<Guid> skillIds,
+        IReadOnlyCollection<string> externalSkillNames)
+    {
+        var references = BuildSkillReferences(skillIds);
+        if (externalSkillNames.Count == 0)
+            return references;
+
+        var projectContextCatalog = GetProjectContextCatalog();
+        foreach (var name in externalSkillNames
+                     .Where(static n => !string.IsNullOrWhiteSpace(n))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            references.Add(
+                FindSkillReferenceByName(name, projectContextCatalog)
+                ?? new SkillReference
+                {
+                    Name = name,
+                    Glyph = ExternalSkillGlyph,
+                    Description = string.Empty
+                });
+        }
+
+        return references;
     }
 
     private (long RequestId, CancellationTokenSource Source) BeginChatLoad(CancellationToken outerCancellationToken)
@@ -1690,6 +1752,8 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (CurrentChat?.Id != chat.Id)
         {
             _suggestionDisplayChatId = chat.Id;
+            if (IsEditingMessage)
+                CancelComposerEditInternal(restoreComposer: true, focusComposer: false);
 
             // Save unsent composer draft for the chat we're leaving
             var leavingId = CurrentChat?.Id ?? Guid.Empty;
@@ -1973,6 +2037,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             try { _chatLoadCts?.Cancel(); }
             catch (ObjectDisposedException) { }
         }
+
+        if (IsEditingMessage)
+            CancelComposerEditInternal(restoreComposer: true, focusComposer: false);
 
         // Save unsent composer draft for the chat we're leaving
         var leavingId = CurrentChat?.Id ?? Guid.Empty;
@@ -2447,9 +2514,477 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         return builder.ToString();
     }
 
+    private void BeginComposerEdit(ChatMessage userMessage)
+    {
+        if (CurrentChat is null || userMessage.Role != "user")
+            return;
+
+        if (IsBusy)
+            return;
+
+        if (_editingUserMessage?.Id == userMessage.Id && IsEditingMessage)
+        {
+            FocusComposerRequested?.Invoke();
+            return;
+        }
+
+        if (_editingUserMessage is not null && _editingUserMessage.Id != userMessage.Id)
+        {
+            FocusComposerRequested?.Invoke();
+            return;
+        }
+
+        _preEditComposerSnapshot ??= CaptureComposerEditSnapshot();
+        _editingUserMessage = userMessage;
+        IsEditingMessage = true;
+        EditingMessageStatusText = Loc.Get("Chat_EditStatus");
+        ClearSuggestions();
+
+        PromptText = userMessage.Content;
+        ReplacePendingAttachments(userMessage.Attachments);
+        ReplaceActiveSkillsFromMessage(userMessage, syncToChat: false);
+        ApplyMessageAgentSelection(userMessage, syncToChatAndSession: false);
+        ApplyMessageModelSelection(userMessage);
+        ApplyMessageMcpSelection(userMessage, syncToChat: false);
+
+        FocusComposerAtEndRequested?.Invoke();
+    }
+
+    private void UpdateUserMessageEditState()
+    {
+        var editingMessageId = IsEditingMessage ? _editingUserMessage?.Id : null;
+        foreach (var userItem in TranscriptTurns
+                     .SelectMany(static turn => turn.Items)
+                     .OfType<UserMessageItem>())
+        {
+            userItem.UpdateEditState(editingMessageId, IsBusy);
+        }
+    }
+
+    private ComposerEditSnapshot CaptureComposerEditSnapshot()
+        => new(
+            PromptText ?? string.Empty,
+            PendingAttachments.ToList(),
+            ActiveSkillIds.ToList(),
+            _activeExternalSkillNames.ToList(),
+            ActiveAgent?.Id,
+            SelectedSdkAgentName,
+            SelectedModel,
+            GetSelectedReasoningEffort(),
+            GetSelectedContextWindowTier(),
+            ActiveMcpServerNames.ToList(),
+            CurrentChat?.LastModelUsed,
+            CurrentChat?.LastReasoningEffortUsed,
+            CurrentChat?.LastContextWindowTierUsed,
+            _pendingSkillInjections.ToList());
+
+    /// <summary>
+    /// True when the composer's CURRENT selection (agent, MCP servers, or active skills) differs from
+    /// the pre-edit snapshot — i.e. from what the live Copilot session was built with. Those settings
+    /// are baked into the session at create/resume (system prompt + registered tools) and cannot be
+    /// reconfigured on a reused session, so a divergence means the history-rewind fast-path must be
+    /// replaced by a full recreate. Compared against the snapshot (not CurrentChat), because by send
+    /// time the composer selection has already been copied onto the chat and message.
+    /// </summary>
+    private bool ComposerSelectionDivergesFromSnapshot(ComposerEditSnapshot? snapshot)
+    {
+        if (snapshot is null)
+            return false;
+
+        if (snapshot.AgentId != ActiveAgent?.Id
+            || !string.Equals(snapshot.SdkAgentName, SelectedSdkAgentName, StringComparison.Ordinal))
+            return true;
+
+        if (!new HashSet<string>(snapshot.ActiveMcpServerNames, StringComparer.OrdinalIgnoreCase)
+                .SetEquals(ActiveMcpServerNames))
+            return true;
+
+        if (!new HashSet<Guid>(snapshot.ActiveSkillIds).SetEquals(ActiveSkillIds))
+            return true;
+
+        if (!new HashSet<string>(snapshot.ActiveExternalSkillNames, StringComparer.OrdinalIgnoreCase)
+                .SetEquals(_activeExternalSkillNames))
+            return true;
+
+        // A skill selected before editing can already be active in the composer/chat while still
+        // waiting for next-turn prompt injection because the live session predates it. Recreate so
+        // the edited turn's session is built with that skill instead of skipping the pending injection.
+        if (snapshot.PendingSkillInjections.Any(snapshot.ActiveSkillIds.Contains))
+            return true;
+
+        return false;
+    }
+
+    private void RestoreComposerEditSnapshot(ComposerEditSnapshot snapshot)
+    {
+        PromptText = snapshot.PromptText;
+        ReplacePendingAttachments(snapshot.PendingAttachments);
+        ReplaceActiveSkills(snapshot.ActiveSkillIds, snapshot.ActiveExternalSkillNames, syncToChat: true);
+        // Restore the visible/persisted selection without treating the draft agent as live routing.
+        // The explicit awaited reconciliation in CancelComposerEdit handles the session afterwards.
+        ApplyAgentSelection(snapshot.AgentId, snapshot.SdkAgentName, syncToChatAndSession: false);
+        ApplyModelSelection(snapshot.SelectedModel, snapshot.SelectedReasoningEffort, snapshot.SelectedContextWindowTier);
+        ReplaceActiveMcpSelection(snapshot.ActiveMcpServerNames, syncToChat: true);
+
+        // Restoring active skills above doesn't touch the pending-injection queue, so a skill added
+        // during the edit (which AddSkill queued for prompt injection) would otherwise leak into the
+        // next send even though it's no longer active. Reset the queue to its pre-edit contents.
+        _pendingSkillInjections.Clear();
+        _pendingSkillInjections.AddRange(snapshot.PendingSkillInjections);
+
+        // ApplyModelSelection restores the composer UI with side effects suppressed, so it neither
+        // rolls back the per-chat persisted model fields nor re-syncs the live session — both of which
+        // the in-edit model/quality/context changes mutated. Restore the persisted fields and re-sync
+        // the live session explicitly so a cancelled edit leaves persisted + live state exactly as
+        // before editing (otherwise Cancel could leave the chat/session on a discarded selection).
+        if (CurrentChat is { } chat)
+        {
+            chat.LastModelUsed = snapshot.ChatLastModelUsed;
+            chat.LastReasoningEffortUsed = snapshot.ChatLastReasoningEffortUsed;
+            chat.LastContextWindowTierUsed = snapshot.ChatLastContextWindowTierUsed;
+            QueueModelSelectionSave();
+            QueueMidSessionModelSelectionSync();
+        }
+    }
+
+    [RelayCommand]
+    private async Task CancelComposerEdit()
+    {
+        var snapshot = CancelComposerEditInternal(restoreComposer: true, focusComposer: true);
+        if (snapshot is not null)
+            await ReconcileSessionAgentSelectionAsync(snapshot);
+    }
+
+    private ComposerEditSnapshot? CancelComposerEditInternal(bool restoreComposer, bool focusComposer)
+    {
+        var snapshot = _preEditComposerSnapshot;
+        _editingUserMessage = null;
+        _preEditComposerSnapshot = null;
+        IsEditingMessage = false;
+        EditingMessageStatusText = string.Empty;
+
+        if (restoreComposer && snapshot is not null)
+            RestoreComposerEditSnapshot(snapshot);
+
+        if (focusComposer)
+            FocusComposerRequested?.Invoke();
+
+        return snapshot;
+    }
+
+    /// <summary>Re-applies the pre-edit agent route after Cancel. State restoration above is
+    /// deliberately side-effect-free, so draft agent state can never trigger a spurious deselect;
+    /// this awaited step makes the live session explicitly match the restored snapshot.</summary>
+    private async Task ReconcileSessionAgentSelectionAsync(ComposerEditSnapshot snapshot)
+    {
+        if (_activeSession is null)
+            return;
+
+        if (snapshot.AgentId is { } agentId)
+        {
+            var agent = _dataStore.Data.Agents.FirstOrDefault(candidate => candidate.Id == agentId);
+            if (agent is not null)
+            {
+                await SelectAgentOnSessionAsync(agent.Name);
+                return;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(snapshot.SdkAgentName))
+        {
+            await SelectAgentOnSessionAsync(snapshot.SdkAgentName);
+            return;
+        }
+
+        await DeselectAgentOnSessionAsync();
+    }
+
+    private async Task SendEditedMessage()
+    {
+        if (CurrentChat is null || _editingUserMessage is not { } userMessage)
+            return;
+
+        if (string.IsNullOrWhiteSpace(PromptText))
+            return;
+
+        var prompt = PromptText.Trim();
+        var selectedReasoningEffort = GetPersistedReasoningEffortPreference();
+        var attachments = TakePendingAttachments() ?? [];
+
+        userMessage.Content = prompt;
+        userMessage.Attachments = attachments
+            .OfType<AttachmentFile>()
+            .Select(static attachment => attachment.Path)
+            .ToList();
+        ApplyCurrentComposerSelectionsToMessage(userMessage, selectedReasoningEffort);
+        ApplyCurrentComposerSelectionsToChat(CurrentChat, selectedReasoningEffort);
+
+        // Decide whether the edit changed agent/MCP/skills vs. the pre-edit (session-built) selection
+        // NOW, while the snapshot still exists and before it's cleared below. Comparing against the
+        // snapshot rather than the chat/message is essential: the two Apply* calls above have already
+        // copied the composer selection onto both, so a chat-vs-message comparison would always match.
+        var requiresSessionRebuild = ComposerSelectionDivergesFromSnapshot(_preEditComposerSnapshot);
+
+        _editingUserMessage = null;
+        _preEditComposerSnapshot = null;
+        IsEditingMessage = false;
+        EditingMessageStatusText = string.Empty;
+        PromptText = string.Empty;
+        _chatDrafts.Remove(CurrentChat.Id);
+
+        await ResendFromMessageAsync(userMessage, wasEdited: true, attachments, requiresSessionRebuild);
+    }
+
+    private void ReplacePendingAttachments(IEnumerable<string> paths)
+    {
+        PendingAttachments.Clear();
+        PendingAttachmentItems.Clear();
+
+        foreach (var path in paths.Where(static p => !string.IsNullOrWhiteSpace(p)).Distinct(StringComparer.OrdinalIgnoreCase))
+            AddAttachment(path);
+    }
+
+    private void ReplaceActiveSkillsFromMessage(ChatMessage message, bool syncToChat)
+    {
+        var (skillIds, externalSkillNames) = ResolveSkillSelectionsFromReferences(message.ActiveSkills);
+        ReplaceActiveSkills(skillIds, externalSkillNames, syncToChat);
+    }
+
+    private (List<Guid> SkillIds, List<string> ExternalSkillNames) ResolveSkillSelectionsFromReferences(
+        IEnumerable<SkillReference> skillReferences)
+    {
+        var skillIds = new List<Guid>();
+        var externalSkillNames = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var skillRef in skillReferences)
+        {
+            if (string.IsNullOrWhiteSpace(skillRef.Name) || !seen.Add(skillRef.Name))
+                continue;
+
+            var skill = FindSkillByName(skillRef.Name);
+            if (skill is not null)
+                skillIds.Add(skill.Id);
+            else
+                externalSkillNames.Add(skillRef.Name);
+        }
+
+        return (skillIds, externalSkillNames);
+    }
+
+    private void ReplaceActiveSkills(
+        IEnumerable<Guid> skillIds,
+        IEnumerable<string> externalSkillNames,
+        bool syncToChat)
+    {
+        ActiveSkillIds.Clear();
+        ActiveSkillChips.Clear();
+        _activeExternalSkillNames.Clear();
+
+        foreach (var skillId in skillIds.Distinct())
+        {
+            var skill = _dataStore.Data.Skills.FirstOrDefault(s => s.Id == skillId);
+            if (skill is null)
+                continue;
+
+            ActiveSkillIds.Add(skill.Id);
+            ActiveSkillChips.Add(new StrataComposerChip(skill.Name, skill.IconGlyph));
+        }
+
+        foreach (var name in externalSkillNames.Where(static n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            _activeExternalSkillNames.Add(name);
+            var reference = FindSkillReferenceByName(name);
+            ActiveSkillChips.Add(new StrataComposerChip(reference?.Name ?? name, reference?.Glyph ?? ExternalSkillGlyph));
+        }
+
+        if (syncToChat)
+            SyncActiveSkillsToChat();
+    }
+
+    private void ApplyMessageAgentSelection(ChatMessage message, bool syncToChatAndSession)
+    {
+        if (!message.HasAgentSelection)
+            return;
+
+        ApplyAgentSelection(message.AgentId, message.SdkAgentName, syncToChatAndSession);
+    }
+
+    private void ApplyAgentSelection(
+        Guid? agentId,
+        string? sdkAgentName,
+        bool syncToChatAndSession = true)
+    {
+        _suppressAgentSelectionSideEffects = !syncToChatAndSession;
+        try
+        {
+            if (agentId.HasValue)
+            {
+                var agent = _dataStore.Data.Agents.FirstOrDefault(a => a.Id == agentId.Value);
+                if (agent is not null)
+                {
+                    SelectedSdkAgentName = null;
+                    SetActiveAgent(agent);
+                    return;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(sdkAgentName))
+            {
+                SetActiveAgent(null);
+                SelectedSdkAgentName = sdkAgentName;
+                return;
+            }
+
+            SelectedSdkAgentName = null;
+            SetActiveAgent(null);
+        }
+        finally
+        {
+            _suppressAgentSelectionSideEffects = false;
+        }
+    }
+
+    private void ApplyMessageModelSelection(ChatMessage message)
+    {
+        var model = !string.IsNullOrWhiteSpace(message.Model)
+            ? message.Model
+            : ResolveModelForMessageEdit(message);
+
+        ApplyModelSelection(
+            model,
+            message.ReasoningEffort ?? CurrentChat?.LastReasoningEffortUsed,
+            message.ContextWindowTier ?? CurrentChat?.LastContextWindowTierUsed);
+    }
+
+    private string? ResolveModelForMessageEdit(ChatMessage message)
+    {
+        if (CurrentChat is not { } chat)
+            return SelectedModel;
+
+        var index = chat.Messages.IndexOf(message);
+        if (index >= 0)
+        {
+            for (var i = index + 1; i < chat.Messages.Count; i++)
+            {
+                var next = chat.Messages[i];
+                if (next.Role == "user")
+                    break;
+
+                if (next.Role == "assistant" && !string.IsNullOrWhiteSpace(next.Model))
+                    return next.Model;
+            }
+        }
+
+        return chat.LastModelUsed ?? SelectedModel ?? _dataStore.Data.Settings.PreferredModel;
+    }
+
+    private void ApplyMessageMcpSelection(ChatMessage message, bool syncToChat)
+    {
+        if (!message.HasMcpSelection)
+            return;
+
+        ReplaceActiveMcpSelection(message.ActiveMcpServerNames, syncToChat);
+    }
+
+    private void ReplaceActiveMcpSelection(IEnumerable<string> serverNames, bool syncToChat)
+    {
+        _suppressActiveMcpCollectionSync = true;
+        try
+        {
+            ActiveMcpServerNames.Clear();
+            ActiveMcpChips.Clear();
+
+            foreach (var name in serverNames.Where(static n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                ActiveMcpServerNames.Add(name);
+                ActiveMcpChips.Add(CreateMcpChip(name));
+            }
+        }
+        finally
+        {
+            _suppressActiveMcpCollectionSync = false;
+        }
+
+        if (syncToChat)
+            SyncActiveMcpsToChat();
+    }
+
+    private StrataComposerChip CreateMcpChip(string name)
+        => AvailableMcpChips
+            .OfType<StrataComposerChip>()
+            .FirstOrDefault(chip => chip.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+           ?? new StrataComposerChip(name);
+
+    private void ApplyCurrentComposerSelectionsToMessage(ChatMessage message, string? selectedReasoningEffort)
+    {
+        message.Model = SelectedModel;
+        message.ReasoningEffort = selectedReasoningEffort;
+        message.ContextWindowTier = GetSelectedContextWindowTier();
+        message.AgentId = ActiveAgent?.Id;
+        message.SdkAgentName = SelectedSdkAgentName;
+        message.HasAgentSelection = true;
+        message.ActiveMcpServerNames = new List<string>(ActiveMcpServerNames);
+        message.HasMcpSelection = true;
+        message.ActiveSkills = BuildSkillReferences(ActiveSkillIds, _activeExternalSkillNames);
+    }
+
+    private void ApplyCurrentComposerSelectionsToChat(Chat chat, string? selectedReasoningEffort)
+    {
+        chat.AgentId = ActiveAgent?.Id;
+        chat.SdkAgentName = SelectedSdkAgentName;
+        chat.ActiveSkillIds = new List<Guid>(ActiveSkillIds);
+        chat.ActiveExternalSkillNames = new List<string>(_activeExternalSkillNames);
+        chat.ActiveMcpServerNames = new List<string>(ActiveMcpServerNames);
+        chat.LastModelUsed = SelectedModel;
+        chat.LastReasoningEffortUsed = selectedReasoningEffort;
+        chat.LastContextWindowTierUsed = GetSelectedContextWindowTier();
+        QueueSaveChat(chat, saveIndex: true);
+    }
+
+    private void ApplyMessageSelectionsToChat(Chat chat, ChatMessage message, string? selectedReasoningEffort)
+    {
+        if (message.HasAgentSelection)
+        {
+            chat.AgentId = message.AgentId;
+            chat.SdkAgentName = message.SdkAgentName;
+        }
+
+        var (skillIds, externalSkillNames) = ResolveSkillSelectionsFromReferences(message.ActiveSkills);
+        chat.ActiveSkillIds = skillIds;
+        chat.ActiveExternalSkillNames = externalSkillNames;
+
+        if (message.HasMcpSelection)
+            chat.ActiveMcpServerNames = new List<string>(message.ActiveMcpServerNames);
+
+        if (!string.IsNullOrWhiteSpace(message.Model))
+            chat.LastModelUsed = message.Model;
+        chat.LastReasoningEffortUsed = selectedReasoningEffort;
+        if (!string.IsNullOrWhiteSpace(message.ContextWindowTier))
+            chat.LastContextWindowTierUsed = message.ContextWindowTier;
+        QueueSaveChat(chat, saveIndex: true);
+    }
+
+    private static List<Attachment> BuildUserMessageAttachments(IEnumerable<string> attachmentPaths)
+        => attachmentPaths
+            .Where(static path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(static path => (Attachment)new AttachmentFile
+            {
+                Path = path,
+                DisplayName = Path.GetFileName(path)
+            })
+            .ToList();
+
     [RelayCommand]
     private async Task SendMessage()
     {
+        if (_editingUserMessage is not null)
+        {
+            await SendEditedMessage();
+            return;
+        }
+
         await SendMessageCore(PromptText, consumeComposerPrompt: true);
     }
 
@@ -2574,8 +3109,16 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 Role = "user",
                 Content = prompt,
                 Author = _dataStore.Data.Settings.UserName ?? Loc.Author_You,
+                Model = SelectedModel,
+                ReasoningEffort = selectedReasoningEffort,
+                ContextWindowTier = selectedContextTier,
+                AgentId = ActiveAgent?.Id,
+                SdkAgentName = SelectedSdkAgentName,
+                HasAgentSelection = true,
+                ActiveMcpServerNames = new List<string>(ActiveMcpServerNames),
+                HasMcpSelection = true,
                 Attachments = attachments?.OfType<AttachmentFile>().Select(a => a.Path).ToList() ?? [],
-                ActiveSkills = BuildSkillReferences(ActiveSkillIds)
+                ActiveSkills = BuildSkillReferences(ActiveSkillIds, _activeExternalSkillNames)
             };
             targetChat.Messages.Add(userMsg);
             Messages.Add(new ChatMessageViewModel(userMsg));
@@ -4120,6 +4663,13 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     /// The message content may have been edited before calling this.
     /// </summary>
     public async Task ResendFromMessageAsync(ChatMessage userMessage, bool wasEdited)
+        => await ResendFromMessageAsync(userMessage, wasEdited, attachmentsOverride: null);
+
+    private async Task ResendFromMessageAsync(
+        ChatMessage userMessage,
+        bool wasEdited,
+        List<Attachment>? attachmentsOverride,
+        bool requiresSessionRebuild = false)
     {
         if (CurrentChat is null) return;
 
@@ -4131,6 +4681,20 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (idx < 0) return;
 
         var prompt = userMessage.Content;
+        var attachments = attachmentsOverride ?? BuildUserMessageAttachments(userMessage.Attachments);
+        var selectedReasoningEffort = userMessage.ReasoningEffort ?? GetPersistedReasoningEffortPreference();
+        var selectedContextWindowTier =
+            userMessage.ContextWindowTier ?? GetSelectedContextWindowTier();
+
+        // Whether the edited turn's agent/MCP/skills diverge from what the live session was built with.
+        // The caller (SendEditedMessage) computes this against the pre-edit composer snapshot, because
+        // by now the edited selection has already been copied onto both the chat and the message, so a
+        // local chat-vs-message comparison would always match. When they diverge we must recreate the
+        // session (those settings only apply at create/resume) rather than take the history-rewind
+        // fast-path, otherwise the replacement turn would run with stale agent/MCP/skills.
+        var editRequiresSessionRebuild = wasEdited && requiresSessionRebuild;
+
+        ApplyMessageSelectionsToChat(CurrentChat, userMessage, selectedReasoningEffort);
 
         // Remove the user message and everything after it
         while (CurrentChat.Messages.Count > idx)
@@ -4165,7 +4729,24 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         {
             Role = "user",
             Content = prompt,
-            Author = userMessage.Author
+            Author = userMessage.Author,
+            Model = userMessage.Model,
+            ReasoningEffort = userMessage.ReasoningEffort,
+            ContextWindowTier = userMessage.ContextWindowTier,
+            AgentId = userMessage.AgentId,
+            SdkAgentName = userMessage.SdkAgentName,
+            HasAgentSelection = userMessage.HasAgentSelection,
+            ActiveMcpServerNames = new List<string>(userMessage.ActiveMcpServerNames),
+            HasMcpSelection = userMessage.HasMcpSelection,
+            Attachments = userMessage.Attachments.ToList(),
+            ActiveSkills = userMessage.ActiveSkills
+                .Select(static skill => new SkillReference
+                {
+                    Name = skill.Name,
+                    Glyph = skill.Glyph,
+                    Description = skill.Description
+                })
+                .ToList()
         };
         CurrentChat.Messages.Add(newUserMsg);
         Messages.Add(new ChatMessageViewModel(newUserMsg));
@@ -4196,7 +4777,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         }
 
         MessageOptions? resendOptions = null;
-        var promptAdditions = BuildSendPromptAdditions();
+        var promptAdditions = BuildSendPromptAdditions(consumePendingSkillInjections: false);
         var localUserMessageCount = 0;
         var localAssistantMessageCount = 0;
         try
@@ -4232,7 +4813,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             var cts = new CancellationTokenSource();
 
             var historyRewound = false;
-            if (wasEdited)
+            if (wasEdited && !editRequiresSessionRebuild)
             {
                 historyRewound = await TryRewindEditedHistoryAsync(CurrentChat, retainedContext, cts.Token);
                 if (historyRewound)
@@ -4246,6 +4827,36 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     // Rewind unavailable — recreate the session and replay the retained
                     // transcript as text so no pre-edit server context leaks into the reply.
                     InvalidateCurrentSession();
+                    needsSessionSetup = true;
+                }
+            }
+            else if (wasEdited)
+            {
+                // The edited turn changed agent/MCP/skills, which only apply at session create/resume.
+                // Recreate the session (and replay the retained transcript) so it is rebuilt from the
+                // edited selection now persisted on the chat, instead of reusing a stale session.
+                InvalidateCurrentSession();
+                _pendingSkillInjections.Clear();
+                needsSessionSetup = true;
+            }
+
+            if (historyRewound)
+            {
+                // On the reused (rewound) session, model/effort/context aren't re-applied by session
+                // setup and the begin-edit hydration was side-effect-suppressed. Reconcile them here,
+                // awaited, so the replacement turn runs on the model/effort/context recorded in the
+                // edited ChatMessage. If the reused session can't adopt them (SetModelAsync failed),
+                // recreate + replay so the turn never silently runs on the session's stale model.
+                CancelPendingMidSessionModelSync();
+                var reconciled = await SwitchModelMidSessionAsync(
+                    userMessage.Model,
+                    selectedReasoningEffort,
+                    selectedContextWindowTier);
+                if (!reconciled)
+                {
+                    InvalidateCurrentSession();
+                    historyRewound = false;
+                    shouldReplayPrompt = true;
                     needsSessionSetup = true;
                 }
             }
@@ -4286,6 +4897,18 @@ public partial class ChatViewModel : ObservableObject, IDisposable
             MarkRuntimeActive(runtime, Loc.Status_Thinking);
             ApplyDisplayedRuntimeState(runtime);
 
+            if (WorktreePath is { Length: > 0 } wtPath && attachments.Count > 0)
+            {
+                var projDir = GetProjectWorkingDirectory();
+                // Mirror the normal send path: rebase against the effective worktree working
+                // directory (not the raw worktree root) so subdirectory-rooted projects resolve
+                // attachment paths correctly. Re-save afterwards so the persisted message carries
+                // the corrected paths (the earlier save ran before this rebase).
+                var effectiveWorktreeDir = GitService.ResolveWorktreeWorkingDirectory(wtPath, projDir);
+                RebaseAttachmentPaths(attachments, newUserMsg, projDir, effectiveWorktreeDir);
+                QueueSaveChat(CurrentChat, saveIndex: false);
+            }
+
             // After a successful rewind the edit is a normal fresh turn; only the fallback
             // path replays the retained transcript as text.
             var resendPrompt = BuildResendPrompt(
@@ -4296,6 +4919,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                 promptAdditions);
 
             resendOptions = new MessageOptions { Prompt = resendPrompt };
+            if (attachments.Count > 0)
+                resendOptions.Attachments = attachments;
+
             localUserMessageCount = CurrentChat.Messages.Count(m => m.Role == "user");
             localAssistantMessageCount = CountCompletedAssistantMessages(CurrentChat);
             var expectedSessionUserMessageCount = await CaptureExpectedSessionUserMessageCountAsync(
@@ -4334,6 +4960,9 @@ public partial class ChatViewModel : ObservableObject, IDisposable
                     shouldReplayPrompt: !wasEdited,
                     promptAdditions);
                 resendOptions = new MessageOptions { Prompt = resendPrompt2 };
+                if (attachments.Count > 0)
+                    resendOptions.Attachments = attachments;
+
                 var expectedSessionUserMessageCount = await CaptureExpectedSessionUserMessageCountAsync(
                     _activeSession!,
                     localUserMessageCount,

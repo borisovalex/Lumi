@@ -554,6 +554,13 @@
     <Style Selector="TextBlock.wt-label.inactive">
       <Setter Property="Opacity" Value="0.45" />
     </Style>
+
+    <!-- The turn currently owning the full composer stays visibly connected to it. -->
+    <Style Selector="sc|StrataChatMessage.editing-source /template/ Border#PART_Bubble">
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.AccentDefault}" />
+      <Setter Property="BorderThickness" Value="2" />
+      <Setter Property="BoxShadow" Value="0 0 0 2 #20818CF8" />
+    </Style>
   </UserControl.Styles>
 
   <UserControl.DataTemplates>
@@ -643,11 +650,13 @@
                               MaxWidth="640"
                               Author="{Binding Author}"
                               Timestamp="{Binding TimestampText}"
-                              IsEditable="True"
+                              IsEditable="{Binding IsEditEnabled}"
+                              UseInlineEdit="False"
                               EditText="{Binding Content, Mode=OneWay}"
                               EditCommand="{Binding BeginEditCommand}"
                               EditConfirmedCommand="{Binding ConfirmEditCommand}"
                               RegenerateCommand="{Binding ResendCommand}"
+                              Classes.editing-source="{Binding IsBeingEdited}"
                               Classes.steer-pending="{Binding Source.IsSteerInProgress}">
           <!-- Ghost → solidify transition when a steered message is applied. -->
           <sc:StrataChatMessage.Transitions>
@@ -675,6 +684,23 @@
             </StackPanel>
           </sc:StrataChatMessage.Content>
         </sc:StrataChatMessage>
+
+        <Border Name="EditSourceMarker"
+                IsVisible="{Binding IsBeingEdited}"
+                HorizontalAlignment="Right"
+                Padding="8,3"
+                CornerRadius="999"
+                Background="{DynamicResource Brush.AccentSubtle}">
+          <StackPanel Orientation="Horizontal" Spacing="5">
+            <PathIcon Width="10" Height="10"
+                      Foreground="{DynamicResource Brush.AccentDefault}"
+                      Data="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z" />
+            <TextBlock Text="{loc:Str Chat_EditSourceMarker}"
+                       FontSize="11"
+                       FontWeight="SemiBold"
+                       Foreground="{DynamicResource Brush.AccentDefault}" />
+          </StackPanel>
+        </Border>
 
         <!-- Steering delivery status pill + inline "Send now" action. The pill stays crisp while the
              bubble ghosts, so it's clear when a steered message reaches (and is applied by) the session;
@@ -1817,9 +1843,12 @@
       </Border>
 
       <sc:StrataChatComposer x:Name="Composer"
-                             Placeholder="{loc:Str Chat_Placeholder}"
+                             Placeholder="{Binding ComposerPlaceholder}"
                              PromptText="{Binding PromptText, Mode=TwoWay}"
                              IsBusy="{Binding IsBusy}"
+                             IsEditing="{Binding IsEditingMessage}"
+                             CancelEditCommand="{Binding CancelComposerEditCommand}"
+                             EditingSubmitLabel="{loc:Str Chat_EditSubmit}"
                              IsRecording="{Binding IsRecording}"
                              SendWithEnter="{Binding SendWithEnter}"
                              SendCommand="{Binding SendMessageCommand}"
@@ -1850,6 +1879,51 @@
                              AvailableMcps="{Binding AvailableMcpChips}"
                              AvailableProjects="{Binding AvailableProjectChips}"
                              AvailableFiles="{Binding AvailableFileSuggestions}">
+        <sc:StrataChatComposer.StatusContent>
+          <Grid ColumnDefinitions="Auto,*"
+                MinWidth="0"
+                IsVisible="{Binding IsEditingMessage}"
+                Margin="2,4,2,2">
+            <Border Grid.Column="0"
+                    Width="28" Height="28"
+                    Margin="0,1,8,0"
+                    CornerRadius="8"
+                    Background="{DynamicResource Brush.AccentSubtle}">
+              <PathIcon Width="13" Height="13"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Foreground="{DynamicResource Brush.AccentDefault}"
+                        Data="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1.003 1.003 0 0 0 0-1.42l-2.34-2.34a1.003 1.003 0 0 0-1.42 0l-1.83 1.83 3.75 3.75 1.84-1.82z" />
+            </Border>
+            <StackPanel Grid.Column="1" MinWidth="0" Spacing="6">
+              <TextBlock Text="{loc:Str Chat_EditTitle}"
+                         FontSize="12"
+                         FontWeight="SemiBold"
+                         Foreground="{DynamicResource Brush.TextPrimary}" />
+              <TextBlock Text="{Binding EditingMessageStatusText}"
+                         MinWidth="0"
+                         FontSize="11"
+                         Foreground="{DynamicResource Brush.TextSecondary}"
+                         TextWrapping="Wrap" />
+              <WrapPanel Orientation="Horizontal">
+                <Button Content="{loc:Str Chat_EditSubmit}"
+                        Classes="accent"
+                        Command="{Binding SendMessageCommand}"
+                        Margin="0,0,6,0"
+                        Padding="10,5"
+                        MinHeight="0"
+                        FontSize="11.5"
+                        FontWeight="SemiBold" />
+                <Button Content="{loc:Str Common_Cancel}"
+                        Classes="subtle"
+                        Command="{Binding CancelComposerEditCommand}"
+                        Padding="10,5"
+                        MinHeight="0"
+                        FontSize="11.5" />
+              </WrapPanel>
+            </StackPanel>
+          </Grid>
+        </sc:StrataChatComposer.StatusContent>
         <sc:StrataChatComposer.ModelItemTemplate>
           <DataTemplate>
             <TextBlock Text="{Binding Converter={StaticResource ModelDisplayConverter}}" />
