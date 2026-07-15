@@ -221,6 +221,7 @@ public sealed partial class BrowserService : IAsyncDisposable
                 webView.SourceChanged -= OnSourceChanged;
                 webView.NewWindowRequested -= OnNewWindowRequested;
                 webView.DownloadStarting -= OnDownloadStarting;
+                webView.ScriptDialogOpening -= OnScriptDialogOpening;
             }
         }
         catch (Exception ex) when (IsWebViewInvalidState(ex))
@@ -299,11 +300,15 @@ public sealed partial class BrowserService : IAsyncDisposable
 
             // Configure settings
             webView.Settings.IsScriptEnabled = true;
-            webView.Settings.AreDefaultScriptDialogsEnabled = true;
+            // Native WebView2 dialogs disable the owner HWND. If the browser is hidden while one
+            // is open, WebView2 hides the dialog but can leave Lumi disabled indefinitely.
+            webView.Settings.AreDefaultScriptDialogsEnabled = false;
             webView.Settings.IsWebMessageEnabled = true;
             webView.Settings.AreDevToolsEnabled = false;
             webView.Settings.IsStatusBarEnabled = false;
             webView.Settings.AreDefaultContextMenusEnabled = true;
+
+            webView.ScriptDialogOpening += OnScriptDialogOpening;
 
             // Track navigation completion
             webView.NavigationCompleted += OnNavigationCompleted;
@@ -329,6 +334,19 @@ public sealed partial class BrowserService : IAsyncDisposable
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
         _navigationTcs?.TrySetResult(e.IsSuccess);
+    }
+
+    internal static bool ShouldAcceptScriptDialog(CoreWebView2ScriptDialogKind kind)
+        => kind == CoreWebView2ScriptDialogKind.Beforeunload;
+
+    private static void OnScriptDialogOpening(
+        object? sender,
+        CoreWebView2ScriptDialogOpeningEventArgs e)
+    {
+        // Alerts dismiss when the handler returns; confirm and prompt safely default to cancel.
+        // An initiated navigation must accept beforeunload so it cannot strand a hidden modal.
+        if (ShouldAcceptScriptDialog(e.Kind))
+            e.Accept();
     }
 
     private void OnSourceChanged(object? sender, CoreWebView2SourceChangedEventArgs e)

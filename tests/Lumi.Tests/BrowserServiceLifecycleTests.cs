@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Lumi.Services;
+using Microsoft.Web.WebView2.Core;
 using Xunit;
 
 namespace Lumi.Tests;
@@ -28,6 +29,18 @@ public sealed class BrowserServiceLifecycleTests
             new COMException("Access denied.", unchecked((int)0x80070005)));
 
         Assert.False(BrowserService.IsWebViewInvalidState(exception));
+    }
+
+    [Theory]
+    [InlineData(CoreWebView2ScriptDialogKind.Alert, false)]
+    [InlineData(CoreWebView2ScriptDialogKind.Confirm, false)]
+    [InlineData(CoreWebView2ScriptDialogKind.Prompt, false)]
+    [InlineData(CoreWebView2ScriptDialogKind.Beforeunload, true)]
+    public void ScriptDialogPolicyOnlyAcceptsBeforeUnload(
+        CoreWebView2ScriptDialogKind kind,
+        bool expected)
+    {
+        Assert.Equal(expected, BrowserService.ShouldAcceptScriptDialog(kind));
     }
 
     [Fact]
