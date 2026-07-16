@@ -36,6 +36,169 @@ public sealed class McpProxyRuntimeTests
         Assert.Equal(expected, McpStdioServerConnection.IsRecoverableSessionLossResponse(response));
     }
 
+    [Theory]
+    [InlineData(-32000, true)]
+    [InlineData(-32001, true)]
+    [InlineData(-32099, true)]
+    [InlineData(-31999, false)]
+    [InlineData(-32100, false)]
+    [InlineData(-32600, false)]
+    [InlineData(-32603, false)]
+    public void InitializeRetryClassifierRecognizesImplementationDefinedServerErrors(int code, bool expected)
+    {
+        var response = JsonSerializer.SerializeToElement(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            error = new { code, message = "Initialization failed" }
+        });
+
+        Assert.Equal(expected, McpStdioServerConnection.IsRetryableInitializeErrorResponse(response));
+    }
+
+    [SkippableFact]
+    public async Task Proxy_RetriesTransientServerErrorDuringInitialHandshake()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");
+
+        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-proxy-initialize-retry-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var scriptPath = Path.Combine(root, "fake-mcp.ps1");
+            var logPath = Path.Combine(root, "starts.log");
+            var initializeCallsPath = Path.Combine(root, "initialize-calls.log");
+            await File.WriteAllTextAsync(scriptPath, """
+                [System.IO.File]::AppendAllText($env:MCP_TEST_LOG, "$PID`n")
+                function Write-Json($obj) {
+                    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 30))
+                    [Console]::Out.Flush()
+                }
+                while ($null -ne ($line = [Console]::In.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $msg = $line | ConvertFrom-Json
+                    if ($msg.method -eq "initialize") {
+                        [System.IO.File]::AppendAllText($env:MCP_INITIALIZE_CALLS, "$($msg.params.clientInfo.name)`n")
+                        $callNumber = [System.IO.File]::ReadAllLines($env:MCP_INITIALIZE_CALLS).Length
+                        if ($callNumber -eq 1) {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; error = @{ code = -32001; message = "Remote connection error: error sending request for url" } }
+                        } else {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ protocolVersion = "2025-06-18"; capabilities = @{ tools = @{ listChanged = $false } }; serverInfo = @{ name = "initialize-retry-test-mcp"; version = "1" } } }
+                        }
+                    } elseif ($msg.method -eq "tools/list") {
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ tools = @(@{ name = "retry_tool"; description = "Retry tool"; inputSchema = @{ type = "object"; properties = @{} } }) } }
+                    }
+                }
+                """);
+
+            await using var runtime = new McpProxyRuntime();
+            var remote = runtime.Register(new McpProxyServerDefinition(
+                "test:initialize-retry",
+                "initialize-retry-test",
+                new McpStdioServerConfig
+                {
+                    Command = GetPowerShellPath(),
+                    Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                    WorkingDirectory = root,
+                    Env = new Dictionary<string, string>
+                    {
+                        ["MCP_TEST_LOG"] = logPath,
+                        ["MCP_INITIALIZE_CALLS"] = initializeCallsPath
+                    },
+                    Tools = ["*"]
+                }));
+
+            using var http = new HttpClient();
+            using var initialize = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"init","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"custom-client","version":"1"}}}
+                """);
+            Assert.True(initialize.RootElement.TryGetProperty("result", out _));
+
+            using var list = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"list","method":"tools/list","params":{}}
+                """);
+            Assert.Equal("retry_tool", list.RootElement.GetProperty("result").GetProperty("tools")[0].GetProperty("name").GetString());
+            Assert.Single(await File.ReadAllLinesAsync(logPath));
+            Assert.Equal(["custom-client", "custom-client"], await File.ReadAllLinesAsync(initializeCallsPath));
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
+    }
+
+    [SkippableFact]
+    public async Task Proxy_RetiresProcessWhenInitialHandshakeFails()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");
+
+        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-proxy-initialized-notification-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var scriptPath = Path.Combine(root, "fake-mcp.ps1");
+            var logPath = Path.Combine(root, "starts.log");
+            await File.WriteAllTextAsync(scriptPath, """
+                [System.IO.File]::AppendAllText($env:MCP_TEST_LOG, "$PID`n")
+                $startNumber = [System.IO.File]::ReadAllLines($env:MCP_TEST_LOG).Length
+                function Write-Json($obj) {
+                    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 30))
+                    [Console]::Out.Flush()
+                }
+                while ($null -ne ($line = [Console]::In.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $msg = $line | ConvertFrom-Json
+                    if ($msg.method -eq "initialize") {
+                        if ($startNumber -eq 1) {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; error = @{ code = -32000; message = "Persistent initialization failure" } }
+                        } else {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ protocolVersion = "2025-06-18"; capabilities = @{ tools = @{ listChanged = $false } }; serverInfo = @{ name = "initialized-notification-test-mcp"; version = "1" } } }
+                        }
+                    }
+                }
+                """);
+
+            await using var runtime = new McpProxyRuntime();
+            var remote = runtime.Register(new McpProxyServerDefinition(
+                "test:initialized-notification",
+                "initialized-notification-test",
+                new McpStdioServerConfig
+                {
+                    Command = GetPowerShellPath(),
+                    Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                    WorkingDirectory = root,
+                    Env = new Dictionary<string, string>
+                    {
+                        ["MCP_TEST_LOG"] = logPath
+                    },
+                    Tools = ["*"]
+                }));
+
+            using var http = new HttpClient();
+            using var failed = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"failed","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}
+                """);
+            Assert.Equal(-32000, failed.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+
+            var failedProcessId = int.Parse(
+                Assert.Single(await File.ReadAllLinesAsync(logPath)),
+                System.Globalization.CultureInfo.InvariantCulture);
+            await WaitForProcessExitAsync(failedProcessId);
+
+            using var recovered = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"recovered","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}
+                """);
+            Assert.True(recovered.RootElement.TryGetProperty("result", out _));
+            Assert.Equal(2, (await File.ReadAllLinesAsync(logPath)).Length);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
+    }
+
     [SkippableFact]
     public async Task Proxy_StartsStdioServerLazilyAndReusesSingletonProcess()
     {
@@ -413,6 +576,82 @@ public sealed class McpProxyRuntimeTests
             var starts = await File.ReadAllLinesAsync(logPath);
             Assert.Equal(2, starts.Length);
             Assert.NotEqual(starts[0], starts[1]);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
+    }
+
+    [SkippableFact]
+    public async Task Proxy_RetriesTransientServerErrorWhileReinitializingExpiredSession()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");
+
+        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-proxy-recovery-initialize-retry-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var scriptPath = Path.Combine(root, "fake-mcp.ps1");
+            var logPath = Path.Combine(root, "starts.log");
+            var initializeCallsPath = Path.Combine(root, "initialize-calls.log");
+            var expiredOncePath = Path.Combine(root, "expired-once.flag");
+            await File.WriteAllTextAsync(scriptPath, """
+                [System.IO.File]::AppendAllText($env:MCP_TEST_LOG, "$PID`n")
+                $startNumber = [System.IO.File]::ReadAllLines($env:MCP_TEST_LOG).Length
+                function Write-Json($obj) {
+                    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 30))
+                    [Console]::Out.Flush()
+                }
+                while ($null -ne ($line = [Console]::In.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $msg = $line | ConvertFrom-Json
+                    if ($msg.method -eq "initialize") {
+                        [System.IO.File]::AppendAllText($env:MCP_INITIALIZE_CALLS, "$startNumber`n")
+                        $processInitializeCount = ([System.IO.File]::ReadAllLines($env:MCP_INITIALIZE_CALLS) | Where-Object { $_ -eq [string]$startNumber }).Count
+                        if ($startNumber -eq 2 -and $processInitializeCount -eq 1) {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; error = @{ code = -32001; message = "Remote connection error: error sending request for url" } }
+                        } else {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ protocolVersion = "2025-06-18"; capabilities = @{ tools = @{ listChanged = $false } }; serverInfo = @{ name = "recovery-initialize-retry-test-mcp"; version = "1" } } }
+                        }
+                    } elseif ($msg.method -eq "tools/list") {
+                        if (-not [System.IO.File]::Exists($env:MCP_EXPIRED_ONCE)) {
+                            [System.IO.File]::WriteAllText($env:MCP_EXPIRED_ONCE, "expired")
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; error = @{ code = -32001; message = "Session not found" } }
+                        } else {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ tools = @(@{ name = "recovered_tool"; description = "Recovered tool"; inputSchema = @{ type = "object"; properties = @{} } }) } }
+                        }
+                    }
+                }
+                """);
+
+            await using var runtime = new McpProxyRuntime();
+            var remote = runtime.Register(new McpProxyServerDefinition(
+                "test:recovery-initialize-retry",
+                "recovery-initialize-retry-test",
+                new McpStdioServerConfig
+                {
+                    Command = GetPowerShellPath(),
+                    Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                    WorkingDirectory = root,
+                    Env = new Dictionary<string, string>
+                    {
+                        ["MCP_TEST_LOG"] = logPath,
+                        ["MCP_INITIALIZE_CALLS"] = initializeCallsPath,
+                        ["MCP_EXPIRED_ONCE"] = expiredOncePath
+                    },
+                    Tools = ["*"]
+                }));
+
+            using var http = new HttpClient();
+            using var list = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"list","method":"tools/list","params":{}}
+                """);
+
+            Assert.Equal("recovered_tool", list.RootElement.GetProperty("result").GetProperty("tools")[0].GetProperty("name").GetString());
+            Assert.Equal(2, (await File.ReadAllLinesAsync(logPath)).Length);
+            Assert.Equal(["1", "2", "2"], await File.ReadAllLinesAsync(initializeCallsPath));
         }
         finally
         {

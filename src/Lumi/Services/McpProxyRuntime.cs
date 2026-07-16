@@ -461,6 +461,7 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
     private const int DiagnosticLineLimit = 8;
     private const int DiagnosticLineMaxLength = 500;
     private const int DiagnosticTextMaxLength = 2_000;
+    private const int InitializeRetryLimit = 1;
     private const int SessionRecoveryRetryLimit = 1;
     private static readonly Regex SensitiveDiagnosticPattern = new(
         @"(?i)(authorization|token|api[_-]?key|secret|password)(\s*[=:]\s*)([^\s,;]+)",
@@ -649,15 +650,63 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
             ResetStoppedProcess();
 
         StartProcess();
-        var initParams = clientParams ?? _initializeParams ?? JsonRpc.DefaultInitializeParams();
-        var initResponse = await SendRequestAsync("initialize", initParams, cancellationToken).ConfigureAwait(false);
-        if (!initResponse.TryGetProperty("result", out var result))
-            throw new InvalidOperationException($"MCP server '{_definition.Name}' did not return an initialize result.");
+        try
+        {
+            var initParams = clientParams ?? _initializeParams ?? JsonRpc.DefaultInitializeParams();
+            var initializedResult = await SendInitializeWithRetryAsync(initParams, cancellationToken).ConfigureAwait(false);
+            await SendNotificationAsync("notifications/initialized", null, cancellationToken).ConfigureAwait(false);
+            _initializeParams = initParams.Clone();
+            _initializeResult = initializedResult;
+            return initializedResult;
+        }
+        catch
+        {
+            RetireProcessAfterFailedInitialization();
+            throw;
+        }
+    }
 
-        _initializeParams = initParams.Clone();
-        _initializeResult = result.Clone();
-        await SendNotificationAsync("notifications/initialized", null, cancellationToken).ConfigureAwait(false);
-        return _initializeResult.Value;
+    private async Task<JsonElement> SendInitializeWithRetryAsync(
+        JsonElement initParams,
+        CancellationToken cancellationToken)
+    {
+        JsonElement initResponse;
+        for (var attempt = 0; ; attempt++)
+        {
+            initResponse = await SendRequestAsync("initialize", initParams, cancellationToken).ConfigureAwait(false);
+            if (initResponse.TryGetProperty("result", out _))
+                break;
+
+            if (attempt >= InitializeRetryLimit || !IsRetryableInitializeErrorResponse(initResponse))
+                throw new InvalidOperationException(BuildInitializeErrorMessage(initResponse));
+
+            Trace.TraceWarning(
+                "MCP server '{0}' returned a transient server error during initialization; retrying once.",
+                _definition.Name);
+        }
+
+        return initResponse.GetProperty("result").Clone();
+    }
+
+    internal static bool IsRetryableInitializeErrorResponse(JsonElement response)
+        => response.TryGetProperty("error", out var error)
+            && error.ValueKind == JsonValueKind.Object
+            && error.TryGetProperty("code", out var code)
+            && code.TryGetInt32(out var errorCode)
+            && errorCode is <= -32_000 and >= -32_099;
+
+    private string BuildInitializeErrorMessage(JsonElement response)
+    {
+        if (response.TryGetProperty("error", out var error)
+            && error.ValueKind == JsonValueKind.Object
+            && error.TryGetProperty("message", out var message)
+            && message.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(message.GetString()))
+        {
+            return $"MCP server '{_definition.Name}' failed to initialize: {message.GetString()!.Trim()}";
+        }
+
+        return $"MCP server '{_definition.Name}' did not return an initialize result.";
     }
 
     private async Task RecoverExpiredServerSessionAsync(int observedGeneration, CancellationToken cancellationToken)
@@ -689,11 +738,7 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
                 StartProcess();
 
                 var initParams = _initializeParams ?? JsonRpc.DefaultInitializeParams();
-                var initResponse = await SendRequestAsync("initialize", initParams, cancellationToken).ConfigureAwait(false);
-                if (!initResponse.TryGetProperty("result", out var result))
-                    throw new InvalidOperationException($"MCP server '{_definition.Name}' did not return an initialize result after its session expired.");
-
-                var initializedResult = result.Clone();
+                var initializedResult = await SendInitializeWithRetryAsync(initParams, cancellationToken).ConfigureAwait(false);
                 await SendNotificationAsync("notifications/initialized", null, cancellationToken).ConfigureAwait(false);
                 _initializeResult = initializedResult;
                 _sessionRecoveryOutcomes[observedGeneration] = null;
@@ -727,8 +772,23 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
 
     private void RestartProcessForExpiredSession()
     {
-        var process = _process;
         var retiredGeneration = Volatile.Read(ref _processGeneration);
+        RetireCurrentProcess(
+            retiredGeneration,
+            new McpServerSessionRetiredException(_definition.Name, retiredGeneration));
+    }
+
+    private void RetireProcessAfterFailedInitialization()
+    {
+        var retiredGeneration = Volatile.Read(ref _processGeneration);
+        RetireCurrentProcess(
+            retiredGeneration,
+            new IOException($"MCP server '{_definition.Name}' initialization failed."));
+    }
+
+    private void RetireCurrentProcess(int retiredGeneration, Exception pendingError)
+    {
+        var process = _process;
         var oldIoCts = _ioCts;
         var oldStdoutTask = _stdoutTask;
         var oldStderrTask = _stderrTask;
@@ -739,9 +799,7 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
         _stderrTask = null;
         _initializeResult = null;
         _ioCts = new CancellationTokenSource();
-        CompletePendingWithErrorForGeneration(
-            retiredGeneration,
-            new McpServerSessionRetiredException(_definition.Name, retiredGeneration));
+        CompletePendingWithErrorForGeneration(retiredGeneration, pendingError);
 
         oldIoCts.Cancel();
         if (process is not null)
