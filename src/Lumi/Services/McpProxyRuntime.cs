@@ -544,11 +544,11 @@ internal sealed class McpStdioServerConnection : IAsyncDisposable
                 try
                 {
                     var (response, processGeneration) = await ForwardRequestAsync(message, cancellationToken).ConfigureAwait(false);
-                    if (!IsRecoverableSessionLossResponse(response) || attempt >= SessionRecoveryRetryLimit)
+                    if (!IsRecoverableSessionLossResponse(response))
                         return JsonRpc.ReplaceId(response, clientId);
 
                     await RecoverExpiredServerSessionAsync(processGeneration, cancellationToken).ConfigureAwait(false);
-                    if (!canRetryAfterInterruption)
+                    if (!canRetryAfterInterruption || attempt >= SessionRecoveryRetryLimit)
                         return JsonRpc.ReplaceId(response, clientId);
                 }
                 catch (McpServerSessionRetiredException ex)

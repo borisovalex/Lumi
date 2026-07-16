@@ -585,6 +585,76 @@ public sealed class McpProxyRuntimeTests
     }
 
     [SkippableFact]
+    public async Task Proxy_RecoversExpiredSessionAfterReplayLimitIsReached()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");
+
+        var root = Path.Combine(Path.GetTempPath(), "lumi-mcp-proxy-replay-limit-recovery-test-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var scriptPath = Path.Combine(root, "fake-mcp.ps1");
+            var logPath = Path.Combine(root, "starts.log");
+            await File.WriteAllTextAsync(scriptPath, """
+                [System.IO.File]::AppendAllText($env:MCP_TEST_LOG, "$PID`n")
+                $startNumber = [System.IO.File]::ReadAllLines($env:MCP_TEST_LOG).Length
+                function Write-Json($obj) {
+                    [Console]::Out.WriteLine(($obj | ConvertTo-Json -Compress -Depth 30))
+                    [Console]::Out.Flush()
+                }
+                while ($null -ne ($line = [Console]::In.ReadLine())) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    $msg = $line | ConvertFrom-Json
+                    if ($msg.method -eq "initialize") {
+                        Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ protocolVersion = "2025-06-18"; capabilities = @{ tools = @{ listChanged = $false } }; serverInfo = @{ name = "replay-limit-recovery-test-mcp"; version = "1" } } }
+                    } elseif ($msg.method -eq "tools/list") {
+                        if ($startNumber -le 2) {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; error = @{ code = -32001; message = "Session not found" } }
+                        } else {
+                            Write-Json @{ jsonrpc = "2.0"; id = $msg.id; result = @{ tools = @(@{ name = "healthy_tool"; description = "Healthy tool"; inputSchema = @{ type = "object"; properties = @{} } }) } }
+                        }
+                    }
+                }
+                """);
+
+            await using var runtime = new McpProxyRuntime();
+            var remote = runtime.Register(new McpProxyServerDefinition(
+                "test:replay-limit-recovery",
+                "replay-limit-recovery-test",
+                new McpStdioServerConfig
+                {
+                    Command = GetPowerShellPath(),
+                    Args = ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
+                    WorkingDirectory = root,
+                    Env = new Dictionary<string, string>
+                    {
+                        ["MCP_TEST_LOG"] = logPath
+                    },
+                    Tools = ["*"]
+                }));
+
+            using var http = new HttpClient();
+            using var exhausted = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"exhausted","method":"tools/list","params":{}}
+                """);
+            Assert.Equal("exhausted", exhausted.RootElement.GetProperty("id").GetString());
+            Assert.Equal(-32001, exhausted.RootElement.GetProperty("error").GetProperty("code").GetInt32());
+            Assert.Equal(3, (await File.ReadAllLinesAsync(logPath)).Length);
+
+            using var healthy = await PostJsonAsync(http, remote.Url, """
+                {"jsonrpc":"2.0","id":"healthy","method":"tools/list","params":{}}
+                """);
+            Assert.Equal("healthy_tool", healthy.RootElement.GetProperty("result").GetProperty("tools")[0].GetProperty("name").GetString());
+            Assert.Equal(3, (await File.ReadAllLinesAsync(logPath)).Length);
+        }
+        finally
+        {
+            try { Directory.Delete(root, recursive: true); }
+            catch { }
+        }
+    }
+
+    [SkippableFact]
     public async Task Proxy_RetriesTransientServerErrorWhileReinitializingExpiredSession()
     {
         Skip.IfNot(OperatingSystem.IsWindows(), "PowerShell fake MCP server is Windows-only.");
