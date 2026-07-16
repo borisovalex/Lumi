@@ -89,6 +89,7 @@ internal static class AppDataSnapshotFactory
                     IsLearningAgent = a.IsLearningAgent,
                     SkillIds = [..a.SkillIds],
                     ToolNames = [..a.ToolNames],
+                    HasExplicitToolSelection = a.HasExplicitToolSelection,
                     McpServerIds = [..a.McpServerIds],
                     CreatedAt = a.CreatedAt
                 })

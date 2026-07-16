@@ -1197,6 +1197,7 @@ public sealed class LumiFeatureManager
         if (!mcpIdsResult.Success)
             return Failure(mcpIdsResult.Error!);
 
+        var normalizedToolNames = NormalizeList(toolNames);
         var agent = new LumiAgent
         {
             Name = normalizedName,
@@ -1204,7 +1205,8 @@ public sealed class LumiFeatureManager
             SystemPrompt = NormalizeOrNull(systemPrompt) ?? "",
             IconGlyph = NormalizeOrNull(iconGlyph) ?? "✦",
             SkillIds = skillIdsResult.Items!,
-            ToolNames = NormalizeList(toolNames),
+            ToolNames = normalizedToolNames,
+            HasExplicitToolSelection = normalizedToolNames.Count > 0,
             McpServerIds = mcpIdsResult.Items!
         };
 
@@ -1264,7 +1266,10 @@ public sealed class LumiFeatureManager
         }
 
         if (toolNames is not null)
+        {
             agent.ToolNames = NormalizeList(toolNames);
+            agent.HasExplicitToolSelection = agent.ToolNames.Count > 0;
+        }
 
         if (mcpServerIdentifiers is not null)
         {
@@ -1663,9 +1668,13 @@ public sealed class LumiFeatureManager
     {
         var linkedSkills = ResolveNames(agent.SkillIds, _dataStore.Data.Skills, static skill => skill.Id, static skill => skill.Name);
         var linkedMcps = ResolveNames(agent.McpServerIds, _dataStore.Data.McpServers, static server => server.Id, static server => server.Name);
-        var tools = agent.ToolNames.Count == 0 ? "all tools" : string.Join(", ", agent.ToolNames);
+        var tools = !agent.HasToolRestrictions
+            ? "all Lumi tools"
+            : agent.ToolNames.Count == 0
+                ? "no Lumi tools"
+                : string.Join(", ", agent.ToolNames);
         var builtIn = agent.IsBuiltIn ? "built-in" : "custom";
-        return $"- {agent.Id} | {agent.IconGlyph} {agent.Name} | {builtIn} | skills: {linkedSkills} | MCPs: {linkedMcps} | tools: {tools} | {Preview(agent.Description)}";
+        return $"- {agent.Id} | {agent.IconGlyph} {agent.Name} | {builtIn} | skills: {linkedSkills} | MCPs: {linkedMcps} | Lumi tools: {tools} | {Preview(agent.Description)}";
     }
 
     private static string DescribeMcp(McpServer server)

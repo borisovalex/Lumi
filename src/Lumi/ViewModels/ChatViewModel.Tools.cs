@@ -26,18 +26,16 @@ public partial class ChatViewModel
         var seenNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var agent in _dataStore.Data.Agents)
         {
-            var agentConfig = new CustomAgentConfig
+            // CustomAgentConfig.Tools is an SDK-wide allowlist when the agent is active, so setting
+            // it would also remove Copilot built-ins such as apply_patch. Lumi tool selection is
+            // applied only to the custom AIFunctions injected into the session below.
+            agents.Add(new CustomAgentConfig
             {
                 Name = agent.Name,
                 DisplayName = agent.Name,
                 Description = agent.Description,
                 Prompt = agent.SystemPrompt,
-            };
-
-            if (agent.ToolNames.Count > 0)
-                agentConfig.Tools = [.. ToolDisplayHelper.ToRuntimeToolNames(agent.ToolNames)];
-
-            agents.Add(agentConfig);
+            });
             seenNames.Add(agent.Name);
         }
 
@@ -67,18 +65,9 @@ public partial class ChatViewModel
         return agents;
     }
 
-    private static readonly HashSet<string> CodingToolNames = ["code_review", "generate_tests", "explain_code", "analyze_project"];
-    private static readonly HashSet<string> BrowserToolNames =
-    [
-        ToolDisplayHelper.BrowserOpenToolName,
-        ToolDisplayHelper.BrowserLookToolName,
-        ToolDisplayHelper.BrowserFindToolName,
-        ToolDisplayHelper.BrowserDoToolName,
-        ToolDisplayHelper.BrowserJsToolName
-    ];
-    private static readonly HashSet<string> UIToolNames = ["ui_list_windows", "ui_inspect", "ui_find", "ui_click", "ui_type", "ui_press_keys", "ui_read"];
     private LumiFeatureManager? _lumiFeatureManager;
     private readonly HashSet<Guid> _pendingSessionInvalidations = [];
+    private readonly HashSet<Guid> _pendingSessionReconfigurations = [];
     private LumiFeatureManager FeatureManager => _lumiFeatureManager ??= new LumiFeatureManager(_dataStore);
 
     /// <summary>
@@ -105,16 +94,6 @@ public partial class ChatViewModel
         return CancellationToken.None;
     }
 
-    private bool ActiveAgentAllows(HashSet<string> toolGroup)
-        => AgentAllows(ActiveAgent, toolGroup);
-
-    private static bool AgentAllows(LumiAgent? agent, HashSet<string> toolGroup)
-    {
-        // No active agent or no restrictions → allow everything
-        if (agent is not { ToolNames.Count: > 0 }) return true;
-        return ToolDisplayHelper.ToRuntimeToolNames(agent.ToolNames).Any(toolGroup.Contains);
-    }
-
     private List<AIFunction> BuildCustomTools(
         Guid chatId,
         LumiAgent? activeAgent,
@@ -127,13 +106,18 @@ public partial class ChatViewModel
         tools.Add(BuildAskQuestionTool(chatId));
         tools.AddRange(BuildLumiManagementTools(chatId));
         tools.AddRange(BuildWebTools());
-        if (AgentAllows(activeAgent, BrowserToolNames))
-            tools.AddRange(BuildBrowserTools(chatId));
-        if (AgentAllows(activeAgent, CodingToolNames))
-            tools.AddRange(_codingToolService.BuildCodingTools());
-        if (OperatingSystem.IsWindows() && AgentAllows(activeAgent, UIToolNames))
+        tools.AddRange(BuildBrowserTools(chatId));
+        tools.AddRange(_codingToolService.BuildCodingTools());
+        if (OperatingSystem.IsWindows())
             tools.AddRange(BuildUIAutomationTools());
-        return tools;
+
+        if (activeAgent is not { HasToolRestrictions: true })
+            return tools;
+
+        var allowedToolNames = new HashSet<string>(
+            ToolDisplayHelper.ToRuntimeToolNames(activeAgent.ToolNames),
+            StringComparer.Ordinal);
+        return tools.Where(tool => allowedToolNames.Contains(tool.Name)).ToList();
     }
 
     private Dictionary<string, McpServerConfig> BuildMcpServers(
@@ -683,7 +667,7 @@ public partial class ChatViewModel
                     [Description("System prompt for the Lumi agent.")] string? systemPrompt = null,
                     [Description("Optional icon glyph, e.g. ✦ or 📋.")] string? iconGlyph = null,
                     [Description("Skill names or IDs to link to the Lumi. Pass an empty array to clear linked skills on update.")] string[]? skillIdentifiers = null,
-                    [Description("Tool names to restrict the Lumi to. Pass an empty array to allow all tools.")] string[]? toolNames = null,
+                    [Description("Lumi tool names to inject for this agent. Copilot built-in tools always remain available. Pass an empty array to allow all Lumi tools.")] string[]? toolNames = null,
                     [Description("MCP server names or IDs to link to the Lumi. Pass an empty array to clear linked MCP servers on update.")] string[]? mcpServerIdentifiers = null,
                     [Description("Optional text query for list filtering.")] string? query = null) =>
                 {

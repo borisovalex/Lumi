@@ -1820,6 +1820,8 @@ internal sealed class LumiDebugBridge : IAsyncDisposable
             systemPromptLength = agent.SystemPrompt.Length,
             skillIds = agent.SkillIds,
             toolNames = agent.ToolNames,
+            agent.HasExplicitToolSelection,
+            agent.HasToolRestrictions,
             mcpServerIds = agent.McpServerIds,
             agent.IsBuiltIn,
             agent.IsLearningAgent,

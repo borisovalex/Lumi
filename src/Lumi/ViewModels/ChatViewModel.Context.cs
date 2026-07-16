@@ -14,12 +14,13 @@ namespace Lumi.ViewModels;
 /// </summary>
 public partial class ChatViewModel
 {
-    /// <summary>Whether the agent can still be changed. Always true — agents can now be switched mid-chat via SDK routing.</summary>
+    /// <summary>Whether the agent can still be changed.</summary>
     public bool CanChangeAgent => true;
 
     public void SetActiveAgent(LumiAgent? agent)
     {
         var previousAgent = ActiveAgent;
+        var changed = previousAgent?.Id != agent?.Id;
         ActiveAgent = agent;
         if (_suppressAgentSelectionSideEffects || IsEditingMessage)
             return;
@@ -30,17 +31,10 @@ public partial class ChatViewModel
             QueueSaveChat(CurrentChat, saveIndex: true);
         }
 
-        // If we have an active session, route through the SDK Agent API
-        if (_activeSession is not null)
-        {
-            if (agent is not null)
-                _ = SelectAgentOnSessionAsync(agent.Name);
-            else if (previousAgent is not null)
-                _ = DeselectAgentOnSessionAsync();
-        }
+        if (changed)
+            InvalidateAgentSession();
     }
 
-    /// <summary>Calls session.Rpc.Agent.SelectAsync to route turns through the specified custom agent.</summary>
     private async Task SelectAgentOnSessionAsync(string agentName)
     {
         if (_activeSession is null) return;
@@ -48,10 +42,9 @@ public partial class ChatViewModel
         {
             await _activeSession.Rpc.Agent.SelectAsync(agentName);
         }
-        catch { /* best effort — agent was still set locally via system prompt */ }
+        catch { /* best effort */ }
     }
 
-    /// <summary>Calls session.Rpc.Agent.DeselectAsync to return the session to default routing.</summary>
     private async Task DeselectAgentOnSessionAsync()
     {
         if (_activeSession is null) return;

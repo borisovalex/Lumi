@@ -120,7 +120,6 @@ public partial class AgentsViewModel : ObservableObject
 
     private static readonly (string Name, string DisplayName, string Group, string Description)[] KnownTools =
     [
-        ("web_search", "Web Search", "Web", "Search the web for information (SDK built-in, Bing-powered)."),
         ("lumi_fetch", "Fetch Webpage", "Web", "Fetch a webpage and return its text content."),
         (ToolDisplayHelper.BrowserOpenToolName, "Open Browser", "Browser", "Open a URL in the browser with persistent cookies/sessions."),
         (ToolDisplayHelper.BrowserLookToolName, "Browser Look", "Browser", "Get the current page state with interactive elements."),
@@ -156,10 +155,9 @@ public partial class AgentsViewModel : ObservableObject
     private void RefreshAvailableTools(LumiAgent? agent)
     {
         AvailableTools.Clear();
-        // Empty ToolNames means "all tools" — show all as selected
         var toolNames = agent?.ToolNames ?? [];
         var runtimeToolNames = ToolDisplayHelper.ToRuntimeToolNames(toolNames);
-        var hasRestrictions = runtimeToolNames.Count > 0;
+        var hasRestrictions = agent?.HasToolRestrictions == true;
         foreach (var (name, displayName, group, description) in KnownTools)
         {
             var isAssigned = !hasRestrictions || runtimeToolNames.Contains(name);
@@ -220,7 +218,7 @@ public partial class AgentsViewModel : ObservableObject
             .Select(s => s.McpServerId)
             .ToList();
 
-        // Empty list = all tools available; only store names when some are deselected
+        // Keep the explicit flag so an empty selected list can mean "no Lumi tools".
         var allSelected = AvailableTools.All(t => t.IsSelected);
         var selectedToolNames = allSelected
             ? []
@@ -235,6 +233,7 @@ public partial class AgentsViewModel : ObservableObject
             SelectedAgent.SkillIds = selectedSkillIds;
             SelectedAgent.McpServerIds = selectedMcpServerIds;
             SelectedAgent.ToolNames = selectedToolNames;
+            SelectedAgent.HasExplicitToolSelection = !allSelected;
         }
         else
         {
@@ -246,7 +245,8 @@ public partial class AgentsViewModel : ObservableObject
                 IconGlyph = EditIconGlyph,
                 SkillIds = selectedSkillIds,
                 McpServerIds = selectedMcpServerIds,
-                ToolNames = selectedToolNames
+                ToolNames = selectedToolNames,
+                HasExplicitToolSelection = !allSelected
             };
             _dataStore.Data.Agents.Add(agent);
         }

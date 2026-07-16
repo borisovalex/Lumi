@@ -323,7 +323,11 @@ public partial class MainViewModel : ObservableObject, IDisposable
         };
         AgentsVM.AgentsChanged += () =>
         {
-            _chatSessionStore.ApplyToSurfaces(surface => surface.RefreshComposerCatalogs());
+            _chatSessionStore.ApplyToSurfaces(surface =>
+            {
+                surface.InvalidateAgentSession();
+                surface.RefreshComposerCatalogs();
+            });
             RefreshFeatureManagementUi();
         };
 

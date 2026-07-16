@@ -2130,6 +2130,27 @@ public partial class ChatViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>
+    /// Refreshes agent definitions and Lumi-injected tools while preserving the resumable Copilot session history.
+    /// Busy turns finish on their existing configuration; the refresh is consumed before the next send.
+    /// </summary>
+    public void InvalidateAgentSession()
+    {
+        if (CurrentChat is not { } chat)
+            return;
+
+        if (OwnsLiveChat(chat.Id))
+        {
+            _pendingSessionReconfigurations.Add(chat.Id);
+            return;
+        }
+
+        if (chat.CopilotSessionId is null)
+            return;
+
+        ReconfigureSession(chat);
+    }
+
+    /// <summary>
     /// Called when the current chat's project assignment was changed from outside the composer
     /// (e.g. moved between projects via the sidebar context menu). Mirrors the refresh performed by
     /// <see cref="SetProjectId"/>/<see cref="ClearProjectId"/> so the live surface stays in sync:
@@ -2169,6 +2190,7 @@ public partial class ChatViewModel : ObservableObject, IDisposable
         if (CurrentChat is null) return;
         var chatId = CurrentChat.Id;
 
+        _pendingSessionReconfigurations.Remove(chatId);
         CancelPendingQuestions(CurrentChat);
         ReleaseSessionResources(chatId, cancelActiveRequest: true, deleteServerSession: true);
         RemoveSuggestionTracking(chatId);
@@ -2179,23 +2201,39 @@ public partial class ChatViewModel : ObservableObject, IDisposable
 
     private bool ConsumePendingSessionInvalidation(Chat chat)
     {
-        if (!_pendingSessionInvalidations.Remove(chat.Id))
+        if (_pendingSessionInvalidations.Remove(chat.Id))
+        {
+            _pendingSessionReconfigurations.Remove(chat.Id);
+            if (CurrentChat?.Id == chat.Id)
+            {
+                InvalidateCurrentSession();
+            }
+            else if (!string.IsNullOrWhiteSpace(chat.CopilotSessionId))
+            {
+                CancelPendingQuestions(chat);
+                ReleaseSessionResources(chat.Id, cancelActiveRequest: true, deleteServerSession: true);
+                RemoveSuggestionTracking(chat.Id);
+                chat.CopilotSessionId = null;
+                _dataStore.MarkChatChanged(chat);
+            }
+
+            return true;
+        }
+
+        if (!_pendingSessionReconfigurations.Remove(chat.Id))
             return false;
 
-        if (CurrentChat?.Id == chat.Id)
-        {
-            InvalidateCurrentSession();
-        }
-        else if (!string.IsNullOrWhiteSpace(chat.CopilotSessionId))
-        {
-            CancelPendingQuestions(chat);
-            ReleaseSessionResources(chat.Id, cancelActiveRequest: true, deleteServerSession: true);
-            RemoveSuggestionTracking(chat.Id);
-            chat.CopilotSessionId = null;
-            _dataStore.MarkChatChanged(chat);
-        }
-
+        ReconfigureSession(chat);
         return true;
+    }
+
+    private void ReconfigureSession(Chat chat)
+    {
+        CancelPendingQuestions(chat);
+        ReleaseSessionResources(chat.Id, cancelActiveRequest: true, deleteServerSession: false);
+        RemoveSuggestionTracking(chat.Id);
+        if (CurrentChat?.Id == chat.Id)
+            _activeSession = null;
     }
 
     [RelayCommand]

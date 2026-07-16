@@ -255,6 +255,9 @@ public class LumiAgent
     public bool IsLearningAgent { get; set; }
     public List<Guid> SkillIds { get; set; } = [];
     public List<string> ToolNames { get; set; } = [];
+    public bool HasExplicitToolSelection { get; set; }
+    [JsonIgnore]
+    public bool HasToolRestrictions => HasExplicitToolSelection || ToolNames.Count > 0;
     public List<Guid> McpServerIds { get; set; } = [];
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
 }

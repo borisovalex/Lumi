@@ -1486,9 +1486,10 @@ public class DataStore
             IconGlyph = "⚡",
             IsBuiltIn = true,
             SkillIds = [architectureSkill.Id, debugSkill.Id, codeReviewSkill.Id],
+            HasExplicitToolSelection = true,
             ToolNames = [
                 "code_review", "generate_tests", "explain_code", "analyze_project",
-                "web_search", "lumi_fetch",
+                "lumi_fetch",
                 "announce_file", "fetch_skill", "recall_memory",
             ],
             SystemPrompt = """

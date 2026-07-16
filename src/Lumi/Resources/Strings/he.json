@@ -253,7 +253,7 @@
   "Agent_McpServersHint": "רק שרתי MCP אלה יהיו זמינים בשיחה עם לומי זה.",
   "Agent_NoSkills": "לא נוצרו כישורים עדיין.",
   "Agent_NoMcpServers": "לא הוגדרו שרתי MCP עדיין.",
-  "Agent_ToolsHint": "בטל סימון כלים כדי להגביל את מה שהלומי יכול לעשות. הכל מופעל כברירת מחדל.",
+  "Agent_ToolsHint": "בחר אילו כלים של לומי יוזרקו עבור סוכן זה. הכלים המובנים של Copilot תמיד נשארים זמינים.",
   "Agent_DeleteConfirm": "למחוק את הלומי הזה?",
   "Empty_SelectLumi": "בחר או צור לומי",
   "Empty_SelectProject": "בחר או צור פרויקט",

@@ -253,7 +253,7 @@
   "Agent_McpServersHint": "Only these MCP servers will be available when chatting with this Lumi.",
   "Agent_NoSkills": "No skills created yet.",
   "Agent_NoMcpServers": "No MCP servers configured yet.",
-  "Agent_ToolsHint": "Uncheck tools to restrict what this Lumi can do. All enabled by default.",
+  "Agent_ToolsHint": "Choose which Lumi tools are injected for this agent. Copilot's built-in tools always remain available.",
   "Agent_DeleteConfirm": "Delete this Lumi?",
   "Empty_SelectLumi": "Select or create a Lumi",
   "Empty_SelectProject": "Select or create a project",

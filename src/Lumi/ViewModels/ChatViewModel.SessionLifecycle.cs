@@ -2276,6 +2276,8 @@ public partial class ChatViewModel
     /// <summary>Cleans up session resources for a chat (e.g., on delete).</summary>
     public void CleanupSession(Guid chatId)
     {
+        _pendingSessionInvalidations.Remove(chatId);
+        _pendingSessionReconfigurations.Remove(chatId);
         var chat = _dataStore.Data.Chats.FirstOrDefault(c => c.Id == chatId);
         if (chat is not null)
             CancelPendingQuestions(chat);

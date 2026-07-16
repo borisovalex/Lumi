@@ -187,6 +187,8 @@
 
           <!-- Tools -->
           <TextBlock Text="{loc:Str Field_Tools}" Classes="section-label" />
+          <TextBlock Text="{loc:Str Agent_ToolsHint}" Classes="caption tertiary"
+                     TextWrapping="Wrap" Margin="0,0,0,6" />
           <ItemsControl ItemsSource="{Binding AvailableTools}">
             <ItemsControl.ItemsPanel>
               <ItemsPanelTemplate>

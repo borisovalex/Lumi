@@ -158,6 +158,53 @@ public class AppDataSnapshotFactoryTests
     }
 
     [Fact]
+    public void CreateIndexSnapshot_PreservesAgentToolSelectionState()
+    {
+        var source = new AppData
+        {
+            Agents =
+            [
+                new LumiAgent
+                {
+                    Name = "Prompt-only Lumi",
+                    HasExplicitToolSelection = true
+                }
+            ]
+        };
+
+        var snapshot = InvokeCreateIndexSnapshot(source);
+
+        var agent = Assert.Single(snapshot.Agents);
+        Assert.True(agent.HasExplicitToolSelection);
+        Assert.True(agent.HasToolRestrictions);
+        Assert.Empty(agent.ToolNames);
+    }
+
+    [Fact]
+    public void AppDataJsonContext_SerializesAgentToolSelectionState()
+    {
+        var data = new AppData
+        {
+            Agents =
+            [
+                new LumiAgent
+                {
+                    Name = "Prompt-only Lumi",
+                    HasExplicitToolSelection = true
+                }
+            ]
+        };
+
+        var json = JsonSerializer.Serialize(data, AppDataJsonContext.Default.AppData);
+        using var document = JsonDocument.Parse(json);
+
+        Assert.True(document.RootElement
+            .GetProperty("agents")[0]
+            .GetProperty("hasExplicitToolSelection")
+            .GetBoolean());
+    }
+
+    [Fact]
     public void CreateIndexSnapshot_PreservesMemoryMaintenanceFields()
     {
         var projectId = Guid.NewGuid();

@@ -1,3 +1,4 @@
+using GitHub.Copilot;
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
@@ -365,6 +366,127 @@ public sealed class ChatViewModelAgentRoutingTests
         Assert.DoesNotContain(toolNames, static name => name.StartsWith("browser_", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void BuildCustomTools_NoAgentInjectsAllLumiToolCategories()
+    {
+        using var harness = CreateHarness(new AppData());
+
+        var toolNames = InvokeBuildCustomTools(harness.ViewModel)
+            .Select(tool => tool.Name)
+            .ToArray();
+
+        Assert.Contains("lumi_fetch", toolNames);
+        Assert.Contains("ask_question", toolNames);
+        Assert.Contains("manage_lumis", toolNames);
+        Assert.Contains("code_review", toolNames);
+        Assert.Contains(ToolDisplayHelper.BrowserOpenToolName, toolNames);
+        if (OperatingSystem.IsWindows())
+            Assert.Contains("ui_list_windows", toolNames);
+    }
+
+    [Fact]
+    public void BuildCustomAgents_DoesNotSetSdkToolAllowlist()
+    {
+        var agent = new LumiAgent
+        {
+            Name = "Restricted Lumi",
+            ToolNames = ["lumi_fetch"]
+        };
+        using var harness = CreateHarness(new AppData { Agents = [agent] });
+
+        var config = Assert.Single(InvokeBuildCustomAgents(harness.ViewModel));
+
+        Assert.Null(config.Tools);
+    }
+
+    [Fact]
+    public void BuildCustomTools_RestrictedAgentFiltersOnlyLumiInjectedTools()
+    {
+        var agent = new LumiAgent
+        {
+            Name = "Research Lumi",
+            ToolNames = ["web_search", "lumi_fetch"]
+        };
+        using var harness = CreateHarness(new AppData());
+
+        var toolNames = InvokeBuildCustomTools(harness.ViewModel, agent)
+            .Select(tool => tool.Name)
+            .ToArray();
+
+        Assert.Equal(["lumi_fetch"], toolNames);
+    }
+
+    [Fact]
+    public void BuildCustomTools_ExplicitEmptySelectionInjectsNoLumiTools()
+    {
+        var agent = new LumiAgent
+        {
+            Name = "Prompt-only Lumi",
+            HasExplicitToolSelection = true
+        };
+        using var harness = CreateHarness(new AppData());
+
+        Assert.Empty(InvokeBuildCustomTools(harness.ViewModel, agent));
+    }
+
+    [Fact]
+    public void SetActiveAgent_BusySessionDefersToolReconfiguration()
+    {
+        var chat = new Chat
+        {
+            Id = Guid.NewGuid(),
+            Title = "Busy chat",
+            CopilotSessionId = "session-1"
+        };
+        var agent = new LumiAgent { Id = Guid.NewGuid(), Name = "Restricted Lumi" };
+        using var harness = CreateHarness(new AppData { Chats = [chat], Agents = [agent] });
+        harness.ViewModel.CurrentChat = chat;
+
+        var cancellationSources = GetPrivateField<Dictionary<Guid, CancellationTokenSource>>(
+            harness.ViewModel,
+            "_ctsSources");
+        using var turnCts = new CancellationTokenSource();
+        cancellationSources[chat.Id] = turnCts;
+
+        harness.ViewModel.SetActiveAgent(agent);
+
+        var pendingReconfigurations = GetPrivateField<HashSet<Guid>>(
+            harness.ViewModel,
+            "_pendingSessionReconfigurations");
+        Assert.Contains(chat.Id, pendingReconfigurations);
+        Assert.Equal(agent.Id, chat.AgentId);
+    }
+
+    [Fact]
+    public void SetActiveAgent_DeselectingBusySessionBeforeSessionCreationDefersToolReconfiguration()
+    {
+        var chat = new Chat
+        {
+            Id = Guid.NewGuid(),
+            Title = "First-turn chat"
+        };
+        var agent = new LumiAgent { Id = Guid.NewGuid(), Name = "Restricted Lumi" };
+        using var harness = CreateHarness(new AppData { Chats = [chat], Agents = [agent] });
+        harness.ViewModel.CurrentChat = chat;
+        harness.ViewModel.SetActiveAgent(agent);
+
+        var cancellationSources = GetPrivateField<Dictionary<Guid, CancellationTokenSource>>(
+            harness.ViewModel,
+            "_ctsSources");
+        using var turnCts = new CancellationTokenSource();
+        cancellationSources[chat.Id] = turnCts;
+
+        harness.ViewModel.SetActiveAgent(null);
+
+        var pendingReconfigurations = GetPrivateField<HashSet<Guid>>(
+            harness.ViewModel,
+            "_pendingSessionReconfigurations");
+        Assert.Contains(chat.Id, pendingReconfigurations);
+        Assert.Null(chat.AgentId);
+        Assert.Null(harness.ViewModel.ActiveAgent);
+        Assert.Null(chat.CopilotSessionId);
+    }
+
     private static TestHarness CreateHarness(AppData data)
     {
         var store = new DataStore(data);
@@ -390,7 +512,17 @@ public sealed class ChatViewModelAgentRoutingTests
             DefaultReasoningEffort = efforts.Length > 0 ? "high" : null
         };
 
-    private static List<AIFunction> InvokeBuildCustomTools(ChatViewModel viewModel)
+    private static List<CustomAgentConfig> InvokeBuildCustomAgents(ChatViewModel viewModel)
+    {
+        var method = typeof(ChatViewModel).GetMethod(
+            "BuildCustomAgents",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(method);
+        return Assert.IsType<List<CustomAgentConfig>>(method!.Invoke(viewModel, [null]));
+    }
+
+    private static List<AIFunction> InvokeBuildCustomTools(ChatViewModel viewModel, LumiAgent? agent = null)
     {
         var method = typeof(ChatViewModel).GetMethod(
             "BuildCustomTools",
@@ -408,7 +540,17 @@ public sealed class ChatViewModelAgentRoutingTests
         var catalog = new ProjectContextCatalogSnapshot([], [], []);
         return Assert.IsType<List<AIFunction>>(method!.Invoke(
             viewModel,
-            [Guid.NewGuid(), null, catalog]));
+            [Guid.NewGuid(), agent, catalog]));
+    }
+
+    private static T GetPrivateField<T>(ChatViewModel viewModel, string fieldName)
+    {
+        var field = typeof(ChatViewModel).GetField(
+            fieldName,
+            BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(field);
+        return Assert.IsType<T>(field!.GetValue(viewModel));
     }
 
     private sealed record TestHarness(ChatViewModel ViewModel) : IDisposable
