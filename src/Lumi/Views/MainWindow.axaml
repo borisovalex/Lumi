@@ -6,6 +6,7 @@
         xmlns:sc="using:StrataTheme.Controls"
         xmlns:primitives="using:Avalonia.Controls.Primitives"
         xmlns:models="using:Lumi.Models"
+        xmlns:services="using:Lumi.Services"
         xmlns:loc="using:Lumi.Localization"
         x:Class="Lumi.Views.MainWindow"
         x:DataType="vm:MainViewModel"
@@ -1609,6 +1610,106 @@
         </StackPanel>
       </Border>
     </Panel>
+
+    <!-- ═══ Update Blocker Dialog ═══ -->
+    <sc:StrataDialog x:Name="UpdateBlockerDialog"
+                     Title="{loc:Str Update_BlockersTitle}"
+                     IsDialogOpen="{Binding SettingsVM.IsUpdateBlockerDialogOpen}"
+                     CloseCommand="{Binding SettingsVM.CancelUpdateRestartCommand}"
+                     MaxDialogWidth="540"
+                     ZIndex="200">
+      <sc:StrataDialog.DialogContent>
+        <StackPanel Spacing="16">
+          <Border Width="48"
+                  Height="48"
+                  CornerRadius="24"
+                  HorizontalAlignment="Center"
+                  Background="{DynamicResource Brush.AccentSubtle}">
+            <TextBlock Text="!"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       FontSize="24"
+                       FontWeight="Bold"
+                       Foreground="{DynamicResource Brush.AccentDefault}" />
+          </Border>
+
+          <StackPanel Spacing="6">
+            <TextBlock Text="{Binding SettingsVM.UpdateBlockerDialogDescription}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       FontSize="{DynamicResource Font.SizeBody}"
+                       Foreground="{DynamicResource Brush.TextPrimary}" />
+            <TextBlock Text="{loc:Str Update_BlockersWarning}"
+                       TextWrapping="Wrap"
+                       TextAlignment="Center"
+                       FontSize="{DynamicResource Font.SizeCaption}"
+                       Foreground="{DynamicResource Brush.TextSecondary}" />
+          </StackPanel>
+
+          <ScrollViewer MaxHeight="220"
+                        VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled">
+            <ItemsControl ItemsSource="{Binding SettingsVM.UpdateBlockingProcesses}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="services:UpdateBlockingProcess">
+                  <Border Margin="0,0,0,6"
+                          Padding="12,10"
+                          CornerRadius="{DynamicResource Radius.Base}"
+                          Background="{DynamicResource Brush.SurfaceSubtle}"
+                          BorderBrush="{DynamicResource Brush.BorderSubtle}"
+                          BorderThickness="1"
+                          ToolTip.Tip="{Binding ExecutablePath}">
+                    <StackPanel Spacing="2">
+                      <TextBlock Text="{Binding DisplayName}"
+                                 FontWeight="SemiBold"
+                                 Foreground="{DynamicResource Brush.TextPrimary}" />
+                      <TextBlock Text="{Binding ProcessDetails}"
+                                 FontSize="{DynamicResource Font.SizeCaption}"
+                                 Foreground="{DynamicResource Brush.TextTertiary}" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+
+          <Border IsVisible="{Binding SettingsVM.UpdateBlockerErrorText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                  Padding="12"
+                  CornerRadius="{DynamicResource Radius.Base}"
+                  Background="{DynamicResource Brush.DangerSubtle}">
+            <TextBlock Text="{Binding SettingsVM.UpdateBlockerErrorText}"
+                       TextWrapping="Wrap"
+                       FontSize="{DynamicResource Font.SizeCaption}"
+                       Foreground="{DynamicResource Brush.DangerDefault}" />
+          </Border>
+
+          <StackPanel Spacing="8">
+            <Button Classes="accent motion-action"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    Content="{loc:Str Update_CloseAppsAndRestart}"
+                    Command="{Binding SettingsVM.CloseUpdateBlockersAndRestartCommand}"
+                    IsEnabled="{Binding SettingsVM.CanCloseAnyUpdateBlocker}"
+                    Padding="14,8"
+                    MinHeight="0" />
+            <Button Classes="subtle motion-action"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    Content="{loc:Str Update_RetryRestart}"
+                    Command="{Binding SettingsVM.RetryUpdateRestartCommand}"
+                    Padding="14,8"
+                    MinHeight="0" />
+            <Button Classes="subtle motion-action"
+                    HorizontalAlignment="Stretch"
+                    HorizontalContentAlignment="Center"
+                    Content="{loc:Str Update_CancelRestart}"
+                    Command="{Binding SettingsVM.CancelUpdateRestartCommand}"
+                    Padding="14,8"
+                    MinHeight="0" />
+          </StackPanel>
+        </StackPanel>
+      </sc:StrataDialog.DialogContent>
+    </sc:StrataDialog>
   </Panel>
   </Border>
 </Window>

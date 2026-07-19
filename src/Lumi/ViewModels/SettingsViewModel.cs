@@ -167,6 +167,9 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isUpdateAvailable;
     [ObservableProperty] private bool _isUpdateDownloading;
     [ObservableProperty] private bool _isUpdateReadyToRestart;
+    [ObservableProperty] private bool _isUpdatePreparingToRestart;
+    [ObservableProperty] private bool _isUpdateBlocked;
+    [ObservableProperty] private bool _isClosingUpdateBlockers;
     [ObservableProperty] private bool _isCheckingForUpdate;
     [ObservableProperty] private bool _isUpdateUpToDate;
     [ObservableProperty] private bool _isUpdateUnavailableInDev;
@@ -180,15 +183,28 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _updatePublishedText = "";
     [ObservableProperty] private string _updateLastCheckedText = "";
     [ObservableProperty] private bool _shouldAutoNavigateToUpdateCenter;
+    [ObservableProperty] private string _updateBlockerErrorText = "";
     private string _lastUpdateNotificationToken = string.Empty;
+    public ObservableCollection<UpdateBlockingProcess> UpdateBlockingProcesses { get; } = [];
 
     /// <summary>Check Now button should only show when not downloading/ready.</summary>
-    public bool IsCheckButtonVisible => !IsUpdateAvailable && !IsUpdateDownloading && !IsUpdateReadyToRestart;
+    public bool IsCheckButtonVisible => !IsUpdateAvailable
+        && !IsUpdateDownloading
+        && !IsRestartStage;
 
-    public bool HasPendingUpdate => IsUpdateAvailable || IsUpdateDownloading || IsUpdateReadyToRestart;
-    public bool HasUpdateAttention => IsUpdateAvailable || IsUpdateReadyToRestart;
+    public bool IsRestartStage => IsUpdateReadyToRestart
+        || IsUpdatePreparingToRestart
+        || IsUpdateBlocked
+        || IsClosingUpdateBlockers;
+    public bool HasPendingUpdate => IsUpdateAvailable || IsUpdateDownloading || IsRestartStage;
+    public bool HasUpdateAttention => IsUpdateAvailable || IsUpdateReadyToRestart || IsUpdateBlocked;
     public bool ShouldShowUpdateBanner => HasPendingUpdate && !IsUpdateBannerDismissed;
     public bool ShouldShowUpdateBadge => HasPendingUpdate;
+    public bool IsUpdateBlockerDialogOpen => IsUpdateBlocked;
+    public bool CanCloseAnyUpdateBlocker => UpdateBlockingProcesses.Any(static process => process.CanClose);
+    public string UpdateBlockerDialogDescription => Loc.Get(
+        "Update_BlockersDescription",
+        UpdateBlockingProcesses.Count);
     public bool HasAvailableUpdateVersion => !string.IsNullOrWhiteSpace(AvailableUpdateVersion);
     public bool HasReleaseNotes => !string.IsNullOrWhiteSpace(UpdateReleaseNotesMarkdown);
     public bool IsUpdateReleaseNotesVisible => HasPendingUpdate || HasReleaseNotes;
@@ -204,60 +220,83 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         : Loc.Update_ViewReleases;
     public string UpdateStatusBadgeText => IsUpdateStatusIdle
         ? Loc.Update_StatusIdle
+        : IsUpdateBlocked
+            ? Loc.Update_StatusBlocked
+            : IsClosingUpdateBlockers || IsUpdatePreparingToRestart
+                ? Loc.Update_StatusPreparing
+                : HasUpdateError
+                    ? Loc.Update_StatusError
+                    : IsUpdateReadyToRestart
+                        ? Loc.Update_StatusRestartRequired
+                        : IsUpdateDownloading
+                            ? Loc.Update_StatusDownloading
+                            : IsUpdateAvailable
+                                ? Loc.Update_StatusAvailable
+                                : IsCheckingForUpdate
+                                    ? Loc.Update_StatusChecking
+                                    : IsUpdateUnavailableInDev
+                                        ? Loc.Update_StatusDev
+                                        : Loc.Update_StatusCurrent;
+    public string UpdateSidebarBadgeText => HasUpdateError
+        ? Loc.Update_BadgeAction
         : IsUpdateReadyToRestart
-            ? Loc.Update_StatusRestartRequired
+            ? Loc.Update_BadgeRestart
+            : IsUpdateBlocked
+            ? Loc.Update_BadgeAction
             : IsUpdateDownloading
-                ? Loc.Update_StatusDownloading
-                : IsUpdateAvailable
-                    ? Loc.Update_StatusAvailable
-                    : IsCheckingForUpdate
-                        ? Loc.Update_StatusChecking
-                        : IsUpdateUnavailableInDev
-                            ? Loc.Update_StatusDev
-                            : HasUpdateError
-                                ? Loc.Update_StatusError
-                                : Loc.Update_StatusCurrent;
-    public string UpdateSidebarBadgeText => IsUpdateReadyToRestart
-        ? Loc.Update_BadgeRestart
-        : IsUpdateDownloading
-            ? Loc.Update_BadgeUpdating
-            : Loc.Update_BadgeNew;
+                ? Loc.Update_BadgeUpdating
+                : Loc.Update_BadgeNew;
     public string UpdateHeroTitle => IsUpdateStatusIdle
         ? Loc.Update_HeroIdleTitle
-        : IsUpdateReadyToRestart
-            ? Loc.Get("Update_BannerReadyTitle", GetUpdateVersionDisplay())
-            : IsUpdateDownloading
-                ? Loc.Get("Update_BannerDownloadingTitle", GetUpdateVersionDisplay())
-                : IsUpdateAvailable
-                    ? Loc.Get("Update_BannerAvailableTitle", GetUpdateVersionDisplay())
-                    : IsCheckingForUpdate
-                        ? Loc.Update_HeroCheckingTitle
-                        : IsUpdateUnavailableInDev
-                            ? Loc.Update_HeroDevTitle
-                            : HasUpdateError
-                                ? Loc.Update_HeroErrorTitle
-                                : Loc.Update_HeroUpToDateTitle;
+        : IsUpdateBlocked
+            ? Loc.Update_HeroBlockedTitle
+            : IsClosingUpdateBlockers
+                ? Loc.Update_HeroClosingTitle
+                : IsUpdatePreparingToRestart
+                    ? Loc.Update_HeroPreparingTitle
+                    : HasUpdateError
+                        ? Loc.Update_HeroErrorTitle
+                        : IsUpdateReadyToRestart
+                            ? Loc.Get("Update_BannerReadyTitle", GetUpdateVersionDisplay())
+                            : IsUpdateDownloading
+                                ? Loc.Get("Update_BannerDownloadingTitle", GetUpdateVersionDisplay())
+                                : IsUpdateAvailable
+                                    ? Loc.Get("Update_BannerAvailableTitle", GetUpdateVersionDisplay())
+                                    : IsCheckingForUpdate
+                                        ? Loc.Update_HeroCheckingTitle
+                                        : IsUpdateUnavailableInDev
+                                            ? Loc.Update_HeroDevTitle
+                                            : Loc.Update_HeroUpToDateTitle;
     public string UpdateHeroDescription => IsUpdateStatusIdle
         ? Loc.Update_HeroIdleBody
-        : IsUpdateReadyToRestart
-            ? Loc.Get("Update_HeroReadyBody", AppVersion)
-            : IsUpdateDownloading
-                ? Loc.Get("Update_HeroDownloadingBody", AppVersion)
-                : IsUpdateAvailable
-                    ? Loc.Get("Update_HeroAvailableBody", AppVersion)
-                    : IsCheckingForUpdate
-                        ? Loc.Update_HeroCheckingBody
-                        : IsUpdateUnavailableInDev
-                            ? Loc.Update_HeroDevBody
-                            : HasUpdateError
-                                ? HasAvailableUpdateVersion
-                                    ? Loc.Get("Update_HeroErrorWithDetailsBody", GetUpdateVersionDisplay())
-                                    : Loc.Update_HeroErrorBody
-                                : Loc.Update_HeroUpToDateBody;
+        : IsUpdateBlocked
+            ? Loc.Update_HeroBlockedBody
+            : IsClosingUpdateBlockers
+                ? Loc.Update_HeroClosingBody
+                : IsUpdatePreparingToRestart
+                    ? Loc.Update_HeroPreparingBody
+                    : HasUpdateError
+                        ? HasAvailableUpdateVersion
+                            ? Loc.Get("Update_HeroErrorWithDetailsBody", GetUpdateVersionDisplay())
+                            : Loc.Update_HeroErrorBody
+                        : IsUpdateReadyToRestart
+                            ? Loc.Get("Update_HeroReadyBody", AppVersion)
+                            : IsUpdateDownloading
+                                ? Loc.Get("Update_HeroDownloadingBody", AppVersion)
+                                : IsUpdateAvailable
+                                    ? Loc.Get("Update_HeroAvailableBody", AppVersion)
+                                    : IsCheckingForUpdate
+                                        ? Loc.Update_HeroCheckingBody
+                                        : IsUpdateUnavailableInDev
+                                            ? Loc.Update_HeroDevBody
+                                            : Loc.Update_HeroUpToDateBody;
 
     partial void OnIsUpdateAvailableChanged(bool value) => OnUpdateStateInputsChanged();
     partial void OnIsUpdateDownloadingChanged(bool value) => OnUpdateStateInputsChanged();
     partial void OnIsUpdateReadyToRestartChanged(bool value) => OnUpdateStateInputsChanged();
+    partial void OnIsUpdatePreparingToRestartChanged(bool value) => OnUpdateStateInputsChanged();
+    partial void OnIsUpdateBlockedChanged(bool value) => OnUpdateStateInputsChanged();
+    partial void OnIsClosingUpdateBlockersChanged(bool value) => OnUpdateStateInputsChanged();
 
     [RelayCommand]
     private async Task CheckForUpdateAsync() => await _updateService.CheckForUpdateAsync();
@@ -266,7 +305,17 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     private async Task DownloadUpdateAsync() => await _updateService.DownloadUpdateAsync();
 
     [RelayCommand]
-    private void ApplyUpdateAndRestart() => _updateService.ApplyUpdateAndRestart();
+    private async Task ApplyUpdateAndRestartAsync() => await _updateService.ApplyUpdateAndRestartAsync();
+
+    [RelayCommand]
+    private async Task RetryUpdateRestartAsync() => await _updateService.ApplyUpdateAndRestartAsync();
+
+    [RelayCommand]
+    private async Task CloseUpdateBlockersAndRestartAsync()
+        => await _updateService.CloseBlockingProcessesAndRestartAsync();
+
+    [RelayCommand]
+    private void CancelUpdateRestart() => _updateService.CancelBlockedRestart();
 
     [RelayCommand]
     private void DismissUpdateBanner()
@@ -362,7 +411,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
 
         // Wire update status changes
         _updateService.StatusChanged += OnUpdateStatusChanged;
-        OnUpdateStatusChanged(_updateService.CurrentStatus);
+        ApplyUpdateStatus(_updateService.CurrentStatus);
     }
 
     public void Dispose()
@@ -372,72 +421,91 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
 
     private void OnUpdateStatusChanged(UpdateStatus status)
     {
-        void ApplyStatus()
+        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
+            ApplyUpdateStatus(status);
+        else
+            Avalonia.Threading.Dispatcher.UIThread.Post(() => ApplyUpdateStatus(status));
+    }
+
+    private void ApplyUpdateStatus(UpdateStatus status)
+    {
+        IsUpdateStatusIdle = status == UpdateStatus.Idle;
+        IsCheckingForUpdate = status == UpdateStatus.Checking;
+        IsUpdateAvailable = status == UpdateStatus.UpdateAvailable;
+        IsUpdateDownloading = status == UpdateStatus.Downloading;
+        IsUpdateReadyToRestart = status == UpdateStatus.ReadyToRestart;
+        IsUpdatePreparingToRestart = status == UpdateStatus.PreparingToRestart;
+        IsUpdateBlocked = status == UpdateStatus.BlockedByProcesses;
+        IsClosingUpdateBlockers = status == UpdateStatus.ClosingBlockingProcesses;
+        IsUpdateUpToDate = status == UpdateStatus.UpToDate;
+        IsUpdateUnavailableInDev = status == UpdateStatus.NotInstalled;
+        HasUpdateError = status == UpdateStatus.Error
+            || !string.IsNullOrWhiteSpace(_updateService.ErrorMessage);
+        UpdateDownloadProgress = _updateService.DownloadProgress;
+        AvailableUpdateVersion = _updateService.AvailableVersion ?? string.Empty;
+        UpdateReleaseNotesMarkdown = _updateService.ReleaseNotesMarkdown;
+        UpdateReleaseTitle = _updateService.ReleaseTitle;
+        UpdateReleasePageUrl = string.IsNullOrWhiteSpace(_updateService.ReleasePageUrl)
+            ? UpdateService.ReleasesPageUrl
+            : _updateService.ReleasePageUrl;
+        UpdatePublishedText = FormatUpdateTimestamp(_updateService.ReleasePublishedAt);
+        UpdateLastCheckedText = FormatUpdateTimestamp(_updateService.LastCheckedAt);
+        UpdateBlockingProcesses.Clear();
+        foreach (var blocker in _updateService.BlockingProcesses)
+            UpdateBlockingProcesses.Add(blocker);
+        UpdateBlockerErrorText = string.IsNullOrWhiteSpace(_updateService.BlockerErrorMessage)
+            ? string.Empty
+            : Loc.Update_BlockerCloseFailed;
+        ShouldAutoNavigateToUpdateCenter =
+            (status is UpdateStatus.UpdateAvailable
+                or UpdateStatus.ReadyToRestart
+                or UpdateStatus.BlockedByProcesses)
+            && SelectedPageIndex != AboutPageIndex;
+
+        UpdateStatusText = status switch
         {
-            IsUpdateStatusIdle = status == UpdateStatus.Idle;
-            IsCheckingForUpdate = status == UpdateStatus.Checking;
-            IsUpdateAvailable = status == UpdateStatus.UpdateAvailable;
-            IsUpdateDownloading = status == UpdateStatus.Downloading;
-            IsUpdateReadyToRestart = status == UpdateStatus.ReadyToRestart;
-            IsUpdateUpToDate = status == UpdateStatus.UpToDate;
-            IsUpdateUnavailableInDev = status == UpdateStatus.NotInstalled;
-            HasUpdateError = status == UpdateStatus.Error;
-            UpdateDownloadProgress = _updateService.DownloadProgress;
-            AvailableUpdateVersion = _updateService.AvailableVersion ?? string.Empty;
-            UpdateReleaseNotesMarkdown = _updateService.ReleaseNotesMarkdown;
-            UpdateReleaseTitle = _updateService.ReleaseTitle;
-            UpdateReleasePageUrl = string.IsNullOrWhiteSpace(_updateService.ReleasePageUrl)
-                ? UpdateService.ReleasesPageUrl
-                : _updateService.ReleasePageUrl;
-            UpdatePublishedText = FormatUpdateTimestamp(_updateService.ReleasePublishedAt);
-            UpdateLastCheckedText = FormatUpdateTimestamp(_updateService.LastCheckedAt);
-            ShouldAutoNavigateToUpdateCenter =
-                (status is UpdateStatus.UpdateAvailable or UpdateStatus.ReadyToRestart)
-                && SelectedPageIndex != AboutPageIndex;
+            UpdateStatus.Idle => string.Empty,
+            UpdateStatus.Checking => Loc.Update_Checking,
+            UpdateStatus.UpToDate => Loc.Update_UpToDate,
+            UpdateStatus.UpdateAvailable => Loc.Get("Update_Available", _updateService.AvailableVersion ?? ""),
+            UpdateStatus.Downloading => Loc.Get("Update_Downloading", _updateService.DownloadProgress),
+            UpdateStatus.ReadyToRestart => string.IsNullOrWhiteSpace(_updateService.ErrorMessage)
+                ? Loc.Update_ReadyToRestart
+                : $"{Loc.Update_Error}: {_updateService.ErrorMessage}",
+            UpdateStatus.PreparingToRestart => Loc.Update_PreparingRestart,
+            UpdateStatus.BlockedByProcesses => Loc.Update_BlockedByProcesses,
+            UpdateStatus.ClosingBlockingProcesses => Loc.Update_ClosingBlockers,
+            UpdateStatus.Error => string.IsNullOrWhiteSpace(_updateService.ErrorMessage)
+                ? Loc.Update_Error
+                : $"{Loc.Update_Error}: {_updateService.ErrorMessage}",
+            UpdateStatus.NotInstalled => Loc.Update_DevMode,
+            _ => ""
+        };
 
-            UpdateStatusText = status switch
-            {
-                UpdateStatus.Idle => string.Empty,
-                UpdateStatus.Checking => Loc.Update_Checking,
-                UpdateStatus.UpToDate => Loc.Update_UpToDate,
-                UpdateStatus.UpdateAvailable => Loc.Get("Update_Available", _updateService.AvailableVersion ?? ""),
-                UpdateStatus.Downloading => Loc.Get("Update_Downloading", _updateService.DownloadProgress),
-                UpdateStatus.ReadyToRestart => Loc.Update_ReadyToRestart,
-                UpdateStatus.Error => Loc.Update_Error,
-                UpdateStatus.NotInstalled => Loc.Update_DevMode,
-                _ => ""
-            };
+        RaiseUpdatePresentationPropertiesChanged();
 
-            RaiseUpdatePresentationPropertiesChanged();
+        if (!_dataStore.Data.Settings.NotificationsEnabled)
+            return;
 
-            if (!_dataStore.Data.Settings.NotificationsEnabled)
+        // System notification when an update needs attention and the window is minimized/inactive
+        if (status == UpdateStatus.UpdateAvailable)
+        {
+            if (!TryMarkUpdateNotificationShown("available"))
                 return;
 
-            // System notification when an update needs attention and the window is minimized/inactive
-            if (status == UpdateStatus.UpdateAvailable)
-            {
-                if (!TryMarkUpdateNotificationShown("available"))
-                    return;
-
-                NotificationService.ShowIfInactive(
-                    Loc.Update_NotificationTitle,
-                    Loc.Get("Update_NotificationBody", _updateService.AvailableVersion ?? ""));
-            }
-            else if (status == UpdateStatus.ReadyToRestart)
-            {
-                if (!TryMarkUpdateNotificationShown("ready"))
-                    return;
-
-                NotificationService.ShowIfInactive(
-                    Loc.Update_NotificationReadyTitle,
-                    Loc.Get("Update_NotificationReadyBody", _updateService.AvailableVersion ?? ""));
-            }
+            NotificationService.ShowIfInactive(
+                Loc.Update_NotificationTitle,
+                Loc.Get("Update_NotificationBody", _updateService.AvailableVersion ?? ""));
         }
+        else if (status == UpdateStatus.ReadyToRestart)
+        {
+            if (!TryMarkUpdateNotificationShown("ready"))
+                return;
 
-        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
-            ApplyStatus();
-        else
-            Avalonia.Threading.Dispatcher.UIThread.Post(ApplyStatus);
+            NotificationService.ShowIfInactive(
+                Loc.Update_NotificationReadyTitle,
+                Loc.Get("Update_NotificationReadyBody", _updateService.AvailableVersion ?? ""));
+        }
     }
 
     public void OpenUpdateCenter()
@@ -456,8 +524,12 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
     {
         OnPropertyChanged(nameof(HasPendingUpdate));
         OnPropertyChanged(nameof(HasUpdateAttention));
+        OnPropertyChanged(nameof(IsRestartStage));
         OnPropertyChanged(nameof(ShouldShowUpdateBanner));
         OnPropertyChanged(nameof(ShouldShowUpdateBadge));
+        OnPropertyChanged(nameof(IsUpdateBlockerDialogOpen));
+        OnPropertyChanged(nameof(CanCloseAnyUpdateBlocker));
+        OnPropertyChanged(nameof(UpdateBlockerDialogDescription));
         OnPropertyChanged(nameof(HasAvailableUpdateVersion));
         OnPropertyChanged(nameof(HasReleaseNotes));
         OnPropertyChanged(nameof(IsUpdateReleaseNotesVisible));
@@ -496,7 +568,7 @@ public partial class SettingsViewModel : ObservableObject, IDisposable
         if (!HasPendingUpdate)
             return string.Empty;
 
-        var stage = IsUpdateReadyToRestart
+        var stage = IsRestartStage
             ? "ready"
             : "pending";
         var version = HasAvailableUpdateVersion ? AvailableUpdateVersion.Trim() : AppVersion;

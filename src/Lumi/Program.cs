@@ -34,6 +34,7 @@ class Program
     {
         // Velopack must run before anything else — it may apply updates and exit immediately
         VelopackApp.Build().Run();
+        Services.InstalledAppWorkingDirectory.Configure();
 
         ForceOnboarding = args.Contains("--onboarding", StringComparer.OrdinalIgnoreCase);
 

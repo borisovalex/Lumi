@@ -11,7 +11,7 @@ public sealed class UpdateExperienceViewModelTests
 {
     private const int SettingsNavIndex = 7;
 
-    private static MainViewModel CreateMainViewModel()
+    private static MainViewModel CreateMainViewModel(UpdateService? updateService = null)
     {
         Loc.Load("en");
 
@@ -24,7 +24,10 @@ public sealed class UpdateExperienceViewModelTests
             }
         };
 
-        return new MainViewModel(new DataStore(data), new CopilotService(), new UpdateService());
+        return new MainViewModel(
+            new DataStore(data),
+            new CopilotService(),
+            updateService ?? new UpdateService());
     }
 
     private static void SetNonPublicProperty<T>(object instance, string propertyName, T value)
@@ -196,5 +199,61 @@ public sealed class UpdateExperienceViewModelTests
         vm.SettingsVM.UpdateReleaseNotesMarkdown = "## Notes";
 
         Assert.Equal("## Notes", vm.SettingsVM.UpdateReleaseNotesDisplayMarkdown);
+    }
+
+    [Fact]
+    public void BlockedUpdate_ShowsProcessesAndCanBeCancelled()
+    {
+        var service = new UpdateService();
+        SetNonPublicProperty(
+            service,
+            nameof(UpdateService.BlockingProcesses),
+            new[]
+            {
+                new UpdateBlockingProcess(
+                    4242,
+                    null,
+                    "PowerShell",
+                    @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                    canClose: true)
+            });
+        SetNonPublicProperty(service, nameof(UpdateService.CurrentStatus), UpdateStatus.BlockedByProcesses);
+        SetNonPublicProperty(service, nameof(UpdateService.AvailableVersion), "1.2.3");
+
+        var vm = CreateMainViewModel(service);
+
+        Assert.True(vm.SettingsVM.IsUpdateBlocked);
+        Assert.True(vm.SettingsVM.IsUpdateBlockerDialogOpen);
+        Assert.True(vm.SettingsVM.HasPendingUpdate);
+        Assert.True(vm.SettingsVM.CanCloseAnyUpdateBlocker);
+        Assert.Single(vm.SettingsVM.UpdateBlockingProcesses);
+        Assert.Contains("1", vm.SettingsVM.UpdateBlockerDialogDescription);
+
+        vm.SettingsVM.CancelUpdateRestartCommand.Execute(null);
+
+        Assert.Equal(UpdateStatus.ReadyToRestart, service.CurrentStatus);
+        var synchronizedVm = CreateMainViewModel(service);
+        Assert.True(synchronizedVm.SettingsVM.IsUpdateReadyToRestart);
+        Assert.False(synchronizedVm.SettingsVM.IsUpdateBlockerDialogOpen);
+        Assert.Empty(synchronizedVm.SettingsVM.UpdateBlockingProcesses);
+    }
+
+    [Fact]
+    public void FailedRestart_KeepsRestartActionAndShowsErrorPresentation()
+    {
+        var service = new UpdateService();
+        SetNonPublicProperty(service, nameof(UpdateService.CurrentStatus), UpdateStatus.ReadyToRestart);
+        SetNonPublicProperty(service, nameof(UpdateService.AvailableVersion), "1.2.3");
+        SetNonPublicProperty(service, nameof(UpdateService.ErrorMessage), "Updater launch failed.");
+
+        var vm = CreateMainViewModel(service);
+
+        Assert.True(vm.SettingsVM.IsUpdateReadyToRestart);
+        Assert.True(vm.SettingsVM.HasUpdateError);
+        Assert.True(vm.SettingsVM.HasPendingUpdate);
+        Assert.True(vm.SettingsVM.ShouldShowUpdateBanner);
+        Assert.Equal(Loc.Update_HeroErrorTitle, vm.SettingsVM.UpdateHeroTitle);
+        Assert.Equal(Loc.Update_StatusError, vm.SettingsVM.UpdateStatusBadgeText);
+        Assert.Contains("Updater launch failed", vm.SettingsVM.UpdateStatusText);
     }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using Avalonia;
@@ -56,6 +57,7 @@ public partial class App : Application
             _copilotService = copilotService;
             var updateService = new UpdateService();
             _updateService = updateService;
+            var updateShutdownCoordinator = new UpdateShutdownCoordinator();
             updateService.Initialize();
             _chatSurfaceRegistry = new ChatSurfaceRegistry();
             _globalSearchService = new GlobalSearchService(
@@ -75,22 +77,25 @@ public partial class App : Application
             _backgroundJobService = vm.BackgroundJobService;
             _mainViewModel = vm;
 
-            // Save data and dispose CopilotService on app shutdown.
-            // The window is already hidden at this point so nothing blocks the user.
-            // Task.Run avoids deadlocking the UI thread if _writeLock is held by
-            // an in-flight fire-and-forget save that needs the dispatcher to complete.
-            desktop.ShutdownRequested += (_, _) =>
+            void DisposeUiState(bool hideWindows)
             {
-                _isShuttingDown = true;
+                var mainWindows = _windows.ToList();
+                if (_mainWindow is not null && !mainWindows.Contains(_mainWindow))
+                    mainWindows.Add(_mainWindow);
+
+                if (hideWindows)
+                {
+                    foreach (var window in mainWindows)
+                        window.Hide();
+                }
+
                 foreach (var chatWindow in _chatWindows.Values.ToList())
                     chatWindow.Close();
                 _chatWindows.Clear();
                 updateService.Dispose();
-                var viewModels = _windows
+                var viewModels = mainWindows
                     .Select(static window => window.DataContext)
                     .OfType<MainViewModel>();
-                if (_mainWindow?.DataContext is MainViewModel primaryVm)
-                    viewModels = viewModels.Append(primaryVm);
 
                 foreach (var windowVm in viewModels.Distinct())
                 {
@@ -98,38 +103,83 @@ public partial class App : Application
                 }
                 _chatSessionStore?.Dispose();
                 _chatSurfaceRegistry?.Dispose();
+            }
 
-                Task.Run(async () =>
+            async Task DisposeServicesAsync()
+            {
+                try
                 {
-                    try
-                    {
-                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                        await dataStore.SaveAsync(cts.Token);
-                    }
-                    catch { }
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    await dataStore.SaveAsync(cts.Token);
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"[Shutdown] Failed to save app data: {ex.Message}");
+                }
 
-                    try
-                    {
-                        await copilotService.DisposeAsync();
-                    }
-                    catch { }
+                try
+                {
+                    await copilotService.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"[Shutdown] Failed to stop Copilot: {ex.Message}");
+                }
 
-                    try
-                    {
-                        await McpProxyRuntime.Shared.DisposeAsync();
-                    }
-                    catch { }
+                try
+                {
+                    await McpProxyRuntime.Shared.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"[Shutdown] Failed to stop MCP processes: {ex.Message}");
+                }
 
 #if DEBUG
-                    try
-                    {
-                        if (_debugBridge is not null)
-                            await _debugBridge.DisposeAsync();
-                    }
-                    catch { }
+                try
+                {
+                    if (_debugBridge is not null)
+                        await _debugBridge.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    Trace.TraceWarning($"[Shutdown] Failed to stop the debug bridge: {ex.Message}");
+                }
 #endif
-                }).GetAwaiter().GetResult();
-            };
+            }
+
+            void CleanupForShutdown(bool isUpdateRestart)
+            {
+                if (_isShuttingDown)
+                    return;
+
+                _isShuttingDown = true;
+                if (isUpdateRestart)
+                {
+                    updateShutdownCoordinator.Run(
+                        () => DisposeUiState(hideWindows: true),
+                        DisposeServicesAsync);
+                    return;
+                }
+
+                DisposeUiState(hideWindows: false);
+                Task.Run(DisposeServicesAsync).GetAwaiter().GetResult();
+            }
+
+            // Task.Run avoids deadlocking the UI thread if _writeLock is held by
+            // an in-flight fire-and-forget save that needs the dispatcher to complete.
+            desktop.ShutdownRequested += (_, _) => CleanupForShutdown(isUpdateRestart: false);
+            updateService.RestartRequested += () => Dispatcher.UIThread.Post(() =>
+            {
+                try
+                {
+                    CleanupForShutdown(isUpdateRestart: true);
+                }
+                finally
+                {
+                    desktop.Shutdown();
+                }
+            });
 
             // Apply saved theme before showing the window
             RequestedThemeVariant = dataStore.Data.Settings.IsDarkTheme

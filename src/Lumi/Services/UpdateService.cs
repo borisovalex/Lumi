@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -24,12 +26,19 @@ public sealed class UpdateService
     private static readonly HttpClient ReleaseMetadataClient = CreateReleaseMetadataClient();
 
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly IUpdateBlockerService _blockerService;
+    private readonly IUpdateRestartLauncher _restartLauncher;
+    private readonly Func<IReadOnlyList<string>> _updateResourceRootsProvider;
     private UpdateManager? _manager;
     private UpdateInfo? _pendingUpdate;
     private Timer? _periodicTimer;
+    private IReadOnlyList<string> _updateResourceRoots = [];
 
     /// <summary>Raised on UI thread when update state changes.</summary>
     public event Action<UpdateStatus>? StatusChanged;
+
+    /// <summary>Raised after Velopack starts waiting for Lumi to exit gracefully.</summary>
+    public event Action? RestartRequested;
 
     /// <summary>Current update status.</summary>
     public UpdateStatus CurrentStatus { get; private set; } = UpdateStatus.Idle;
@@ -55,8 +64,35 @@ public sealed class UpdateService
     /// <summary>When the update service last checked for updates.</summary>
     public DateTimeOffset? LastCheckedAt { get; private set; }
 
+    /// <summary>Processes currently preventing Velopack from replacing Lumi's files.</summary>
+    public IReadOnlyList<UpdateBlockingProcess> BlockingProcesses { get; private set; } = [];
+
+    /// <summary>Details from the latest blocker-close attempt, if it could not finish.</summary>
+    public string BlockerErrorMessage { get; private set; } = string.Empty;
+
+    /// <summary>Details from the latest update operation failure.</summary>
+    public string ErrorMessage { get; private set; } = string.Empty;
+
     /// <summary>Whether the app was installed via Velopack (vs running from IDE).</summary>
     public bool IsInstalled => _manager?.IsInstalled == true;
+
+    public UpdateService()
+        : this(
+            new UpdateBlockerService(),
+            new VelopackUpdateRestartLauncher(),
+            VelopackUpdatePathResolver.GetUpdateResourceRoots)
+    {
+    }
+
+    internal UpdateService(
+        IUpdateBlockerService blockerService,
+        IUpdateRestartLauncher restartLauncher,
+        Func<IReadOnlyList<string>> updateResourceRootsProvider)
+    {
+        _blockerService = blockerService;
+        _restartLauncher = restartLauncher;
+        _updateResourceRootsProvider = updateResourceRootsProvider;
+    }
 
     public void Initialize()
     {
@@ -65,10 +101,26 @@ public sealed class UpdateService
             var source = new GithubSource(RepoUrl, null, prerelease: false);
             _manager = new UpdateManager(source);
             CurrentStatus = _manager.IsInstalled ? UpdateStatus.Idle : UpdateStatus.NotInstalled;
+            if (_manager.IsInstalled)
+            {
+                try
+                {
+                    _updateResourceRoots = _updateResourceRootsProvider();
+                }
+                catch (Exception ex) when (ex is IOException
+                                           or InvalidOperationException
+                                           or ArgumentException
+                                           or NotSupportedException)
+                {
+                    Trace.TraceWarning(
+                        $"[UpdateService] Could not resolve every Velopack update path: {ex.Message}");
+                    _updateResourceRoots = [AppContext.BaseDirectory];
+                }
+            }
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Trace.TraceWarning($"[UpdateService] Failed to initialize: {ex.Message}");
+            Trace.TraceWarning($"[UpdateService] Failed to initialize: {ex.Message}");
             CurrentStatus = UpdateStatus.NotInstalled;
         }
     }
@@ -92,7 +144,10 @@ public sealed class UpdateService
     {
         // Once the update is downloaded, preserve the restart-required state until
         // the user restarts. A later background or manual check should not downgrade it.
-        if (CurrentStatus == UpdateStatus.ReadyToRestart)
+        if (CurrentStatus is UpdateStatus.ReadyToRestart
+            or UpdateStatus.PreparingToRestart
+            or UpdateStatus.BlockedByProcesses
+            or UpdateStatus.ClosingBlockingProcesses)
             return;
 
 #if DEBUG
@@ -124,6 +179,7 @@ public sealed class UpdateService
         if (!await _gate.WaitAsync(0)) return; // skip if already checking/downloading
         try
         {
+            ErrorMessage = string.Empty;
             SetStatus(UpdateStatus.Checking);
             var update = await _manager.CheckForUpdatesAsync();
             LastCheckedAt = checkedAt;
@@ -133,6 +189,7 @@ public sealed class UpdateService
                 _pendingUpdate = null;
                 AvailableVersion = null;
                 DownloadProgress = 0;
+                ClearBlockingProcesses();
                 ClearReleaseMetadata();
                 SetStatus(UpdateStatus.UpToDate);
             }
@@ -141,6 +198,7 @@ public sealed class UpdateService
                 _pendingUpdate = update;
                 AvailableVersion = update.TargetFullRelease.Version.ToString();
                 DownloadProgress = 0;
+                ClearBlockingProcesses();
                 ApplyAssetMetadata(update.TargetFullRelease);
 
                 var releaseMetadata = await TryGetReleaseMetadataAsync(AvailableVersion);
@@ -153,6 +211,7 @@ public sealed class UpdateService
         {
             LastCheckedAt = checkedAt;
             Trace.TraceWarning($"[UpdateService] Update check failed: {ex.Message}");
+            ErrorMessage = ex.Message;
             SetStatus(UpdateStatus.Error);
         }
         finally
@@ -194,7 +253,9 @@ public sealed class UpdateService
             var update = _pendingUpdate;
             if (update is null) return;
 
+            ErrorMessage = string.Empty;
             SetStatus(UpdateStatus.Downloading);
+            ClearBlockingProcesses();
             await _manager.DownloadUpdatesAsync(
                 update,
                 progress =>
@@ -207,6 +268,7 @@ public sealed class UpdateService
         catch (Exception ex)
         {
             Trace.TraceWarning($"[UpdateService] Update download failed: {ex.Message}");
+            ErrorMessage = ex.Message;
             SetStatus(UpdateStatus.Error);
         }
         finally
@@ -215,32 +277,140 @@ public sealed class UpdateService
         }
     }
 
-    public void ApplyUpdateAndRestart()
+    public async Task ApplyUpdateAndRestartAsync()
     {
 #if DEBUG
         if (TryGetDebugSimulation(out _) && (_manager is null || !_manager.IsInstalled))
         {
-            _pendingUpdate = null;
-            AvailableVersion = null;
-            DownloadProgress = 0;
-            ClearReleaseMetadata();
-            SetStatus(UpdateStatus.UpToDate);
+            if (!await _gate.WaitAsync(0))
+                return;
+
+            try
+            {
+                SetStatus(UpdateStatus.PreparingToRestart);
+                if (TryGetDebugUpdateBlockers(out var simulatedBlockers))
+                {
+                    SetBlockingProcesses(simulatedBlockers);
+                    SetStatus(UpdateStatus.BlockedByProcesses);
+                    return;
+                }
+
+                CompleteDebugUpdate();
+            }
+            finally
+            {
+                _gate.Release();
+            }
             return;
         }
 #endif
 
         var update = _pendingUpdate;
-        if (_manager is null || update is null) return;
+        if (_manager is null || update is null)
+            return;
+
+        if (!await _gate.WaitAsync(0))
+            return;
 
         try
         {
-            _manager.ApplyUpdatesAndRestart(update.TargetFullRelease);
+            ErrorMessage = string.Empty;
+            BlockerErrorMessage = string.Empty;
+            SetStatus(UpdateStatus.PreparingToRestart);
+
+            var blockers = await _blockerService.FindBlockingProcessesAsync(_updateResourceRoots);
+            if (blockers.Count > 0)
+            {
+                SetBlockingProcesses(blockers);
+                SetStatus(UpdateStatus.BlockedByProcesses);
+                return;
+            }
+
+            LaunchUpdateAndRequestShutdown(update);
         }
         catch (Exception ex)
         {
             Trace.TraceWarning($"[UpdateService] Failed to apply update: {ex.Message}");
-            SetStatus(UpdateStatus.Error);
+            ErrorMessage = ex.Message;
+            SetStatus(UpdateStatus.ReadyToRestart);
         }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task CloseBlockingProcessesAndRestartAsync()
+    {
+#if DEBUG
+        if (TryGetDebugSimulation(out _) && (_manager is null || !_manager.IsInstalled))
+        {
+            if (!await _gate.WaitAsync(0))
+                return;
+
+            try
+            {
+                SetStatus(UpdateStatus.ClosingBlockingProcesses);
+                await Task.Delay(180);
+                CompleteDebugUpdate();
+            }
+            finally
+            {
+                _gate.Release();
+            }
+            return;
+        }
+#endif
+
+        var update = _pendingUpdate;
+        if (_manager is null || update is null || BlockingProcesses.Count == 0)
+            return;
+
+        if (!await _gate.WaitAsync(0))
+            return;
+
+        try
+        {
+            BlockerErrorMessage = string.Empty;
+            SetStatus(UpdateStatus.ClosingBlockingProcesses);
+
+            var closeResult = await _blockerService.CloseBlockingProcessesAsync(BlockingProcesses);
+            var remainingBlockers = await _blockerService.FindBlockingProcessesAsync(_updateResourceRoots);
+            SetBlockingProcesses(remainingBlockers);
+
+            if (remainingBlockers.Count > 0)
+            {
+                if (closeResult.FailedProcessIds.Count > 0
+                    || remainingBlockers.All(static process => !process.CanClose))
+                {
+                    BlockerErrorMessage = "Some processes could not be closed automatically.";
+                }
+
+                SetStatus(UpdateStatus.BlockedByProcesses);
+                return;
+            }
+
+            LaunchUpdateAndRequestShutdown(update);
+        }
+        catch (Exception ex)
+        {
+            Trace.TraceWarning($"[UpdateService] Failed while closing update blockers: {ex.Message}");
+            BlockerErrorMessage = ex.Message;
+            SetStatus(UpdateStatus.BlockedByProcesses);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public void CancelBlockedRestart()
+    {
+        if (CurrentStatus != UpdateStatus.BlockedByProcesses)
+            return;
+
+        ClearBlockingProcesses();
+        SetStatus(UpdateStatus.ReadyToRestart);
     }
 
     public void Dispose()
@@ -252,6 +422,28 @@ public sealed class UpdateService
     {
         CurrentStatus = status;
         StatusChanged?.Invoke(status);
+    }
+
+    private void LaunchUpdateAndRequestShutdown(UpdateInfo update)
+    {
+        if (_manager is null)
+            throw new InvalidOperationException("The update manager is not initialized.");
+        if (RestartRequested is null)
+            throw new InvalidOperationException("No application shutdown handler is registered.");
+
+        _restartLauncher.Launch(_manager, update.TargetFullRelease);
+        RestartRequested.Invoke();
+    }
+
+    private void SetBlockingProcesses(IReadOnlyList<UpdateBlockingProcess> processes)
+    {
+        BlockingProcesses = processes;
+    }
+
+    private void ClearBlockingProcesses()
+    {
+        BlockingProcesses = [];
+        BlockerErrorMessage = string.Empty;
     }
 
     private static HttpClient CreateReleaseMetadataClient()
@@ -348,11 +540,24 @@ public sealed class UpdateService
     }
 
 #if DEBUG
+    private void CompleteDebugUpdate()
+    {
+        _pendingUpdate = null;
+        AvailableVersion = null;
+        DownloadProgress = 0;
+        ErrorMessage = string.Empty;
+        ClearBlockingProcesses();
+        ClearReleaseMetadata();
+        SetStatus(UpdateStatus.UpToDate);
+    }
+
     private void ApplyDebugSimulation(DebugUpdateSimulation simulation)
     {
         _pendingUpdate = null;
         AvailableVersion = simulation.Version;
         DownloadProgress = 0;
+        ErrorMessage = string.Empty;
+        ClearBlockingProcesses();
         LastCheckedAt = DateTimeOffset.Now;
         ReleaseNotesMarkdown = simulation.NotesMarkdown;
         ReleaseTitle = $"Lumi v{simulation.Version}";
@@ -388,6 +593,33 @@ public sealed class UpdateService
         simulation = new DebugUpdateSimulation(version.Trim(), notes.Trim(), publishedAt);
         return true;
     }
+
+    private static bool TryGetDebugUpdateBlockers(out IReadOnlyList<UpdateBlockingProcess> blockers)
+    {
+        var rawBlockers = Environment.GetEnvironmentVariable("LUMI_DEBUG_UPDATE_BLOCKERS");
+        if (string.IsNullOrWhiteSpace(rawBlockers))
+        {
+            blockers = [];
+            return false;
+        }
+
+        var names = string.Equals(rawBlockers.Trim(), "1", StringComparison.Ordinal)
+            ? ["PowerShell", "GitHub Copilot CLI"]
+            : rawBlockers.Split(
+                [';', '\r', '\n'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        blockers = names
+            .Select((name, index) => new UpdateBlockingProcess(
+                41000 + index,
+                null,
+                name,
+                null,
+                canClose: true,
+                isSimulated: true))
+            .ToArray();
+        return blockers.Count > 0;
+    }
 #endif
 
     private sealed record GitHubReleaseMetadata(
@@ -413,5 +645,19 @@ public enum UpdateStatus
     UpdateAvailable,
     Downloading,
     ReadyToRestart,
+    PreparingToRestart,
+    BlockedByProcesses,
+    ClosingBlockingProcesses,
     Error
+}
+
+internal interface IUpdateRestartLauncher
+{
+    void Launch(UpdateManager manager, VelopackAsset release);
+}
+
+internal sealed class VelopackUpdateRestartLauncher : IUpdateRestartLauncher
+{
+    public void Launch(UpdateManager manager, VelopackAsset release)
+        => manager.WaitExitThenApplyUpdates(release);
 }
