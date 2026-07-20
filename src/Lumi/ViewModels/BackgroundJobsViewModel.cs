@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
 using StrataSearch;
@@ -17,6 +18,10 @@ public partial class BackgroundJobsViewModel : ObservableObject
     private Guid? _preferredChatId;
     private bool _selectPreferredChatOnNextRefresh;
     private bool _isCreatingNewJob;
+    private Guid? _preservedEditorJobId;
+    private bool _isSynchronizingVisibleSelection;
+    private bool _isUpdatingFilters;
+    private bool _hydratedIsEnabled;
 
     public event Action? JobsChanged;
     public event Action<Guid>? OpenChatRequested;
@@ -36,8 +41,18 @@ public partial class BackgroundJobsViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(SelectedScriptOutput))]
     [NotifyPropertyChangedFor(nameof(HasSelectedScriptOutput))]
     private BackgroundJob? _selectedJob;
+    [ObservableProperty] private BackgroundJob? _selectedVisibleJob;
     [ObservableProperty] private bool _isEditing;
-    [ObservableProperty] private string _searchQuery = "";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasActiveFilters))]
+    private string _searchQuery = "";
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasActiveFilters))]
+    private int _activationFilterIndex;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasActiveFilters))]
+    private int _lifecycleFilterIndex;
+    [ObservableProperty] private int _totalJobCount;
     [ObservableProperty] private string _validationMessage = "";
 
     [ObservableProperty] private string _editName = "";
@@ -80,10 +95,15 @@ public partial class BackgroundJobsViewModel : ObservableObject
     public bool IsOnceSchedule => EditScheduleTypeIndex == 4;
     public bool IsCronSchedule => EditScheduleTypeIndex == 5;
     public bool HasSelectedJob => SelectedJob is not null;
-    public string SelectedRunStatus => SelectedJob?.LastRunStatus ?? "";
+    public string SelectedRunStatus => SelectedJob?.LifecycleDisplay ?? "";
     public string SelectedNextRunText => SelectedJob?.NextRunAt?.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) ?? "";
     public bool HasSelectedNextRun => SelectedJob?.NextRunAt is not null;
-    public string SelectedLastRunSummary => SelectedJob?.LastRunSummary ?? "";
+    public string SelectedLastRunSummary => SelectedJob switch
+    {
+        { IsLifecycleInterrupted: true } => Loc.Get("Jobs_LifecycleInterruptedDescription"),
+        { } job => job.LastRunSummary,
+        _ => ""
+    };
     public bool HasSelectedLastRunSummary => !string.IsNullOrWhiteSpace(SelectedJob?.LastRunSummary);
     public bool IsSelectedScriptJob => SelectedJob?.TriggerType == BackgroundJobTriggerTypes.Script;
     public string SelectedStartedText => SelectedJob?.LastRunStartedAt?.ToLocalTime().ToString("g", CultureInfo.CurrentCulture) ?? "";
@@ -92,6 +112,45 @@ public partial class BackgroundJobsViewModel : ObservableObject
     public bool HasSelectedExitCode => SelectedJob?.LastScriptExitCode is not null;
     public string SelectedScriptOutput => SelectedJob?.LastScriptOutput ?? "";
     public bool HasSelectedScriptOutput => IsSelectedScriptJob && !string.IsNullOrWhiteSpace(SelectedJob?.LastScriptOutput);
+    public bool HasActiveFilters => !string.IsNullOrWhiteSpace(SearchQuery)
+        || ActivationFilterIndex != 0
+        || LifecycleFilterIndex != 0;
+    public bool HasVisibleJobs => Jobs.Count > 0;
+    public bool HasNoFilterResults => TotalJobCount > 0 && Jobs.Count == 0;
+    public string JobCountDisplay => HasActiveFilters
+        ? Loc.Get("Jobs_FilterCount", Jobs.Count, TotalJobCount)
+        : Loc.Get("Jobs_Count", TotalJobCount);
+    public string SelectedActivationStatus => SelectedJob?.ActivationDisplay ?? "";
+    public string SelectedActivationDescription => SelectedJob is null
+        ? ""
+        : Loc.Get(SelectedJob.IsEnabled ? "Jobs_AutomationOn" : "Jobs_AutomationOff");
+    public string SelectedActivationActionText => SelectedJob?.IsEnabled == true
+        ? Loc.Get("Jobs_PauseAction")
+        : Loc.Get("Jobs_EnableAction");
+    public string SelectedActivationActionAutomationName => SelectedJob?.ActivationActionAutomationName ?? "";
+    public bool IsSelectedJobEnabled => SelectedJob?.IsEnabled == true;
+    public bool IsSelectedJobPaused => SelectedJob is { IsEnabled: false };
+    public string SelectedLifecycleStatus => SelectedJob?.LifecycleDisplay ?? "";
+    public string SelectedLifecycleDescription => SelectedJob switch
+    {
+        { IsLifecycleInterrupted: true } => Loc.Get("Jobs_LifecycleInterruptedDescription"),
+        { LastRunSummary.Length: > 0 } job => job.LastRunSummary,
+        { IsLifecycleNotRun: true } => Loc.Get("Jobs_LifecycleNotRunDescription"),
+        null => "",
+        _ => Loc.Get("Jobs_LifecycleNoSummary")
+    };
+    public string SelectedUpcomingRunText => SelectedJob?.UpcomingRunDisplay ?? "";
+    public string SelectedLastRunTimeText => SelectedJob?.LastRunTimeDisplay ?? "";
+    public bool HasSelectedRunHistory => SelectedJob is not null
+        && (SelectedJob.RunCount > 0
+            || SelectedJob.LastRunStartedAt is not null
+            || SelectedJob.LastRunStatus != BackgroundJobRunStatuses.Idle);
+    public bool HasNoSelectedRunHistory => !HasSelectedRunHistory;
+    public bool IsSelectedLifecycleInProgress => SelectedJob?.IsLifecycleInProgress == true;
+    public bool IsSelectedLifecycleCompleted => SelectedJob?.IsLifecycleCompleted == true;
+    public bool IsSelectedLifecycleSkipped => SelectedJob?.IsLifecycleSkipped == true;
+    public bool IsSelectedLifecycleFailed => SelectedJob?.IsLifecycleFailed == true;
+    public bool IsSelectedLifecycleIdle => SelectedJob?.IsLifecycleIdle == true;
 
     public BackgroundJobsViewModel(DataStore dataStore, BackgroundJobService jobService)
     {
@@ -100,9 +159,17 @@ public partial class BackgroundJobsViewModel : ObservableObject
         RefreshFromStore();
     }
 
-    public void RefreshFromStore()
+    public void RefreshFromStore(bool preserveEditorBuffer = false)
     {
+        var preservedEditChatId = preserveEditorBuffer ? EditChat?.Id : null;
         RefreshChats();
+        if (preserveEditorBuffer)
+        {
+            EditChat = preservedEditChatId is { } chatId
+                ? AvailableChats.FirstOrDefault(chat => chat.Id == chatId)
+                : null;
+        }
+
         RefreshList();
 
         if (TrySelectPreferredChatJob())
@@ -129,7 +196,11 @@ public partial class BackgroundJobsViewModel : ObservableObject
             return;
         }
 
-        SyncEditorFromJob(selected);
+        if (preserveEditorBuffer)
+            RefreshEditorRuntimeState(selected);
+        else
+            SyncEditorFromJob(selected);
+
         RefreshSelectedJobDerivedProperties();
     }
 
@@ -156,31 +227,134 @@ public partial class BackgroundJobsViewModel : ObservableObject
 
     private void RefreshList()
     {
-        Jobs.Clear();
-        var jobs = _dataStore.SnapshotBackgroundJobs();
-        var orderedJobs = jobs
-            .OrderByDescending(static job => job.IsEnabled)
-            .ThenBy(static job => job.NextRunAt ?? DateTimeOffset.MaxValue)
-            .ThenBy(static job => job.Name, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var hasQuery = !string.IsNullOrWhiteSpace(SearchQuery);
-        var items = hasQuery
-            ? SearchPipeline.Rank(
-                orderedJobs,
-                SearchQuery,
-                static job =>
-                [
-                    SearchField.Primary(job.Name, 3.5),
-                    new SearchField(job.Description, 1.8),
-                    SearchField.Content(job.Prompt, 1.1),
-                    new SearchField(job.LastRunSummary, 0.9)
-                ])
-            : orderedJobs;
-
-        foreach (var job in items)
+        var selectedJobId = SelectedJob?.Id;
+        _preservedEditorJobId = selectedJobId;
+        try
         {
-            Jobs.Add(job);
+            var jobs = _dataStore.SnapshotBackgroundJobs();
+            TotalJobCount = jobs.Count;
+            var orderedJobs = jobs
+                .OrderByDescending(static job => job.IsEnabled)
+                .ThenBy(static job => job.NextRunAt ?? DateTimeOffset.MaxValue)
+                .ThenBy(static job => job.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            foreach (var job in orderedJobs)
+                job.NotifyPresentationStateChanged();
+
+            var filteredJobs = orderedJobs
+                .Where(MatchesActivationFilter)
+                .Where(MatchesLifecycleFilter)
+                .ToArray();
+            var trimmedQuery = SearchQuery.Trim();
+            var hasQuery = trimmedQuery.Length > 0;
+            var searchCandidates = hasQuery
+                ? filteredJobs.Where(job => MatchesSearchQuery(job, trimmedQuery)).ToArray()
+                : filteredJobs;
+            var items = hasQuery
+                ? SearchPipeline.Rank(
+                    searchCandidates,
+                    trimmedQuery,
+                    static job =>
+                    [
+                        SearchField.Primary(job.Name, 3.5),
+                        new SearchField(job.Description, 1.8)
+                    ])
+                : searchCandidates;
+
+            ReconcileJobs(items.ToArray());
+
+            if (!_isCreatingNewJob)
+            {
+                var storedSelection = selectedJobId is { } id
+                    ? jobs.FirstOrDefault(job => job.Id == id)
+                    : null;
+
+                if (storedSelection is not null)
+                {
+                    if (!ReferenceEquals(SelectedJob, storedSelection))
+                        SelectedJob = storedSelection;
+
+                    SynchronizeVisibleSelection(storedSelection);
+                }
+                else
+                {
+                    SelectedJob = null;
+                    IsEditing = false;
+                    SelectDefaultJobIfNeeded();
+                }
+            }
+
+            RefreshListDerivedProperties();
         }
+        finally
+        {
+            _preservedEditorJobId = null;
+        }
+    }
+
+    private void ReconcileJobs(BackgroundJob[] items)
+    {
+        for (var targetIndex = 0; targetIndex < items.Length; targetIndex++)
+        {
+            var target = items[targetIndex];
+            var currentIndex = -1;
+            for (var index = targetIndex; index < Jobs.Count; index++)
+            {
+                if (Jobs[index].Id != target.Id)
+                    continue;
+
+                currentIndex = index;
+                break;
+            }
+
+            if (currentIndex < 0)
+            {
+                Jobs.Insert(targetIndex, target);
+                continue;
+            }
+
+            if (!ReferenceEquals(Jobs[currentIndex], target))
+                Jobs[currentIndex] = target;
+
+            if (currentIndex != targetIndex)
+                Jobs.Move(currentIndex, targetIndex);
+        }
+
+        while (Jobs.Count > items.Length)
+            Jobs.RemoveAt(Jobs.Count - 1);
+    }
+
+    private bool MatchesActivationFilter(BackgroundJob job) => ActivationFilterIndex switch
+    {
+        1 => job.IsEnabled,
+        2 => !job.IsEnabled,
+        _ => true
+    };
+
+    private static bool MatchesSearchQuery(BackgroundJob job, string query)
+    {
+        var terms = query.Split(
+            (char[]?)null,
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return terms.All(term =>
+            job.Name.Contains(term, StringComparison.CurrentCultureIgnoreCase)
+            || job.Description.Contains(term, StringComparison.CurrentCultureIgnoreCase));
+    }
+
+    private bool MatchesLifecycleFilter(BackgroundJob job) => LifecycleFilterIndex switch
+    {
+        1 => job.IsLifecycleInProgress,
+        2 => job.IsLifecycleFinished,
+        3 => job.IsLifecycleFailed,
+        4 => job.IsLifecycleNotRun,
+        _ => true
+    };
+
+    private void RefreshListDerivedProperties()
+    {
+        OnPropertyChanged(nameof(HasVisibleJobs));
+        OnPropertyChanged(nameof(HasNoFilterResults));
+        OnPropertyChanged(nameof(JobCountDisplay));
     }
 
     private void SelectDefaultJobIfNeeded()
@@ -223,7 +397,23 @@ public partial class BackgroundJobsViewModel : ObservableObject
         return Jobs.FirstOrDefault();
     }
 
-    partial void OnSearchQueryChanged(string value) => RefreshList();
+    partial void OnSearchQueryChanged(string value)
+    {
+        if (!_isUpdatingFilters)
+            RefreshList();
+    }
+
+    partial void OnActivationFilterIndexChanged(int value)
+    {
+        if (!_isUpdatingFilters)
+            RefreshList();
+    }
+
+    partial void OnLifecycleFilterIndexChanged(int value)
+    {
+        if (!_isUpdatingFilters)
+            RefreshList();
+    }
 
     partial void OnEditTriggerTypeIndexChanged(int value)
     {
@@ -248,14 +438,53 @@ public partial class BackgroundJobsViewModel : ObservableObject
 
     partial void OnSelectedJobChanged(BackgroundJob? value)
     {
-        ValidationMessage = "";
+        var preserveEditorBuffer = value is not null && _preservedEditorJobId == value.Id;
+        if (!preserveEditorBuffer)
+            ValidationMessage = "";
+
+        SynchronizeVisibleSelection(value);
+        RefreshSelectedJobDerivedProperties();
         if (value is null)
             return;
 
         _isCreatingNewJob = false;
+        if (preserveEditorBuffer)
+        {
+            IsEditing = true;
+            RefreshSelectedJobDerivedProperties();
+            return;
+        }
+
         SyncEditorFromJob(value);
         IsEditing = true;
         RefreshSelectedJobDerivedProperties();
+    }
+
+    partial void OnSelectedVisibleJobChanged(BackgroundJob? value)
+    {
+        if (_isSynchronizingVisibleSelection || value is null || SelectedJob?.Id == value.Id)
+            return;
+
+        SelectedJob = value;
+    }
+
+    private void SynchronizeVisibleSelection(BackgroundJob? job)
+    {
+        var visibleJob = job is null
+            ? null
+            : Jobs.FirstOrDefault(item => item.Id == job.Id);
+        if (ReferenceEquals(SelectedVisibleJob, visibleJob))
+            return;
+
+        _isSynchronizingVisibleSelection = true;
+        try
+        {
+            SelectedVisibleJob = visibleJob;
+        }
+        finally
+        {
+            _isSynchronizingVisibleSelection = false;
+        }
     }
 
     private void SyncEditorFromJob(BackgroundJob job)
@@ -283,11 +512,38 @@ public partial class BackgroundJobsViewModel : ObservableObject
         EditScriptLanguageIndex = ScriptLanguageToIndex(job.ScriptLanguage);
         EditScriptContent = job.ScriptContent;
         EditIsEnabled = job.IsEnabled;
+        _hydratedIsEnabled = job.IsEnabled;
         EditIsTemporary = job.IsTemporary;
+    }
+
+    private void RefreshEditorRuntimeState(BackgroundJob job)
+    {
+        if (EditIsEnabled == _hydratedIsEnabled)
+            EditIsEnabled = job.IsEnabled;
+
+        _hydratedIsEnabled = job.IsEnabled;
     }
 
     [RelayCommand]
     private void ClearSearch() => SearchQuery = "";
+
+    [RelayCommand]
+    private void ResetFilters()
+    {
+        _isUpdatingFilters = true;
+        try
+        {
+            SearchQuery = "";
+            ActivationFilterIndex = 0;
+            LifecycleFilterIndex = 0;
+        }
+        finally
+        {
+            _isUpdatingFilters = false;
+        }
+
+        RefreshList();
+    }
 
     [RelayCommand]
     private void NewJob()
@@ -310,6 +566,7 @@ public partial class BackgroundJobsViewModel : ObservableObject
         EditScriptLanguageIndex = 0;
         EditScriptContent = "";
         EditIsEnabled = true;
+        _hydratedIsEnabled = true;
         EditIsTemporary = false;
         IsEditing = true;
     }
@@ -431,6 +688,7 @@ public partial class BackgroundJobsViewModel : ObservableObject
 
         _isCreatingNewJob = false;
         SelectedJob = job;
+        _hydratedIsEnabled = job.IsEnabled;
         _ = _dataStore.SaveAsync();
         IsEditing = true;
         RefreshList();
@@ -471,7 +729,10 @@ public partial class BackgroundJobsViewModel : ObservableObject
     {
         if (job is null)
             return;
+        if (!job.IsEnabled && !EnsureLinkedChatExists(job))
+            return;
 
+        ValidationMessage = "";
         var now = DateTimeOffset.Now;
         var shouldRunImmediately = false;
         lock (job.SyncRoot)
@@ -484,6 +745,11 @@ public partial class BackgroundJobsViewModel : ObservableObject
 
         _dataStore.MarkBackgroundJobsChanged();
         _ = _dataStore.SaveAsync();
+        if (SelectedJob?.Id == job.Id)
+        {
+            EditIsEnabled = job.IsEnabled;
+            _hydratedIsEnabled = job.IsEnabled;
+        }
         RefreshList();
         RefreshSelectedJobDerivedProperties();
         JobsChanged?.Invoke();
@@ -497,7 +763,10 @@ public partial class BackgroundJobsViewModel : ObservableObject
         job ??= SelectedJob;
         if (job is null)
             return;
+        if (!EnsureLinkedChatExists(job))
+            return;
 
+        ValidationMessage = "";
         lock (job.SyncRoot)
         {
             job.IsEnabled = true;
@@ -507,6 +776,11 @@ public partial class BackgroundJobsViewModel : ObservableObject
 
         _dataStore.MarkBackgroundJobsChanged();
         _ = _dataStore.SaveAsync();
+        if (SelectedJob?.Id == job.Id)
+        {
+            EditIsEnabled = true;
+            _hydratedIsEnabled = true;
+        }
         RefreshList();
         RefreshSelectedJobDerivedProperties();
         JobsChanged?.Invoke();
@@ -528,13 +802,42 @@ public partial class BackgroundJobsViewModel : ObservableObject
         OnPropertyChanged(nameof(HasSelectedExitCode));
         OnPropertyChanged(nameof(SelectedScriptOutput));
         OnPropertyChanged(nameof(HasSelectedScriptOutput));
+        OnPropertyChanged(nameof(SelectedActivationStatus));
+        OnPropertyChanged(nameof(SelectedActivationDescription));
+        OnPropertyChanged(nameof(SelectedActivationActionText));
+        OnPropertyChanged(nameof(SelectedActivationActionAutomationName));
+        OnPropertyChanged(nameof(IsSelectedJobEnabled));
+        OnPropertyChanged(nameof(IsSelectedJobPaused));
+        OnPropertyChanged(nameof(SelectedLifecycleStatus));
+        OnPropertyChanged(nameof(SelectedLifecycleDescription));
+        OnPropertyChanged(nameof(SelectedUpcomingRunText));
+        OnPropertyChanged(nameof(SelectedLastRunTimeText));
+        OnPropertyChanged(nameof(HasSelectedRunHistory));
+        OnPropertyChanged(nameof(HasNoSelectedRunHistory));
+        OnPropertyChanged(nameof(IsSelectedLifecycleInProgress));
+        OnPropertyChanged(nameof(IsSelectedLifecycleCompleted));
+        OnPropertyChanged(nameof(IsSelectedLifecycleSkipped));
+        OnPropertyChanged(nameof(IsSelectedLifecycleFailed));
+        OnPropertyChanged(nameof(IsSelectedLifecycleIdle));
     }
 
     [RelayCommand]
     private void OpenChat(BackgroundJob? job)
     {
-        if (job is not null)
-            OpenChatRequested?.Invoke(job.ChatId);
+        if (job is null || !EnsureLinkedChatExists(job))
+            return;
+
+        ValidationMessage = "";
+        OpenChatRequested?.Invoke(job.ChatId);
+    }
+
+    private bool EnsureLinkedChatExists(BackgroundJob job)
+    {
+        if (_dataStore.Data.Chats.Any(chat => chat.Id == job.ChatId))
+            return true;
+
+        ValidationMessage = Loc.Get("Jobs_LinkedChatMissing");
+        return false;
     }
 
     private static int ScriptLanguageToIndex(string? language)

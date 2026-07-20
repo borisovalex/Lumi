@@ -42,6 +42,7 @@
     <StreamGeometry x:Key="Icon.Play">M8 5v14l11-7L8 5z</StreamGeometry>
     <StreamGeometry x:Key="Icon.Pin">M10.0589 2.44535C9.34701 1.73087 8.14697 1.90854 7.67261 2.79864L5.6526 6.58902L2.8419 7.52592C2.6775 7.58072 2.5532 7.71673 2.51339 7.88539C2.47357 8.05404 2.52392 8.23128 2.64646 8.35382L4.79291 10.5003L2.14645 13.1467L2 14.0003L2.85356 13.8538L5.50002 11.2074L7.64646 13.3538C7.76899 13.4764 7.94623 13.5267 8.11489 13.4869C8.28354 13.4471 8.41955 13.3228 8.47435 13.1584L9.41143 10.3472L13.1897 8.32448C14.0759 7.85006 14.2538 6.65535 13.5443 5.9433L10.0589 2.44535ZM8.55511 3.26895C8.71323 2.97225 9.11324 2.91303 9.35055 3.15119L12.836 6.64914C13.0725 6.88648 13.0131 7.28472 12.7178 7.44286L8.76403 9.55946C8.65137 9.61977 8.56608 9.72092 8.52567 9.84215L7.7815 12.0746L3.92562 8.21877L6.15812 7.47461C6.27966 7.43409 6.38101 7.34848 6.44126 7.23542L8.55511 3.26895Z</StreamGeometry>
     <StreamGeometry x:Key="Icon.PinOff">M9.56016 10.2673L14.1464 14.8536C14.3417 15.0488 14.6583 15.0488 14.8536 14.8536C15.0488 14.6583 15.0488 14.3417 14.8536 14.1464L1.85355 1.14645C1.65829 0.951184 1.34171 0.951184 1.14645 1.14645C0.951184 1.34171 0.951184 1.65829 1.14645 1.85355L5.73223 6.43934L5.6526 6.58876L2.8419 7.52566C2.6775 7.58046 2.5532 7.71648 2.51339 7.88513C2.47357 8.05378 2.52392 8.23102 2.64646 8.35356L4.79291 10.5L2.14645 13.1465L2 14L2.85356 13.8536L5.50002 11.2071L7.64646 13.3536C7.76899 13.4761 7.94623 13.5264 8.11489 13.4866C8.28354 13.4468 8.41955 13.3225 8.47435 13.1581L9.41143 10.3469L9.56016 10.2673ZM8.82138 9.52849L8.76403 9.5592C8.65137 9.61951 8.56608 9.72066 8.52567 9.84189L7.7815 12.0744L3.92562 8.21851L6.15812 7.47435C6.27966 7.43383 6.38101 7.34822 6.44126 7.23516L6.47143 7.17854L8.82138 9.52849ZM12.7178 7.4426L10.6636 8.54227L11.4024 9.28105L13.1897 8.32422C14.0759 7.84981 14.2538 6.65509 13.5443 5.94304L10.0589 2.44509C9.34701 1.73062 8.14697 1.90828 7.67261 2.79838L6.71556 4.59421L7.45476 5.33341L8.55511 3.26869C8.71323 2.97199 9.11324 2.91277 9.35055 3.15093L12.836 6.64888C13.0725 6.88623 13.0131 7.28446 12.7178 7.4426Z</StreamGeometry>
+    <StreamGeometry x:Key="Icon.Pause">M7 5h4v14H7V5zm6 0h4v14h-4V5z</StreamGeometry>
   </Window.Resources>
 
   <Window.Styles>
@@ -264,6 +265,72 @@
     <Style Selector="TextBox.project-switcher-search-box:focus-within /template/ Border#FocusAccentBar">
       <Setter Property="Opacity" Value="0" />
       <Setter Property="IsVisible" Value="False" />
+    </Style>
+
+    <Style Selector="ComboBox.jobs-filter">
+      <Setter Property="MinHeight" Value="30" />
+      <Setter Property="Padding" Value="8,3" />
+      <Setter Property="FontSize" Value="{DynamicResource Font.SizeCaption}" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+    </Style>
+
+    <Style Selector="Button.job-activation-toggle">
+      <Setter Property="Padding" Value="7,3" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="MinWidth" Value="0" />
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="FontSize" Value="10.5" />
+    </Style>
+    <Style Selector="Button.job-activation-toggle.enabled">
+      <Setter Property="Background" Value="{DynamicResource Brush.SuccessSubtle}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.SuccessSubtle}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.SuccessDefault}" />
+    </Style>
+    <Style Selector="Button.job-activation-toggle.paused">
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface2}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource Brush.BorderSubtle}" />
+      <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}" />
+    </Style>
+
+    <Style Selector="Border.job-lifecycle-pill">
+      <Setter Property="CornerRadius" Value="999" />
+      <Setter Property="Padding" Value="6,2" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill TextBlock">
+      <Setter Property="FontSize" Value="10.5" />
+      <Setter Property="FontWeight" Value="Medium" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.progress">
+      <Setter Property="Background" Value="{DynamicResource Brush.AccentSubtle}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.progress TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.AccentDefault}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.completed">
+      <Setter Property="Background" Value="{DynamicResource Brush.SuccessSubtle}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.completed TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.SuccessDefault}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.skipped">
+      <Setter Property="Background" Value="{DynamicResource Brush.WarningSubtle}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.skipped TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.WarningDefault}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.failed">
+      <Setter Property="Background" Value="{DynamicResource Brush.DangerSubtle}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.failed TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.DangerDefault}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.idle">
+      <Setter Property="Background" Value="{DynamicResource Brush.Surface2}" />
+    </Style>
+    <Style Selector="Border.job-lifecycle-pill.idle TextBlock">
+      <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}" />
     </Style>
 
     <Style Selector="Button.project-switcher-row">
@@ -803,7 +870,9 @@
               <DockPanel DockPanel.Dock="Top" Margin="16,8,16,0">
                 <Button DockPanel.Dock="Right" Classes="subtle" Padding="7,5" MinHeight="0"
                         CornerRadius="{DynamicResource Radius.Base}"
-                        Command="{Binding NewJobCommand}" ToolTip.Tip="{loc:Str Sidebar_NewJobTooltip}">
+                        Command="{Binding NewJobCommand}"
+                        ToolTip.Tip="{loc:Str Sidebar_NewJobTooltip}"
+                        AutomationProperties.Name="{loc:Str Sidebar_NewJobTooltip}">
                   <PathIcon Data="{StaticResource Icon.Plus}" Width="14" Height="14"
                             Foreground="{DynamicResource Brush.TextSecondary}" />
                 </Button>
@@ -814,81 +883,232 @@
               <Border DockPanel.Dock="Top"
                       Classes="project-switcher-search"
                       Margin="16,8,16,0">
-                <DockPanel>
-                  <PathIcon DockPanel.Dock="Left"
+                <Grid ColumnDefinitions="Auto,*">
+                  <PathIcon
                             Data="{StaticResource Icon.Search}"
                             Width="12" Height="12"
                             Foreground="{DynamicResource Brush.TextTertiary}"
                             VerticalAlignment="Center"
                             Margin="0,0,7,0" />
-                  <TextBox Classes="project-switcher-search-box"
+                  <TextBox x:Name="JobsSearchBox"
+                           Grid.Column="1"
+                           Classes="project-switcher-search-box"
                            Text="{Binding SearchQuery}"
-                           PlaceholderText="{loc:Str Sidebar_Search_Short}" />
-                </DockPanel>
+                           Padding="0,0,24,0"
+                           PlaceholderText="{loc:Str Sidebar_Search_Short}"
+                           AutomationProperties.Name="{loc:Str Sidebar_Search_Short}" />
+                  <Button Grid.Column="1"
+                          HorizontalAlignment="Right"
+                          Classes="subtle"
+                          Padding="4"
+                          MinWidth="0"
+                          MinHeight="0"
+                          Command="{Binding ClearSearchCommand}"
+                          IsVisible="{Binding SearchQuery, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                          ToolTip.Tip="{loc:Str Common_Clear}"
+                          AutomationProperties.Name="{loc:Str Common_Clear}">
+                    <PathIcon Data="{StaticResource Icon.Dismiss}" Width="11" Height="11"
+                              Foreground="{DynamicResource Brush.TextTertiary}" />
+                  </Button>
+                </Grid>
               </Border>
-              <ListBox Classes="sidebar-list" Margin="8,8,8,8"
-                       ItemsSource="{Binding Jobs}"
-                       SelectedItem="{Binding SelectedJob, Mode=TwoWay}"
-                       SelectionMode="Single">
-                <ListBox.ItemTemplate>
-                  <DataTemplate x:DataType="models:BackgroundJob">
-                    <Panel Background="Transparent">
-                      <Panel.ContextMenu>
-                        <ContextMenu x:CompileBindings="False">
-                          <MenuItem Header="{loc:Str Jobs_RunNow}"
-                                    Command="{Binding $parent[Window].DataContext.JobsVM.RunNowCommand}"
-                                    CommandParameter="{Binding}">
-                            <MenuItem.Icon>
-                              <PathIcon Data="{StaticResource Icon.Play}" Width="14" Height="14" />
-                            </MenuItem.Icon>
-                          </MenuItem>
-                          <MenuItem Header="{loc:Str Jobs_FieldEnabled}"
-                                    Command="{Binding $parent[Window].DataContext.JobsVM.ToggleJobCommand}"
-                                    CommandParameter="{Binding}">
-                            <MenuItem.Icon>
-                              <PathIcon Data="{StaticResource Icon.Check}" Width="14" Height="14" />
-                            </MenuItem.Icon>
-                          </MenuItem>
-                          <Separator />
-                          <MenuItem Header="{loc:Str Menu_Delete}"
-                                    Command="{Binding $parent[Window].DataContext.JobsVM.DeleteJobCommand}"
-                                    CommandParameter="{Binding}">
-                            <MenuItem.Icon>
-                              <PathIcon Data="{StaticResource Icon.Trash}" Width="14" Height="14" />
-                            </MenuItem.Icon>
-                          </MenuItem>
-                        </ContextMenu>
-                      </Panel.ContextMenu>
-                      <DockPanel>
-                        <Ellipse DockPanel.Dock="Left" Width="6" Height="6"
-                                 VerticalAlignment="Center" Margin="0,0,8,0"
-                                 Fill="{DynamicResource Brush.SuccessDefault}"
-                                 IsVisible="{Binding IsEnabled}" />
-                        <Ellipse DockPanel.Dock="Left" Width="6" Height="6"
-                                 VerticalAlignment="Center" Margin="0,0,8,0"
-                                 Fill="{DynamicResource Brush.TextTertiary}" Opacity="0.4"
-                                 IsVisible="{Binding !IsEnabled}" />
-                        <StackPanel Spacing="1">
+              <Grid DockPanel.Dock="Top"
+                    ColumnDefinitions="*,*"
+                    ColumnSpacing="6"
+                    Margin="16,8,16,0">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="{loc:Str Jobs_FilterActivation}"
+                             FontSize="10"
+                             Foreground="{DynamicResource Brush.TextTertiary}" />
+                  <ComboBox x:Name="JobsActivationFilter"
+                            Classes="jobs-filter"
+                            SelectedIndex="{Binding ActivationFilterIndex}"
+                            AutomationProperties.Name="{loc:Str Jobs_FilterActivation}">
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterAllActivation}" />
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterEnabled}" />
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterPaused}" />
+                  </ComboBox>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="3">
+                  <TextBlock Text="{loc:Str Jobs_FilterLifecycle}"
+                             FontSize="10"
+                             Foreground="{DynamicResource Brush.TextTertiary}" />
+                  <ComboBox x:Name="JobsLifecycleFilter"
+                            Classes="jobs-filter"
+                            SelectedIndex="{Binding LifecycleFilterIndex}"
+                            AutomationProperties.Name="{loc:Str Jobs_FilterLifecycle}">
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterAnyLifecycle}" />
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterInProgress}" />
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterFinished}" />
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterFailed}" />
+                    <ComboBoxItem Content="{loc:Str Jobs_FilterNotRun}" />
+                  </ComboBox>
+                </StackPanel>
+              </Grid>
+              <DockPanel DockPanel.Dock="Top" Margin="16,7,16,0">
+                <Button x:Name="JobsResetFiltersButton"
+                        DockPanel.Dock="Right"
+                        Classes="subtle"
+                        Content="{loc:Str Jobs_ClearFilters}"
+                        Command="{Binding ResetFiltersCommand}"
+                        IsVisible="{Binding HasActiveFilters}"
+                        Padding="7,3"
+                        MinHeight="0"
+                        FontSize="10.5" />
+                <TextBlock Text="{Binding JobCountDisplay}"
+                           FontSize="10.5"
+                           Foreground="{DynamicResource Brush.TextTertiary}"
+                           VerticalAlignment="Center" />
+              </DockPanel>
+              <Grid>
+                <ListBox x:Name="JobsList"
+                         Classes="sidebar-list"
+                         Margin="8,6,8,8"
+                         ItemsSource="{Binding Jobs}"
+                         SelectedItem="{Binding SelectedVisibleJob, Mode=TwoWay}"
+                         SelectionMode="Single"
+                         IsVisible="{Binding HasVisibleJobs}">
+                  <ListBox.Styles>
+                    <Style Selector="ListBoxItem" x:DataType="models:BackgroundJob">
+                      <Setter Property="AutomationProperties.Name" Value="{Binding Name}" />
+                    </Style>
+                  </ListBox.Styles>
+                  <ListBox.ItemTemplate>
+                    <DataTemplate x:DataType="models:BackgroundJob">
+                      <Panel Background="Transparent"
+                             PointerPressed="OnJobRowPointerPressed"
+                             AutomationProperties.Name="{Binding Name}">
+                        <Panel.ContextMenu>
+                          <ContextMenu x:CompileBindings="False">
+                            <MenuItem Header="{loc:Str Jobs_RunNow}"
+                                      Command="{Binding $parent[Window].DataContext.JobsVM.RunNowCommand}"
+                                      CommandParameter="{Binding}">
+                              <MenuItem.Icon>
+                                <PathIcon Data="{StaticResource Icon.Play}" Width="14" Height="14" />
+                              </MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem Header="{loc:Str Jobs_PauseAction}"
+                                      Command="{Binding $parent[Window].DataContext.JobsVM.ToggleJobCommand}"
+                                      CommandParameter="{Binding}"
+                                      IsVisible="{Binding IsEnabled}">
+                              <MenuItem.Icon>
+                                <PathIcon Data="{StaticResource Icon.Pause}" Width="14" Height="14" />
+                              </MenuItem.Icon>
+                            </MenuItem>
+                            <MenuItem Header="{loc:Str Jobs_EnableAction}"
+                                      Command="{Binding $parent[Window].DataContext.JobsVM.ToggleJobCommand}"
+                                      CommandParameter="{Binding}"
+                                      IsVisible="{Binding !IsEnabled}">
+                              <MenuItem.Icon>
+                                <PathIcon Data="{StaticResource Icon.Check}" Width="14" Height="14" />
+                              </MenuItem.Icon>
+                            </MenuItem>
+                            <Separator />
+                            <MenuItem Header="{loc:Str Menu_Delete}"
+                                      Command="{Binding $parent[Window].DataContext.JobsVM.DeleteJobCommand}"
+                                      CommandParameter="{Binding}">
+                              <MenuItem.Icon>
+                                <PathIcon Data="{StaticResource Icon.Trash}" Width="14" Height="14" />
+                              </MenuItem.Icon>
+                            </MenuItem>
+                          </ContextMenu>
+                        </Panel.ContextMenu>
+                        <StackPanel Spacing="4">
                           <DockPanel>
-                            <TextBlock Text="{Binding StatusDisplay}"
-                                       DockPanel.Dock="Right"
-                                       Classes="caption tertiary"
-                                       Margin="8,0,0,0" />
-                            <TextBlock Text="{Binding Name}" FontSize="{DynamicResource Font.SizeBody}"
-                                       TextTrimming="CharacterEllipsis" />
+                            <Button DockPanel.Dock="Right"
+                                    Classes="job-activation-toggle enabled"
+                                    Command="{Binding $parent[Window].DataContext.JobsVM.ToggleJobCommand}"
+                                    CommandParameter="{Binding}"
+                                    IsVisible="{Binding IsEnabled}"
+                                    x:CompileBindings="False"
+                                    ToolTip.Tip="{loc:Str Jobs_PauseAction}"
+                                    AutomationProperties.Name="{Binding ActivationActionAutomationName}">
+                              <StackPanel Orientation="Horizontal" Spacing="3">
+                                <PathIcon Data="{StaticResource Icon.Check}" Width="10" Height="10"
+                                          Foreground="{DynamicResource Brush.SuccessDefault}" />
+                                <TextBlock Text="{loc:Str Jobs_StateEnabled}"
+                                           Foreground="{DynamicResource Brush.SuccessDefault}" />
+                              </StackPanel>
+                            </Button>
+                            <Button DockPanel.Dock="Right"
+                                    Classes="job-activation-toggle paused"
+                                    Command="{Binding $parent[Window].DataContext.JobsVM.ToggleJobCommand}"
+                                    CommandParameter="{Binding}"
+                                    IsVisible="{Binding !IsEnabled}"
+                                    x:CompileBindings="False"
+                                    ToolTip.Tip="{loc:Str Jobs_EnableAction}"
+                                    AutomationProperties.Name="{Binding ActivationActionAutomationName}">
+                              <StackPanel Orientation="Horizontal" Spacing="3">
+                                <PathIcon Data="{StaticResource Icon.Pause}" Width="10" Height="10"
+                                          Foreground="{DynamicResource Brush.TextSecondary}" />
+                                <TextBlock Text="{loc:Str Jobs_StatePaused}"
+                                           Foreground="{DynamicResource Brush.TextSecondary}" />
+                              </StackPanel>
+                            </Button>
+                            <TextBlock Text="{Binding Name}"
+                                       FontSize="{DynamicResource Font.SizeBody}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center" />
                           </DockPanel>
-                          <TextBlock Text="{Binding Description}" FontSize="{DynamicResource Font.SizeCaption}"
+                          <TextBlock Text="{Binding Description}"
+                                     FontSize="{DynamicResource Font.SizeCaption}"
                                      Foreground="{DynamicResource Brush.TextTertiary}"
-                                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
-                          <TextBlock Text="{Binding TriggerDisplay}" FontSize="{DynamicResource Font.SizeCaption}"
+                                     TextTrimming="CharacterEllipsis"
+                                     TextWrapping="NoWrap" />
+                          <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
+                            <Border Classes="job-lifecycle-pill progress"
+                                    IsVisible="{Binding IsLifecycleInProgress}">
+                              <TextBlock Text="{Binding LifecycleDisplay}" />
+                            </Border>
+                            <Border Classes="job-lifecycle-pill completed"
+                                    IsVisible="{Binding IsLifecycleCompleted}">
+                              <TextBlock Text="{Binding LifecycleDisplay}" />
+                            </Border>
+                            <Border Classes="job-lifecycle-pill skipped"
+                                    IsVisible="{Binding IsLifecycleSkipped}">
+                              <TextBlock Text="{Binding LifecycleDisplay}" />
+                            </Border>
+                            <Border Classes="job-lifecycle-pill failed"
+                                    IsVisible="{Binding IsLifecycleFailed}">
+                              <TextBlock Text="{Binding LifecycleDisplay}" />
+                            </Border>
+                            <Border Classes="job-lifecycle-pill idle"
+                                    IsVisible="{Binding IsLifecycleIdle}">
+                              <TextBlock Text="{Binding LifecycleDisplay}" />
+                            </Border>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding TriggerDisplay}"
+                                       FontSize="{DynamicResource Font.SizeCaption}"
+                                       Foreground="{DynamicResource Brush.TextTertiary}"
+                                       TextTrimming="CharacterEllipsis"
+                                       VerticalAlignment="Center" />
+                          </Grid>
+                          <TextBlock Text="{Binding UpcomingRunDisplay}"
+                                     FontSize="10.5"
                                      Foreground="{DynamicResource Brush.TextTertiary}"
-                                     TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
+                                     TextTrimming="CharacterEllipsis"
+                                     TextWrapping="NoWrap" />
                         </StackPanel>
-                      </DockPanel>
-                    </Panel>
-                  </DataTemplate>
-                </ListBox.ItemTemplate>
-              </ListBox>
+                      </Panel>
+                    </DataTemplate>
+                  </ListBox.ItemTemplate>
+                </ListBox>
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Spacing="8"
+                            Margin="20"
+                            IsVisible="{Binding HasNoFilterResults}">
+                  <TextBlock Text="{loc:Str Jobs_NoFilterResults}"
+                             Classes="caption tertiary"
+                             TextAlignment="Center"
+                             TextWrapping="Wrap" />
+                  <Button Content="{loc:Str Jobs_ClearFilters}"
+                          Classes="subtle"
+                          Command="{Binding ResetFiltersCommand}"
+                          Padding="10,5"
+                          MinHeight="0" />
+                </StackPanel>
+              </Grid>
             </DockPanel>
           </Panel>
 

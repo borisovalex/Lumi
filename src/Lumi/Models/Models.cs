@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Text.Json.Serialization;
+using Lumi.Localization;
 
 namespace Lumi.Models;
 
@@ -368,16 +369,156 @@ public class BackgroundJob : INotifyPropertyChanged
     public int RunCount { get; set; }
 
     [JsonIgnore]
-    public string TriggerDisplay => TriggerType == BackgroundJobTriggerTypes.Script ? "Wake script" : "Time";
+    public string TriggerDisplay => TriggerType == BackgroundJobTriggerTypes.Script
+        ? Loc.Get("Jobs_TriggerScript")
+        : Loc.Get("Jobs_TriggerTime");
 
     [JsonIgnore]
-    public string StatusDisplay => IsEnabled ? LastRunStatus : LastRunStatus == BackgroundJobRunStatuses.Completed ? "Completed" : "Paused";
+    public string ActivationDisplay => IsEnabled
+        ? Loc.Get("Jobs_StateEnabled")
+        : Loc.Get("Jobs_StatePaused");
+
+    [JsonIgnore]
+    public string ActivationActionAutomationName => Loc.Get(
+        IsEnabled ? "Jobs_PauseNamed" : "Jobs_EnableNamed",
+        Name);
+
+    [JsonIgnore]
+    public string RunNowAutomationName => Loc.Get("Jobs_RunNowNamed", Name);
+
+    [JsonIgnore]
+    public string DeleteAutomationName => Loc.Get("Jobs_DeleteNamed", Name);
+
+    [JsonIgnore]
+    public string LifecycleDisplay
+    {
+        get
+        {
+            if (IsRunning)
+            {
+                return LastRunStatus switch
+                {
+                    BackgroundJobRunStatuses.Watching => Loc.Get("Jobs_LifecycleWatching"),
+                    BackgroundJobRunStatuses.Waiting => Loc.Get("Jobs_LifecycleWaiting"),
+                    _ => Loc.Get("Jobs_LifecycleRunning")
+                };
+            }
+
+            return LastRunStatus switch
+            {
+                BackgroundJobRunStatuses.Running => Loc.Get("Jobs_LifecycleInterrupted"),
+                BackgroundJobRunStatuses.Watching => Loc.Get("Jobs_LifecycleInterrupted"),
+                BackgroundJobRunStatuses.Waiting => Loc.Get("Jobs_LifecycleInterrupted"),
+                BackgroundJobRunStatuses.Completed => Loc.Get("Jobs_LifecycleCompleted"),
+                BackgroundJobRunStatuses.Skipped => Loc.Get("Jobs_LifecycleSkipped"),
+                BackgroundJobRunStatuses.Failed => Loc.Get("Jobs_LifecycleFailed"),
+                _ when RunCount == 0 => Loc.Get("Jobs_LifecycleNotRun"),
+                _ => Loc.Get("Jobs_LifecycleIdle")
+            };
+        }
+    }
+
+    [JsonIgnore]
+    public string UpcomingRunDisplay
+    {
+        get
+        {
+            if (IsRunning)
+                return Loc.Get("Jobs_RunInProgress");
+
+            if (!IsEnabled)
+                return Loc.Get("Jobs_AutomationPaused");
+
+            if (NextRunAt is { } nextRunAt)
+            {
+                return Loc.Get(
+                    "Jobs_NextRunAt",
+                    nextRunAt.ToLocalTime().ToString("g", Loc.Culture));
+            }
+
+            return TriggerType == BackgroundJobTriggerTypes.Script
+                ? Loc.Get("Jobs_RunWhenStarted")
+                : Loc.Get("Jobs_NoUpcomingRun");
+        }
+    }
+
+    [JsonIgnore]
+    public string LastRunTimeDisplay => LastRunAt is { } lastRunAt
+        ? Loc.Get("Jobs_LastRunAt", lastRunAt.ToLocalTime().ToString("g", Loc.Culture))
+        : Loc.Get("Jobs_NoCompletedRuns");
+
+    [JsonIgnore]
+    public string StatusDisplay => LifecycleDisplay;
+
+    [JsonIgnore]
+    public bool IsLifecycleInProgress => IsRunning;
+
+    [JsonIgnore]
+    public bool IsLifecycleInterrupted => !IsRunning
+        && LastRunStatus is BackgroundJobRunStatuses.Running
+            or BackgroundJobRunStatuses.Watching
+            or BackgroundJobRunStatuses.Waiting;
+
+    [JsonIgnore]
+    public bool IsLifecycleCompleted => !IsRunning
+        && LastRunStatus == BackgroundJobRunStatuses.Completed;
+
+    [JsonIgnore]
+    public bool IsLifecycleSkipped => !IsRunning
+        && LastRunStatus == BackgroundJobRunStatuses.Skipped;
+
+    [JsonIgnore]
+    public bool IsLifecycleFinished => IsLifecycleCompleted || IsLifecycleSkipped;
+
+    [JsonIgnore]
+    public bool IsLifecycleFailed => !IsRunning
+        && (LastRunStatus == BackgroundJobRunStatuses.Failed || IsLifecycleInterrupted);
+
+    [JsonIgnore]
+    public bool IsLifecycleNotRun => !IsRunning
+        && RunCount == 0
+        && LastRunStatus == BackgroundJobRunStatuses.Idle;
+
+    [JsonIgnore]
+    public bool IsLifecycleIdle => !IsLifecycleInProgress && !IsLifecycleFinished && !IsLifecycleFailed;
 
     [JsonIgnore]
     public bool IsRunning
     {
         get => _isRunning;
-        set { if (_isRunning == value) return; _isRunning = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsRunning))); }
+        set
+        {
+            if (_isRunning == value)
+                return;
+
+            _isRunning = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsRunning)));
+            NotifyPresentationStateChanged();
+        }
+    }
+
+    internal void NotifyPresentationStateChanged()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Name)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Description)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsEnabled)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(TriggerDisplay)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActivationDisplay)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ActivationActionAutomationName)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RunNowAutomationName)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DeleteAutomationName)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LifecycleDisplay)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(UpcomingRunDisplay)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LastRunTimeDisplay)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(StatusDisplay)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleInProgress)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleInterrupted)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleCompleted)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleSkipped)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleFinished)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleFailed)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleNotRun)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsLifecycleIdle)));
     }
 
     public event PropertyChangedEventHandler? PropertyChanged;

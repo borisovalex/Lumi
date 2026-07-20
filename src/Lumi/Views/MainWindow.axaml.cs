@@ -1897,6 +1897,18 @@ public partial class MainWindow : Window
                properties.PointerUpdateKind == PointerUpdateKind.LeftButtonPressed;
     }
 
+    private void OnJobRowPointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        var properties = e.GetCurrentPoint(this).Properties;
+        if (!properties.IsRightButtonPressed
+            && properties.PointerUpdateKind != PointerUpdateKind.RightButtonPressed)
+        {
+            return;
+        }
+
+        e.Handled = true;
+    }
+
     private void OnChatListBoxSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (_suppressSelectionSync) return;

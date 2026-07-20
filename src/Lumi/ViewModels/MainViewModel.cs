@@ -334,7 +334,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         JobsVM.JobsChanged += () =>
         {
             _backgroundJobService.Reschedule();
-            RefreshFeatureManagementUi();
+            RefreshFeatureManagementUi(refreshJobs: false);
         };
         JobsVM.OpenChatRequested += jobChatId => _ = OpenChatByIdAsync(jobChatId);
         _backgroundJobService.JobsChanged += OnBackgroundJobServiceJobsChanged;
@@ -488,7 +488,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private void OnChatFeatureManagementStateChanged()
     {
         _backgroundJobService.Reschedule();
-        RefreshFeatureManagementUi();
+        RefreshFeatureManagementUi(preserveJobsEditor: true);
     }
 
     private void OnComposerProjectFilterRequested(Guid? projectId)
@@ -675,10 +675,11 @@ public partial class MainViewModel : ObservableObject, IDisposable
             Projects.Add(p);
     }
 
-    private void RefreshFeatureManagementUi()
+    private void RefreshFeatureManagementUi(bool refreshJobs = true, bool preserveJobsEditor = false)
     {
         LoadProjects();
-        JobsVM.RefreshFromStore();
+        if (refreshJobs)
+            JobsVM.RefreshFromStore(preserveJobsEditor);
         ProjectsVM.RefreshFromStore();
         SkillsVM.RefreshFromStore();
         AgentsVM.RefreshFromStore();
@@ -722,7 +723,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         Dispatcher.UIThread.Post(() =>
         {
             if (!_isDisposed)
-                RefreshFeatureManagementUi();
+                RefreshFeatureManagementUi(preserveJobsEditor: true);
         });
     }
 
