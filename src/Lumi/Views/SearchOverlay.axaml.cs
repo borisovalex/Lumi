@@ -10,6 +10,7 @@ using Avalonia.Rendering.Composition;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using Lumi.ViewModels;
+using StrataTheme;
 
 namespace Lumi.Views;
 
@@ -306,7 +307,7 @@ public partial class SearchOverlay : UserControl
             var scrimVisual = ElementComposition.GetElementVisual(_scrim);
             if (scrimVisual?.Compositor is { } scrimCompositor)
             {
-                var fade = scrimCompositor.CreateScalarKeyFrameAnimation();
+                var fade = scrimCompositor.CreateStableScalarKeyFrameAnimation();
                 fade.InsertKeyFrame(0f, 0f);
                 fade.InsertKeyFrame(1f, 1f);
                 fade.Duration = TimeSpan.FromMilliseconds(140);
@@ -331,13 +332,13 @@ public partial class SearchOverlay : UserControl
 
         visual.CenterPoint = new System.Numerics.Vector3(width / 2f, 0f, 0f);
 
-        var scale = compositor.CreateVector3KeyFrameAnimation();
+        var scale = compositor.CreateStableVector3KeyFrameAnimation();
         scale.InsertKeyFrame(0f, new System.Numerics.Vector3(0.985f, 0.985f, 1f));
         scale.InsertKeyFrame(1f, new System.Numerics.Vector3(1f, 1f, 1f));
         scale.Duration = TimeSpan.FromMilliseconds(160);
         visual.StartAnimation("Scale", scale);
 
-        var opacity = compositor.CreateScalarKeyFrameAnimation();
+        var opacity = compositor.CreateStableScalarKeyFrameAnimation();
         opacity.InsertKeyFrame(0f, 0f);
         opacity.InsertKeyFrame(1f, 1f);
         opacity.Duration = TimeSpan.FromMilliseconds(140);

@@ -27,6 +27,7 @@ using Lumi.Localization;
 using Lumi.Models;
 using Lumi.Services;
 using Lumi.ViewModels;
+using StrataTheme;
 
 namespace Lumi.Views;
 
@@ -1643,7 +1644,7 @@ public partial class MainWindow : Window
     private static ImplicitAnimationCollection CreateNavButtonOffsetAnimation(CompositionVisual visual)
     {
         var compositor = visual.Compositor;
-        var offsetAnim = compositor.CreateVector3DKeyFrameAnimation();
+        var offsetAnim = compositor.CreateStableVector3DKeyFrameAnimation();
         offsetAnim.Target = "Offset";
         offsetAnim.InsertExpressionKeyFrame(1f, "this.FinalValue");
         offsetAnim.Duration = TimeSpan.FromMilliseconds(140);
@@ -1787,7 +1788,7 @@ public partial class MainWindow : Window
         visual.CenterPoint = new Avalonia.Vector3D(w / 2, h / 2, 0);
 
         var compositor = visual.Compositor;
-        var scaleAnim = compositor.CreateVector3DKeyFrameAnimation();
+        var scaleAnim = compositor.CreateStableVector3DKeyFrameAnimation();
         scaleAnim.Target = "Scale";
         scaleAnim.InsertKeyFrame(1f, targetScale);
         scaleAnim.Duration = duration;
@@ -2075,14 +2076,14 @@ public partial class MainWindow : Window
             var startOffset = target.BaseOffset + new Avalonia.Vector3D(0, ChatListRevealOffsetY, 0);
             var settleOffset = target.BaseOffset + new Avalonia.Vector3D(0, 1, 0);
 
-            var offsetAnim = compositor.CreateVector3DKeyFrameAnimation();
+            var offsetAnim = compositor.CreateStableVector3DKeyFrameAnimation();
             offsetAnim.Target = "Offset";
             offsetAnim.InsertKeyFrame(0f, startOffset);
             offsetAnim.InsertKeyFrame(0.72f, settleOffset);
             offsetAnim.InsertKeyFrame(1f, target.BaseOffset);
             offsetAnim.Duration = TimeSpan.FromMilliseconds(ChatListRevealDurationMs);
 
-            var opacityAnim = compositor.CreateScalarKeyFrameAnimation();
+            var opacityAnim = compositor.CreateStableScalarKeyFrameAnimation();
             opacityAnim.Target = "Opacity";
             opacityAnim.InsertKeyFrame(0f, 0f);
             opacityAnim.InsertKeyFrame(0.45f, 0.88f);
